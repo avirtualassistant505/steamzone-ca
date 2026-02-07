@@ -1,8 +1,11 @@
 import type { EstimateRecord } from './estimateEngine';
 
+export type EstimateDeliveryMode = 'customer' | 'internal';
+
 export interface EstimateEmailResult {
   success: boolean;
   message: string;
+  deliveryMode?: EstimateDeliveryMode;
 }
 
 export async function sendEstimateEmail(record: EstimateRecord): Promise<EstimateEmailResult> {
@@ -22,9 +25,9 @@ export async function sendEstimateEmail(record: EstimateRecord): Promise<Estimat
       body: JSON.stringify({ record }),
     });
 
-    let payload: { message?: string } = {};
+    let payload: { message?: string; deliveryMode?: EstimateDeliveryMode } = {};
     try {
-      payload = (await response.json()) as { message?: string };
+      payload = (await response.json()) as { message?: string; deliveryMode?: EstimateDeliveryMode };
     } catch {
       payload = {};
     }
@@ -41,6 +44,7 @@ export async function sendEstimateEmail(record: EstimateRecord): Promise<Estimat
     return {
       success: true,
       message: payload.message ?? 'Estimate email sent.',
+      deliveryMode: payload.deliveryMode,
     };
   } catch {
     return {
