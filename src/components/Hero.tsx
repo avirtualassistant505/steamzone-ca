@@ -2,7 +2,7 @@ import { ArrowRight } from 'lucide-react';
 
 export default function Hero() {
   return (
-    <div className="relative pt-20 bg-gradient-to-br from-blue-50 to-blue-100 overflow-hidden">
+    <div className="relative pt-24 md:pt-28 bg-gradient-to-br from-blue-50 to-blue-100 overflow-hidden">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-24 md:py-32">
         <div className="grid md:grid-cols-2 gap-12 items-center">
           <div>
@@ -16,10 +16,10 @@ export default function Hero() {
             </p>
             <div className="flex flex-col sm:flex-row gap-4">
               <a
-                href="#contact"
+                href="/estimate"
                 className="inline-flex items-center justify-center px-8 py-4 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition transform hover:scale-105 shadow-lg"
               >
-                Get a Free Quote
+                Free Estimate
                 <ArrowRight className="ml-2 h-5 w-5" />
               </a>
               <a

@@ -1,4 +1,5 @@
 import { Phone, Mail, MapPin } from 'lucide-react';
+import BrandLogo from './BrandLogo';
 
 export default function Footer() {
   return (
@@ -6,12 +7,7 @@ export default function Footer() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="grid md:grid-cols-4 gap-8 mb-8">
           <div className="md:col-span-2">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="bg-white/95 rounded-md p-2">
-                <img src="/brand/logo.png" alt="Steam Zone" className="h-7 w-auto" />
-              </div>
-              <span className="text-2xl font-bold">Steam Zone</span>
-            </div>
+            <BrandLogo variant="dark" size="footer" className="mb-4" href="/" />
             <p className="text-gray-400 mb-4">
               Your trusted local partner in Manitoba for professional carpet cleaning, window cleaning,
               and post-construction cleanup services.
@@ -29,18 +25,18 @@ export default function Footer() {
           <div>
             <h4 className="text-lg font-semibold mb-4">Services</h4>
             <ul className="space-y-2">
-              <li><a href="#services" className="text-gray-400 hover:text-white transition">Carpet Cleaning</a></li>
-              <li><a href="#services" className="text-gray-400 hover:text-white transition">Window Cleaning</a></li>
-              <li><a href="#services" className="text-gray-400 hover:text-white transition">Post-Construction</a></li>
+              <li><a href="/#services" className="text-gray-400 hover:text-white transition">Carpet Cleaning</a></li>
+              <li><a href="/#services" className="text-gray-400 hover:text-white transition">Window Cleaning</a></li>
+              <li><a href="/#services" className="text-gray-400 hover:text-white transition">Post-Construction</a></li>
             </ul>
           </div>
 
           <div>
             <h4 className="text-lg font-semibold mb-4">Quick Links</h4>
             <ul className="space-y-2">
-              <li><a href="#about" className="text-gray-400 hover:text-white transition">About Us</a></li>
-              <li><a href="#areas" className="text-gray-400 hover:text-white transition">Service Areas</a></li>
-              <li><a href="#contact" className="text-gray-400 hover:text-white transition">Contact</a></li>
+              <li><a href="/#about" className="text-gray-400 hover:text-white transition">About Us</a></li>
+              <li><a href="/#areas" className="text-gray-400 hover:text-white transition">Service Areas</a></li>
+              <li><a href="/#contact" className="text-gray-400 hover:text-white transition">Contact</a></li>
             </ul>
           </div>
         </div>
