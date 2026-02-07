@@ -1,6 +1,6 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { Resend } from 'resend';
-import { STEAM_ZONE_LOGO_BASE64 } from './steamZoneLogoBase64';
+import { STEAM_ZONE_LOGO_BASE64 } from '../server/steamZoneLogoBase64';
 
 interface IncomingRecord {
   quoteNumber?: string;
