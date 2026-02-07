@@ -1,6 +1,7 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { Resend } from 'resend';
-import { STEAM_ZONE_LOGO_BASE64 } from '../server/steamZoneLogoBase64';
+// Vercel's Node function build uses NodeNext-style ESM resolution; import the emitted .js path.
+import { STEAM_ZONE_LOGO_BASE64 } from '../server/steamZoneLogoBase64.js';
 
 interface IncomingRecord {
   quoteNumber?: string;
