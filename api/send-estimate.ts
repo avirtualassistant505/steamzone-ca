@@ -1,7 +1,5 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { Resend } from 'resend';
-// Vercel's Node function build uses NodeNext-style ESM resolution; import the emitted .js path.
-import { STEAM_ZONE_LOGO_BASE64 } from '../server/steamZoneLogoBase64.js';
 
 interface IncomingRecord {
   quoteNumber?: string;
@@ -60,6 +58,56 @@ interface PdfCardRow {
   label: string;
   value: string;
   tone?: PdfRowTone;
+}
+
+function hexColor(hex: string): PdfColor {
+  const value = hex.trim().replace('#', '');
+  if (!/^[0-9a-fA-F]{6}$/.test(value)) {
+    return rgb(0, 0, 0);
+  }
+
+  const r = parseInt(value.slice(0, 2), 16) / 255;
+  const g = parseInt(value.slice(2, 4), 16) / 255;
+  const b = parseInt(value.slice(4, 6), 16) / 255;
+  return rgb(r, g, b);
+}
+
+function roundedRectPath(x: number, y: number, width: number, height: number, radius: number): string {
+  const r = Math.max(0, Math.min(radius, width / 2, height / 2));
+  const x0 = x;
+  const y0 = y;
+  const x1 = x + width;
+  const y1 = y + height;
+  return [
+    `M ${x0 + r} ${y0}`,
+    `L ${x1 - r} ${y0}`,
+    `Q ${x1} ${y0} ${x1} ${y0 + r}`,
+    `L ${x1} ${y1 - r}`,
+    `Q ${x1} ${y1} ${x1 - r} ${y1}`,
+    `L ${x0 + r} ${y1}`,
+    `Q ${x0} ${y1} ${x0} ${y1 - r}`,
+    `L ${x0} ${y0 + r}`,
+    `Q ${x0} ${y0} ${x0 + r} ${y0}`,
+    'Z',
+  ].join(' ');
+}
+
+function roundedTopRectPath(x: number, y: number, width: number, height: number, radius: number): string {
+  const r = Math.max(0, Math.min(radius, width / 2, height));
+  const x0 = x;
+  const y0 = y;
+  const x1 = x + width;
+  const y1 = y + height;
+  return [
+    `M ${x0} ${y0}`,
+    `L ${x1} ${y0}`,
+    `L ${x1} ${y1 - r}`,
+    `Q ${x1} ${y1} ${x1 - r} ${y1}`,
+    `L ${x0 + r} ${y1}`,
+    `Q ${x0} ${y1} ${x0} ${y1 - r}`,
+    `L ${x0} ${y0}`,
+    'Z',
+  ].join(' ');
 }
 
 function money(value: number): string {
@@ -310,27 +358,34 @@ function renderEmailTemplate(input: EmailTemplateInput): string {
   `;
 }
 
-export async function buildQuotePdf(record: IncomingRecord): Promise<Uint8Array> {
+export async function buildQuotePdf(input: EmailTemplateInput): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.create();
   const page = pdfDoc.addPage([612, 792]);
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const logoImage = await pdfDoc.embedPng(Buffer.from(STEAM_ZONE_LOGO_BASE64, 'base64'));
 
-  const blue = rgb(0.19, 0.4, 0.83);
-  const dark = rgb(0.07, 0.07, 0.07);
-  const lightRule = rgb(0.8, 0.82, 0.86);
-  const quoteNumber = safeText(record.quoteNumber, 'Pending');
-  const service = serviceLabel(record.serviceType);
-  const durationRange = formatHoursRange(record.result?.durationLowHours, record.result?.durationHighHours);
-  const estimateRange = `${money(record.result?.estimateLow ?? 0)} - ${money(record.result?.estimateHigh ?? 0)}`;
-  const generatedAt = record.createdAt ? new Date(record.createdAt) : new Date();
-  const dateLabel = Number.isNaN(generatedAt.getTime())
-    ? new Date().toLocaleString('en-CA')
-    : generatedAt.toLocaleString('en-CA', {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      });
+  const palette = {
+    canvas: hexColor('#f1f5f9'),
+    cardBorder: hexColor('#dbe5f2'),
+    cardBackground: hexColor('#ffffff'),
+    headerBackground: hexColor('#103b85'),
+    headerKicker: hexColor('#bfdbfe'),
+    headerText: hexColor('#ffffff'),
+    headerSubText: hexColor('#dbeafe'),
+    rangeBackground: hexColor('#eef5ff'),
+    rangeBorder: hexColor('#bfdbfe'),
+    rangeKicker: hexColor('#1e3a8a'),
+    titleText: hexColor('#0f172a'),
+    bodyText: hexColor('#334155'),
+    mutedText: hexColor('#64748b'),
+    rowBorder: hexColor('#dbe5f2'),
+    rowAlt: hexColor('#f8fafc'),
+    labelCell: hexColor('#f1f5f9'),
+    ctaBackground: hexColor('#1d4ed8'),
+    dangerBackground: hexColor('#fff1f2'),
+    dangerBorder: hexColor('#fecdd3'),
+    dangerText: hexColor('#9f1239'),
+  };
 
   const wrapTextToWidth = (text: string, targetFont: typeof font, size: number, maxWidth: number): string[] => {
     const compact = text.trim();
@@ -361,268 +416,428 @@ export async function buildQuotePdf(record: IncomingRecord): Promise<Uint8Array>
     return lines.length > 0 ? lines : ['N/A'];
   };
 
-  const drawLabeledValue = (options: {
+  const drawParagraph = (options: {
+    text: string;
     x: number;
     y: number;
     width: number;
-    label: string;
-    value: string;
-    labelSize?: number;
-    valueSize?: number;
-    valueBold?: boolean;
-    valueColor?: ReturnType<typeof rgb>;
-    lineHeight?: number;
-    gapAfter?: number;
+    fontSize: number;
+    lineHeight: number;
+    color: PdfColor;
+    bold?: boolean;
   }): number => {
-    const labelSize = options.labelSize ?? 11;
-    const valueSize = options.valueSize ?? 11;
-    const lineHeight = options.lineHeight ?? 15;
-    const gapAfter = options.gapAfter ?? 2;
-    const labelText = `${options.label}:`;
-    const valueFont = options.valueBold ? boldFont : font;
-    const labelWidth = boldFont.widthOfTextAtSize(labelText, labelSize);
-    const valueX = options.x + labelWidth + 4;
-    const maxValueWidth = Math.max(30, options.width - (valueX - options.x));
-    const lines = wrapTextToWidth(options.value, valueFont, valueSize, maxValueWidth);
-
-    page.drawText(labelText, {
-      x: options.x,
-      y: options.y,
-      size: labelSize,
-      font: boldFont,
-      color: dark,
-    });
-
+    const targetFont = options.bold ? boldFont : font;
+    const lines = wrapTextToWidth(options.text, targetFont, options.fontSize, options.width);
     let currentY = options.y;
     for (const line of lines) {
       page.drawText(line, {
-        x: valueX,
+        x: options.x,
         y: currentY,
-        size: valueSize,
-        font: valueFont,
-        color: options.valueColor ?? dark,
+        size: options.fontSize,
+        font: targetFont,
+        color: options.color,
       });
-      currentY -= lineHeight;
+      currentY -= options.lineHeight;
     }
-
-    return currentY - gapAfter;
+    return currentY;
   };
 
-  const drawBullets = (options: {
+  const drawBulletList = (options: {
+    items: string[];
     x: number;
     y: number;
     width: number;
-    items: string[];
-    fontSize?: number;
-    lineHeight?: number;
-    color?: ReturnType<typeof rgb>;
+    fontSize: number;
+    lineHeight: number;
+    color: PdfColor;
+    maxY: number;
   }): number => {
-    const fontSize = options.fontSize ?? 11;
-    const lineHeight = options.lineHeight ?? 15;
-    const color = options.color ?? dark;
     let currentY = options.y;
-
     for (const item of options.items) {
-      if (currentY < 105) {
+      if (currentY <= options.maxY) {
         break;
       }
 
-      const lines = wrapTextToWidth(item, font, fontSize, options.width - 16);
+      const lines = wrapTextToWidth(item, font, options.fontSize, options.width - 14);
       page.drawText('•', {
         x: options.x,
         y: currentY,
-        size: fontSize + 2,
+        size: options.fontSize + 2,
         font,
-        color,
+        color: options.color,
       });
 
       let rowY = currentY;
       for (const line of lines) {
-        if (rowY < 105) {
+        if (rowY <= options.maxY) {
           break;
         }
 
         page.drawText(line, {
-          x: options.x + 14,
+          x: options.x + 12,
           y: rowY,
-          size: fontSize,
+          size: options.fontSize,
           font,
-          color,
+          color: options.color,
         });
-        rowY -= lineHeight;
+        rowY -= options.lineHeight;
       }
 
-      currentY -= Math.max(lines.length, 1) * lineHeight + 2;
+      currentY -= Math.max(1, lines.length) * options.lineHeight + 2;
     }
-
     return currentY;
   };
 
-  const logoWidth = 220;
-  const logoHeight = (logoImage.height / logoImage.width) * logoWidth;
-  page.drawImage(logoImage, {
-    x: 58,
-    y: 740 - logoHeight,
-    width: logoWidth,
-    height: logoHeight,
+  const drawCard = (options: {
+    title: string;
+    items: string[];
+    tone: 'neutral' | 'danger';
+    x: number;
+    yTop: number;
+    width: number;
+    maxY: number;
+  }): number => {
+    if (options.items.length === 0) {
+      return options.yTop;
+    }
+
+    const paddingX = 14;
+    const paddingTop = 12;
+    const titleSize = 11.5;
+    const bodySize = 10.8;
+    const bodyLine = 14;
+    const radius = 10;
+
+    const background = options.tone === 'danger' ? palette.dangerBackground : palette.rowAlt;
+    const border = options.tone === 'danger' ? palette.dangerBorder : palette.cardBorder;
+    const titleColor = options.tone === 'danger' ? palette.dangerText : palette.rangeKicker;
+    const bodyColor = options.tone === 'danger' ? palette.dangerText : palette.bodyText;
+
+    const itemLines = options.items.flatMap((item) => wrapTextToWidth(item, font, bodySize, options.width - paddingX * 2 - 12));
+    const listHeight = Math.max(1, itemLines.length) * bodyLine;
+    const minHeight = paddingTop + 16 + 10 + listHeight + 12;
+    const height = Math.max(minHeight, 64);
+    const y = options.yTop - height;
+    if (y <= options.maxY) {
+      return options.yTop;
+    }
+
+    page.drawSvgPath(roundedRectPath(options.x, y, options.width, height, radius), {
+      color: background,
+      borderColor: border,
+      borderWidth: 1,
+    });
+
+    const titleY = options.yTop - paddingTop - titleSize;
+    page.drawText(options.title, {
+      x: options.x + paddingX,
+      y: titleY,
+      size: titleSize,
+      font: boldFont,
+      color: titleColor,
+    });
+
+    const listStartY = titleY - 16;
+    drawBulletList({
+      items: options.items,
+      x: options.x + paddingX,
+      y: listStartY,
+      width: options.width - paddingX * 2,
+      fontSize: bodySize,
+      lineHeight: bodyLine,
+      color: bodyColor,
+      maxY: y + 12,
+    });
+
+    return y - 14;
+  };
+
+  const drawDetailsTable = (options: { rows: EmailDetailRow[]; x: number; yTop: number; width: number; maxY: number }): number => {
+    const rows = options.rows.filter((row) => row.label.trim().length > 0);
+    if (rows.length === 0) {
+      return options.yTop;
+    }
+
+    const paddingX = 14;
+    const paddingY = 10;
+    const fontSize = 10.8;
+    const lineHeight = 14;
+    const radius = 10;
+    const labelColWidth = Math.round(options.width * 0.34);
+    const valueColWidth = options.width - labelColWidth;
+
+    const measured = rows.map((row) => {
+      const labelLines = wrapTextToWidth(row.label, boldFont, fontSize, labelColWidth - paddingX * 2);
+      const valueLines = wrapTextToWidth(row.value, font, fontSize, valueColWidth - paddingX * 2);
+      const lines = Math.max(labelLines.length, valueLines.length);
+      const height = paddingY * 2 + lines * lineHeight;
+      return { row, labelLines, valueLines, height };
+    });
+
+    const totalHeight = measured.reduce((sum, row) => sum + row.height, 0);
+    const y = options.yTop - totalHeight;
+    if (y <= options.maxY) {
+      return options.yTop;
+    }
+
+    page.drawSvgPath(roundedRectPath(options.x, y, options.width, totalHeight, radius), {
+      color: palette.cardBackground,
+      borderColor: palette.cardBorder,
+      borderWidth: 1,
+    });
+
+    let rowTop = options.yTop;
+    measured.forEach((entry, index) => {
+      const rowBottom = rowTop - entry.height;
+      const alt = index % 2 === 1;
+
+      page.drawRectangle({
+        x: options.x,
+        y: rowBottom,
+        width: options.width,
+        height: entry.height,
+        color: alt ? palette.rowAlt : palette.cardBackground,
+      });
+      page.drawRectangle({
+        x: options.x,
+        y: rowBottom,
+        width: labelColWidth,
+        height: entry.height,
+        color: palette.labelCell,
+      });
+
+      if (index < measured.length - 1) {
+        page.drawLine({
+          start: { x: options.x, y: rowBottom },
+          end: { x: options.x + options.width, y: rowBottom },
+          thickness: 1,
+          color: palette.rowBorder,
+        });
+      }
+
+      const textStartY = rowTop - paddingY - fontSize;
+      const labelX = options.x + paddingX;
+      const valueX = options.x + labelColWidth + paddingX;
+
+      entry.labelLines.forEach((line, lineIndex) => {
+        page.drawText(line, {
+          x: labelX,
+          y: textStartY - lineIndex * lineHeight,
+          size: fontSize,
+          font: boldFont,
+          color: palette.bodyText,
+        });
+      });
+
+      entry.valueLines.forEach((line, lineIndex) => {
+        page.drawText(line, {
+          x: valueX,
+          y: textStartY - lineIndex * lineHeight,
+          size: fontSize,
+          font,
+          color: palette.titleText,
+        });
+      });
+
+      rowTop = rowBottom;
+    });
+
+    return y - 16;
+  };
+
+  page.drawRectangle({ x: 0, y: 0, width: 612, height: 792, color: palette.canvas });
+
+  const cardWidth = 540;
+  const cardHeight = 720;
+  const cardX = Math.round((612 - cardWidth) / 2);
+  const cardY = Math.round((792 - cardHeight) / 2);
+  const cardRadius = 14;
+  const contentX = cardX + 28;
+  const contentWidth = cardWidth - 56;
+  const footerPadding = 24;
+  const footerFontSize = 9.6;
+  const footerLineHeight = 13;
+
+  page.drawSvgPath(roundedRectPath(cardX, cardY, cardWidth, cardHeight, cardRadius), {
+    color: palette.cardBackground,
+    borderColor: palette.cardBorder,
+    borderWidth: 1,
   });
 
-  page.drawText('ESTIMATE PROPOSAL', {
-    x: 314,
-    y: 724,
-    size: 24,
+  const headerHeight = 132;
+  const cardTop = cardY + cardHeight;
+  const headerY = cardTop - headerHeight;
+  page.drawSvgPath(roundedTopRectPath(cardX, headerY, cardWidth, headerHeight, cardRadius), {
+    color: palette.headerBackground,
+  });
+
+  const headerKickerSize = 9.5;
+  const headerHeadingSize = 18.8;
+  const headerSubSize = 11.2;
+  let cursorY = cardTop - 24;
+  page.drawText('STEAM ZONE', {
+    x: contentX,
+    y: cursorY - headerKickerSize,
+    size: headerKickerSize,
     font: boldFont,
-    color: blue,
+    color: palette.headerKicker,
+  });
+  cursorY -= headerKickerSize + 10;
+  cursorY = drawParagraph({
+    text: input.heading,
+    x: contentX,
+    y: cursorY - headerHeadingSize,
+    width: contentWidth,
+    fontSize: headerHeadingSize,
+    lineHeight: 22,
+    color: palette.headerText,
+    bold: true,
+  });
+  cursorY -= 6;
+  drawParagraph({
+    text: input.subheading,
+    x: contentX,
+    y: cursorY - headerSubSize,
+    width: contentWidth,
+    fontSize: headerSubSize,
+    lineHeight: 15,
+    color: palette.headerSubText,
   });
 
-  page.drawText(`Quote ${quoteNumber}`, {
-    x: 62,
-    y: 678,
-    size: 14,
+  cursorY = headerY - 18;
+
+  const rangeCardPaddingX = 16;
+  const rangeCardPaddingTop = 14;
+  const rangeCardRadius = 10;
+  const rangeCardHeight = 112;
+  const rangeCardY = cursorY - rangeCardHeight;
+
+  page.drawSvgPath(roundedRectPath(contentX, rangeCardY, contentWidth, rangeCardHeight, rangeCardRadius), {
+    color: palette.rangeBackground,
+    borderColor: palette.rangeBorder,
+    borderWidth: 1,
+  });
+
+  let rangeY = cursorY - rangeCardPaddingTop;
+  const rangeKickerSize = 9.2;
+  page.drawText('ESTIMATE RANGE', {
+    x: contentX + rangeCardPaddingX,
+    y: rangeY - rangeKickerSize,
+    size: rangeKickerSize,
     font: boldFont,
-    color: dark,
+    color: palette.rangeKicker,
   });
+  rangeY -= rangeKickerSize + 10;
 
-  const dateLabelText = `Date: ${dateLabel}`;
-  const dateLabelWidth = boldFont.widthOfTextAtSize(dateLabelText, 10.5);
-  page.drawText(dateLabelText, {
-    x: 550 - dateLabelWidth,
-    y: 678,
-    size: 10.5,
+  const rangeSize = 22.4;
+  page.drawText(input.estimateRange, {
+    x: contentX + rangeCardPaddingX,
+    y: rangeY - rangeSize,
+    size: rangeSize,
     font: boldFont,
-    color: dark,
+    color: palette.titleText,
   });
+  rangeY -= rangeSize + 10;
 
-  page.drawLine({
-    start: { x: 62, y: 665 },
-    end: { x: 550, y: 665 },
-    thickness: 1,
-    color: lightRule,
-  });
-
-  const leftX = 62;
-  const rightX = 315;
-  const leftWidth = 228;
-  const rightWidth = 235;
-
-  page.drawText('ESTIMATE SUMMARY', { x: leftX, y: 638, size: 12, font: boldFont, color: dark });
-  let leftY = drawLabeledValue({
-    x: leftX,
-    y: 612,
-    width: leftWidth,
-    label: 'Range',
-    value: estimateRange,
-    valueSize: 16,
-    valueBold: true,
-    valueColor: rgb(0.04, 0.17, 0.37),
-    lineHeight: 17,
-    gapAfter: 5,
-  });
-  leftY = drawLabeledValue({ x: leftX, y: leftY, width: leftWidth, label: 'Duration', value: durationRange });
-  leftY = drawLabeledValue({
-    x: leftX,
-    y: leftY,
-    width: leftWidth,
-    label: 'Subtotal',
-    value: money(record.result?.subtotal ?? 0),
-  });
-  leftY = drawLabeledValue({
-    x: leftX,
-    y: leftY,
-    width: leftWidth,
-    label: 'Confidence',
-    value: safeText(record.result?.confidence),
-  });
-  leftY = drawLabeledValue({
-    x: leftX,
-    y: leftY,
-    width: leftWidth,
-    label: 'Zone',
-    value: `${zoneLabel(record.zone)}${record.postalCode ? ` (${record.postalCode})` : ''}`,
-  });
-  drawLabeledValue({
-    x: leftX,
-    y: leftY,
-    width: leftWidth,
-    label: 'Next Step',
-    value: safeText(record.result?.bookingMode),
-  });
-
-  page.drawText('CUSTOMER', { x: rightX, y: 638, size: 12, font: boldFont, color: dark });
-  let rightY = drawLabeledValue({
-    x: rightX,
-    y: 612,
-    width: rightWidth,
-    label: 'Name',
-    value: safeText(record.contact?.fullName),
-  });
-  rightY = drawLabeledValue({
-    x: rightX,
-    y: rightY,
-    width: rightWidth,
-    label: 'Phone',
-    value: safeText(record.contact?.phone),
-  });
-  rightY = drawLabeledValue({
-    x: rightX,
-    y: rightY,
-    width: rightWidth,
-    label: 'Email',
-    value: safeText(record.contact?.email),
-  });
-  rightY = drawLabeledValue({
-    x: rightX,
-    y: rightY,
-    width: rightWidth,
-    label: 'Address',
-    value: safeText(record.contact?.address, 'Not provided'),
-  });
-  rightY = drawLabeledValue({
-    x: rightX,
-    y: rightY,
-    width: rightWidth,
-    label: 'Service',
-    value: service,
-  });
-
-  page.drawText('PROJECT NOTES', { x: rightX, y: rightY - 18, size: 12, font: boldFont, color: dark });
-  const notesEndY = drawBullets({
-    x: rightX + 4,
-    y: rightY - 42,
-    width: rightWidth,
-    items: record.result?.notes ?? [],
-  });
-
-  page.drawText('ITEMS REQUIRING CONFIRMATION', {
-    x: rightX,
-    y: notesEndY - 18,
-    size: 12,
-    font: boldFont,
-    color: dark,
-  });
-  drawBullets({
-    x: rightX + 4,
-    y: notesEndY - 42,
-    width: rightWidth,
-    items: record.result?.redFlags ?? [],
-    color: rgb(0.62, 0.12, 0.2),
-  });
-
-  page.drawLine({
-    start: { x: 62, y: 62 },
-    end: { x: 550, y: 62 },
-    thickness: 1,
-    color: lightRule,
-  });
-
-  const footerText =
-    'Steam Zone Cleaning Services | Phone: (431) 205-3909 | Email: info@steamzone.ca | Address: Steinbach, MB, Canada';
-  page.drawText(footerText, {
-    x: 62,
-    y: 43,
-    size: 10,
+  const bodyLineSize = 10.9;
+  page.drawText(`Estimated Duration: ${input.durationRange}`, {
+    x: contentX + rangeCardPaddingX,
+    y: rangeY - bodyLineSize,
+    size: bodyLineSize,
     font,
-    color: dark,
+    color: hexColor('#1e293b'),
+  });
+  rangeY -= bodyLineSize + 10;
+  page.drawText(`Quote Number: ${input.quoteNumber}`, {
+    x: contentX + rangeCardPaddingX,
+    y: rangeY - bodyLineSize,
+    size: bodyLineSize,
+    font,
+    color: hexColor('#1e293b'),
+  });
+
+  cursorY = rangeCardY - 18;
+
+  cursorY = drawParagraph({
+    text: input.intro,
+    x: contentX,
+    y: cursorY - 11.4,
+    width: contentWidth,
+    fontSize: 11.4,
+    lineHeight: 16,
+    color: palette.bodyText,
+  }) - 14;
+
+  const footerTextLines = wrapTextToWidth(input.footerLine, font, footerFontSize, contentWidth);
+  const footerHeight = Math.max(1, footerTextLines.length) * footerLineHeight;
+  const footerY = cardY + footerPadding;
+  const maxContentY = footerY + footerHeight + 16;
+
+  cursorY = drawDetailsTable({
+    rows: input.detailRows,
+    x: contentX,
+    yTop: cursorY,
+    width: contentWidth,
+    maxY: maxContentY,
+  });
+
+  cursorY = drawCard({
+    title: 'Project Notes',
+    items: input.notes,
+    tone: 'neutral',
+    x: contentX,
+    yTop: cursorY,
+    width: contentWidth,
+    maxY: maxContentY,
+  });
+
+  cursorY = drawCard({
+    title: 'Items Requiring Confirmation',
+    items: input.redFlags,
+    tone: 'danger',
+    x: contentX,
+    yTop: cursorY,
+    width: contentWidth,
+    maxY: maxContentY,
+  });
+
+  if (input.cta && cursorY - 52 > maxContentY) {
+    const buttonWidth = Math.min(320, Math.max(180, boldFont.widthOfTextAtSize(input.cta.label, 11.5) + 36));
+    const buttonHeight = 28;
+    const buttonX = contentX;
+    const buttonY = cursorY - buttonHeight - 6;
+    page.drawSvgPath(roundedRectPath(buttonX, buttonY, buttonWidth, buttonHeight, 8), { color: palette.ctaBackground });
+    page.drawText(input.cta.label, {
+      x: buttonX + 16,
+      y: buttonY + 9,
+      size: 11.5,
+      font: boldFont,
+      color: palette.headerText,
+    });
+
+    cursorY = buttonY - 12;
+    if (input.cta.helper && cursorY - 26 > maxContentY) {
+      cursorY =
+        drawParagraph({
+          text: input.cta.helper,
+          x: contentX,
+          y: cursorY - 9.8,
+          width: contentWidth,
+          fontSize: 9.8,
+          lineHeight: 13,
+          color: hexColor('#475569'),
+        }) - 10;
+    }
+  }
+
+  footerTextLines.forEach((line, index) => {
+    page.drawText(line, {
+      x: contentX,
+      y: footerY + (footerTextLines.length - 1 - index) * footerLineHeight,
+      size: footerFontSize,
+      font,
+      color: palette.mutedText,
+    });
   });
 
   return pdfDoc.save();
@@ -669,7 +884,6 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    const pdfBytes = await buildQuotePdf(record);
     const resend = new Resend(resendApiKey);
     const quoteNumber = safeText(record.quoteNumber, 'Pending');
     const durationRange = formatHoursRange(record.result?.durationLowHours, record.result?.durationHighHours);
@@ -685,8 +899,8 @@ export default async function handler(req: any, res: any) {
       ? `New Steam Zone estimate lead ${quoteNumber}`.trim()
       : `Your Steam Zone Estimate ${quoteNumber}`.trim();
 
-    const html = usesResendOnboardingSender
-      ? renderEmailTemplate({
+    const templateInput: EmailTemplateInput = usesResendOnboardingSender
+      ? {
           preheader: `New estimate lead ${quoteNumber} from ${safeText(record.contact.fullName)}.`,
           heading: 'New Estimate Lead',
           subheading: 'A customer submitted a live estimate request from steamzone.ca.',
@@ -711,8 +925,8 @@ export default async function handler(req: any, res: any) {
             href: `mailto:${safeText(record.contact.email)}?subject=${encodeURIComponent(`Steam Zone estimate ${quoteNumber}`)}`,
             helper: 'This opens your default email app with the customer as recipient.',
           },
-        })
-      : renderEmailTemplate({
+        }
+      : {
           preheader: `Your Steam Zone estimate ${quoteNumber} is ready.`,
           heading: 'Your Steam Zone Estimate',
           subheading: 'Thanks for requesting an instant quote. A PDF copy is attached for your records.',
@@ -739,7 +953,10 @@ export default async function handler(req: any, res: any) {
             href: 'tel:+14312053909',
             helper: 'Prefer email? Just hit reply and we will follow up quickly.',
           },
-        });
+        };
+
+    const html = renderEmailTemplate(templateInput);
+    const pdfBytes = await buildQuotePdf(templateInput);
 
     const text = usesResendOnboardingSender
       ? [
