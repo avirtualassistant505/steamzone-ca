@@ -6,6 +6,8 @@ type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown
 
 const postalCodeRegex = /^[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d$/;
 const idempotencyKeyRegex = /^[A-Za-z0-9._:-]{8,200}$/;
+const ghlBaseUrlDefault = 'https://services.leadconnectorhq.com';
+const ghlApiVersionDefault = '2021-07-28';
 
 type EngineModule = {
   createDefaultPricingConfig: () => PricingConfig;
@@ -40,6 +42,21 @@ async function getMailer(): Promise<MailerModule> {
 
 function safeString(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback;
+}
+
+function env(name: string): string | null {
+  const raw = process.env[name];
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  return trimmed ? trimmed : null;
+}
+
+function finiteNumber(value: unknown): number {
+  const num = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function normalizeKey(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 function headerValue(req: ApiRequest, name: string): string | null {
@@ -288,10 +305,266 @@ async function storeEstimateRecordWithIdempotency(
   }
 }
 
-async function postToGhl(record: EstimateRecord): Promise<{ posted: boolean }> {
+type GhlResult = { posted: boolean; mode?: 'api' | 'webhook'; contactId?: string; opportunityId?: string; error?: string };
+
+type GhlClient = {
+  request: (path: string, options?: { method?: string; query?: Record<string, unknown>; body?: unknown }) => Promise<unknown>;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object') return null;
+  return value as Record<string, unknown>;
+}
+
+function makeGhlClientFromEnv(): { ok: true; ghl: GhlClient; locationId: string; expectedLocationName?: string } | { ok: false } {
+  const token = env('GHL_PRIVATE_INTEGRATION_TOKEN') ?? env('GHL_ACCESS_TOKEN');
+  const locationId = env('GHL_LOCATION_ID');
+  if (!token || !locationId) {
+    return { ok: false };
+  }
+
+  const baseUrl = (env('GHL_BASE_URL') ?? ghlBaseUrlDefault).replace(/\/+$/, '');
+  const version = env('GHL_API_VERSION') ?? ghlApiVersionDefault;
+  const expectedLocationName = env('GHL_EXPECT_LOCATION_NAME') ?? undefined;
+
+  const request: GhlClient['request'] = async (path, options = {}) => {
+    const url = new URL(baseUrl + (path.startsWith('/') ? path : `/${path}`));
+    if (options.query) {
+      for (const [k, v] of Object.entries(options.query)) {
+        if (v === undefined || v === null || v === '') continue;
+        url.searchParams.set(k, String(v));
+      }
+    }
+
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      Authorization: `Bearer ${token}`,
+      Version: version,
+    };
+    if (options.body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+    }
+
+    const res = await fetch(url, {
+      method: options.method ?? 'GET',
+      headers,
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+    });
+
+    const contentType = res.headers.get('content-type') || '';
+    const isJson = contentType.includes('application/json');
+    const payload = isJson ? await res.json().catch(() => null) : await res.text().catch(() => '');
+
+    if (!res.ok) {
+      const detail = isJson ? JSON.stringify(payload) : String(payload);
+      throw new Error(`GHL API error ${res.status} ${res.statusText} for ${options.method ?? 'GET'} ${url.toString()}\n${detail}`);
+    }
+
+    return payload;
+  };
+
+  return { ok: true, ghl: { request }, locationId, expectedLocationName };
+}
+
+let ghlCustomFieldIdCache: { locationId: string; map: Map<string, string>; fetchedAt: number } | null = null;
+
+function extractLocationName(payload: unknown): string | null {
+  const p = asRecord(payload);
+  if (!p) return null;
+  const location = asRecord(p['location']);
+  const fromLocation = location && typeof location['name'] === 'string' ? (location['name'] as string) : null;
+  const fromRoot = typeof p['name'] === 'string' ? (p['name'] as string) : null;
+  const data = asRecord(p['data']);
+  const fromData = data && typeof data['name'] === 'string' ? (data['name'] as string) : null;
+  return fromLocation ?? fromRoot ?? fromData ?? null;
+}
+
+async function getGhlCustomFieldIdsByName(ghl: GhlClient, locationId: string): Promise<Map<string, string>> {
+  const ttlMs = 15 * 60 * 1000;
+  if (ghlCustomFieldIdCache && ghlCustomFieldIdCache.locationId === locationId && Date.now() - ghlCustomFieldIdCache.fetchedAt < ttlMs) {
+    return ghlCustomFieldIdCache.map;
+  }
+
+  // Legacy endpoint that supports Contact custom fields.
+  const payload = await ghl.request(`/locations/${locationId}/customFields`, { query: { model: 'contact' } });
+  const payloadObj = asRecord(payload);
+  const candidate =
+    payloadObj?.['customFields'] ?? payloadObj?.['data'] ?? payloadObj?.['items'] ?? payloadObj?.['results'] ?? payload;
+  const list = Array.isArray(candidate) ? candidate : [];
+  const map = new Map<string, string>();
+  for (const f of Array.isArray(list) ? list : []) {
+    const rec = asRecord(f);
+    const name = rec && typeof rec['name'] === 'string' ? (rec['name'] as string) : null;
+    const id = rec && typeof rec['id'] === 'string' ? (rec['id'] as string) : null;
+    if (!name || !id) continue;
+    map.set(normalizeKey(String(name)), String(id));
+  }
+
+  ghlCustomFieldIdCache = { locationId, map, fetchedAt: Date.now() };
+  return map;
+}
+
+async function syncToGhlViaApi(record: EstimateRecord): Promise<GhlResult> {
+  const cfg = makeGhlClientFromEnv();
+  if (!cfg.ok) {
+    return { posted: false, mode: 'api', error: 'missing_env' };
+  }
+
+  const { ghl, locationId, expectedLocationName } = cfg;
+
+  try {
+    if (expectedLocationName) {
+      const locPayload = await ghl.request(`/locations/${locationId}`);
+      const actualName = extractLocationName(locPayload);
+      if (!actualName || normalizeKey(actualName) !== normalizeKey(expectedLocationName)) {
+        return { posted: false, mode: 'api', error: `location_mismatch:${actualName ?? 'UNKNOWN'}` };
+      }
+    }
+
+    const engine = await getEngine();
+    const contactName = record.contact.fullName?.trim() ?? '';
+    const [firstName, ...rest] = contactName.split(/\s+/).filter(Boolean);
+    const lastName = rest.length > 0 ? rest.join(' ') : undefined;
+
+    const cfIds = await getGhlCustomFieldIdsByName(ghl, locationId);
+    const customFields: Array<{ id: string; value: string }> = [];
+    const setCF = (name: string, value: unknown) => {
+      const id = cfIds.get(normalizeKey(name));
+      if (!id) return;
+      if (value === undefined || value === null || value === '') return;
+      customFields.push({ id, value: String(value) });
+    };
+
+    const serviceLabel = engine.formatServiceLabel(record.serviceType);
+    const zoneLabel = engine.formatZoneLabel(record.zone as WindowZone);
+
+    setCF('service_type', serviceLabel);
+    setCF('travel_zone', zoneLabel);
+    setCF('quote_number', record.quoteNumber);
+    setCF('estimate_low', record.result.estimateLow);
+    setCF('estimate_high', record.result.estimateHigh);
+    setCF('duration_low_hours', record.result.durationLowHours);
+    setCF('duration_high_hours', record.result.durationHighHours);
+    setCF('confidence', record.result.confidence);
+    setCF('booking_mode', record.result.bookingMode);
+    setCF('red_flags', (record.result.redFlags ?? []).join('\n'));
+    setCF('estimate_notes', (record.result.notes ?? []).join('\n'));
+    setCF('wizard_answers_json', JSON.stringify(record.answers ?? {}));
+
+    const tags: string[] = [];
+    tags.push('estimate_new');
+    tags.push(record.result.confidence === 'green' ? 'estimate_green' : record.result.confidence === 'yellow' ? 'estimate_yellow' : 'estimate_red');
+    tags.push(record.utm && Object.keys(record.utm).length > 0 ? 'source_ai_estimate' : 'source_website_estimate');
+
+    const upsertPayload = await ghl.request('/contacts/upsert', {
+      method: 'POST',
+      body: {
+        locationId,
+        firstName: firstName || undefined,
+        lastName,
+        name: contactName || undefined,
+        email: record.contact.email || undefined,
+        phone: record.contact.phone || undefined,
+        postalCode: record.postalCode || undefined,
+        tags,
+        customFields,
+      },
+    });
+
+    const upsertObj = asRecord(upsertPayload);
+    const contactObj = asRecord(upsertObj?.['contact']);
+    const contactId = contactObj && typeof contactObj['id'] === 'string' ? (contactObj['id'] as string) : null;
+    if (!contactId) {
+      return { posted: false, mode: 'api', error: 'contact_upsert_failed' };
+    }
+
+    const pipelinesPayload = await ghl.request('/opportunities/pipelines', { query: { locationId } });
+    const pipelinesObj = asRecord(pipelinesPayload);
+    const rawPipelines = Array.isArray(pipelinesObj?.['pipelines']) ? (pipelinesObj?.['pipelines'] as unknown[]) : [];
+    const pipelines = rawPipelines
+      .map((item) => {
+        const rec = asRecord(item);
+        const id = rec && typeof rec['id'] === 'string' ? (rec['id'] as string) : null;
+        const name = rec && typeof rec['name'] === 'string' ? (rec['name'] as string) : null;
+        const rawStages = rec && Array.isArray(rec['stages']) ? (rec['stages'] as unknown[]) : [];
+        const stages = rawStages
+          .map((s) => {
+            const srec = asRecord(s);
+            const sid = srec && typeof srec['id'] === 'string' ? (srec['id'] as string) : null;
+            const sname = srec && typeof srec['name'] === 'string' ? (srec['name'] as string) : null;
+            return sid && sname ? { id: sid, name: sname } : null;
+          })
+          .filter((s): s is { id: string; name: string } => Boolean(s));
+        return id && name ? { id, name, stages } : null;
+      })
+      .filter((p): p is { id: string; name: string; stages: Array<{ id: string; name: string }> } => Boolean(p));
+
+    const pipelineNameWanted = env('GHL_PIPELINE_NAME') ?? 'Steam Zone – Jobs';
+    const stageNameWanted = env('GHL_STAGE_NAME_DEFAULT') ?? 'New Lead';
+    const pipeline =
+      pipelines.find((p) => normalizeKey(p.name) === normalizeKey(pipelineNameWanted)) ??
+      pipelines.find((p) => normalizeKey(p.name).includes('steam zone')) ??
+      pipelines[0];
+    const stages = pipeline?.stages ?? [];
+    const stage = stages.find((s) => normalizeKey(s.name) === normalizeKey(stageNameWanted)) ?? stages[0];
+
+    const pipelineId = pipeline?.id;
+    const pipelineStageId = stage?.id;
+    if (!pipelineId || !pipelineStageId) {
+      return { posted: true, mode: 'api', contactId, error: 'pipeline_missing' };
+    }
+
+    const oppName = `Estimate ${record.quoteNumber}`;
+    const existing = await ghl.request('/opportunities/search', {
+      method: 'POST',
+      body: { locationId, query: record.quoteNumber, limit: 5 },
+    });
+    const existingObj = asRecord(existing);
+    const rawOpps = Array.isArray(existingObj?.['opportunities']) ? (existingObj?.['opportunities'] as unknown[]) : [];
+    const existingOpp = rawOpps
+      .map((o) => {
+        const rec = asRecord(o);
+        const id = rec && typeof rec['id'] === 'string' ? (rec['id'] as string) : null;
+        const name = rec && typeof rec['name'] === 'string' ? (rec['name'] as string) : null;
+        return id && name ? { id, name } : null;
+      })
+      .filter((o): o is { id: string; name: string } => Boolean(o))
+      .find((o) => o.name.includes(record.quoteNumber));
+
+    let opportunityId: string | undefined;
+    if (existingOpp?.id) {
+      opportunityId = String(existingOpp.id);
+    } else {
+      const created = await ghl.request('/opportunities/', {
+        method: 'POST',
+        body: {
+          locationId,
+          contactId,
+          name: oppName,
+          pipelineId,
+          pipelineStageId,
+          status: 'open',
+          monetaryValue: Math.round((finiteNumber(record.result.estimateLow) + finiteNumber(record.result.estimateHigh)) / 2),
+        },
+      });
+      const createdObj = asRecord(created);
+      const createdOpp = asRecord(createdObj?.['opportunity']);
+      const createdId = createdOpp && typeof createdOpp['id'] === 'string' ? (createdOpp['id'] as string) : null;
+      if (createdId) {
+        opportunityId = String(createdId);
+      }
+    }
+
+    return { posted: true, mode: 'api', contactId: String(contactId), opportunityId };
+  } catch (error) {
+    return { posted: false, mode: 'api', error: error instanceof Error ? error.message : 'unknown_error' };
+  }
+}
+
+async function postToGhlWebhook(record: EstimateRecord): Promise<GhlResult> {
   const url = process.env.GHL_INBOUND_WEBHOOK_URL?.trim();
   if (!url) {
-    return { posted: false };
+    return { posted: false, mode: 'webhook', error: 'missing_env' };
   }
 
   const secret = process.env.GHL_WEBHOOK_SECRET?.trim();
@@ -342,10 +615,21 @@ async function postToGhl(record: EstimateRecord): Promise<{ posted: boolean }> {
         utm: record.utm,
       }),
     });
-    return { posted: response.ok };
+    return { posted: response.ok, mode: 'webhook' };
   } catch {
-    return { posted: false };
+    return { posted: false, mode: 'webhook' };
   }
+}
+
+async function syncToGhl(record: EstimateRecord): Promise<GhlResult> {
+  const apiCfg = makeGhlClientFromEnv();
+  if (apiCfg.ok) {
+    return syncToGhlViaApi(record);
+  }
+  if (process.env.GHL_INBOUND_WEBHOOK_URL?.trim()) {
+    return postToGhlWebhook(record);
+  }
+  return { posted: false };
 }
 
 function currentDeliveryMode(): 'customer' | 'internal' {
@@ -537,7 +821,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       const existing = await fetchEstimateRecordByIdempotencyKey(idempotencyKey);
       if (existing) {
         if (wantsResend) {
-          const [email, ghl] = await Promise.all([sendEstimateEmail(existing), postToGhl(existing)]);
+          const [email, ghl] = await Promise.all([sendEstimateEmail(existing), syncToGhl(existing)]);
           res.status(200).json({
             record: existing,
             email: { ...email, idempotent: true, resent: true, deliveryMode: email.deliveryMode ?? currentDeliveryMode() },
@@ -616,7 +900,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         record.id = stored.recordId;
       }
 
-      const [email, ghl] = await Promise.all([sendEstimateEmail(record), postToGhl(record)]);
+      const [email, ghl] = await Promise.all([sendEstimateEmail(record), syncToGhl(record)]);
 
       res.status(200).json({
         record,
