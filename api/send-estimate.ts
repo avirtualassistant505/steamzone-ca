@@ -378,13 +378,115 @@ export async function buildQuotePdf(input: EmailTemplateInput): Promise<Uint8Arr
     titleText: hexColor('#0f172a'),
     bodyText: hexColor('#334155'),
     mutedText: hexColor('#64748b'),
-    rowBorder: hexColor('#dbe5f2'),
+    rowBorder: hexColor('#e2e8f0'),
     rowAlt: hexColor('#f8fafc'),
-    labelCell: hexColor('#f1f5f9'),
     ctaBackground: hexColor('#1d4ed8'),
     dangerBackground: hexColor('#fff1f2'),
     dangerBorder: hexColor('#fecdd3'),
     dangerText: hexColor('#9f1239'),
+  };
+
+  const clampRadius = (width: number, height: number, radius: number): number => {
+    const safeWidth = Number.isFinite(width) ? width : 0;
+    const safeHeight = Number.isFinite(height) ? height : 0;
+    const safeRadius = Number.isFinite(radius) ? radius : 0;
+    return Math.max(0, Math.min(safeRadius, safeWidth / 2, safeHeight / 2));
+  };
+
+  // pdf-lib's drawSvgPath() output is unreliable in macOS Preview for this repo.
+  // Use rectangles + circles for rounded shapes so background colors render consistently.
+  const fillRoundedRect = (options: { x: number; y: number; width: number; height: number; radius: number; color: PdfColor }) => {
+    const { x, y, width, height, color } = options;
+    const radius = clampRadius(width, height, options.radius);
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+
+    if (radius === 0) {
+      page.drawRectangle({ x, y, width, height, color });
+      return;
+    }
+
+    const innerWidth = Math.max(0, width - radius * 2);
+    const innerHeight = Math.max(0, height - radius * 2);
+
+    if (innerWidth > 0) {
+      page.drawRectangle({ x: x + radius, y, width: innerWidth, height, color });
+    }
+
+    if (innerHeight > 0) {
+      page.drawRectangle({ x, y: y + radius, width: radius, height: innerHeight, color });
+      page.drawRectangle({ x: x + width - radius, y: y + radius, width: radius, height: innerHeight, color });
+    }
+
+    page.drawCircle({ x: x + radius, y: y + radius, size: radius, color });
+    page.drawCircle({ x: x + width - radius, y: y + radius, size: radius, color });
+    page.drawCircle({ x: x + radius, y: y + height - radius, size: radius, color });
+    page.drawCircle({ x: x + width - radius, y: y + height - radius, size: radius, color });
+  };
+
+  const fillTopRoundedRect = (options: { x: number; y: number; width: number; height: number; radius: number; color: PdfColor }) => {
+    const { x, y, width, height, color } = options;
+    const radius = Math.max(0, Math.min(options.radius, width / 2, height));
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+
+    if (radius === 0) {
+      page.drawRectangle({ x, y, width, height, color });
+      return;
+    }
+
+    const baseHeight = Math.max(0, height - radius);
+    if (baseHeight > 0) {
+      page.drawRectangle({ x, y, width, height: baseHeight, color });
+    }
+
+    const topBandWidth = Math.max(0, width - radius * 2);
+    page.drawRectangle({ x: x + radius, y: y + height - radius, width: topBandWidth, height: radius, color });
+    page.drawCircle({ x: x + radius, y: y + height - radius, size: radius, color });
+    page.drawCircle({ x: x + width - radius, y: y + height - radius, size: radius, color });
+  };
+
+  const drawRoundedCardBackground = (options: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    radius: number;
+    background: PdfColor;
+    borderColor?: PdfColor;
+    borderWidth?: number;
+  }) => {
+    const borderWidth = options.borderColor && options.borderWidth ? Math.max(0, options.borderWidth) : 0;
+    if (borderWidth > 0 && options.borderColor) {
+      fillRoundedRect({
+        x: options.x,
+        y: options.y,
+        width: options.width,
+        height: options.height,
+        radius: options.radius,
+        color: options.borderColor,
+      });
+      fillRoundedRect({
+        x: options.x + borderWidth,
+        y: options.y + borderWidth,
+        width: options.width - borderWidth * 2,
+        height: options.height - borderWidth * 2,
+        radius: Math.max(0, options.radius - borderWidth),
+        color: options.background,
+      });
+      return;
+    }
+
+    fillRoundedRect({
+      x: options.x,
+      y: options.y,
+      width: options.width,
+      height: options.height,
+      radius: options.radius,
+      color: options.background,
+    });
   };
 
   const wrapTextToWidth = (text: string, targetFont: typeof font, size: number, maxWidth: number): string[] => {
@@ -522,8 +624,13 @@ export async function buildQuotePdf(input: EmailTemplateInput): Promise<Uint8Arr
       return options.yTop;
     }
 
-    page.drawSvgPath(roundedRectPath(options.x, y, options.width, height, radius), {
-      color: background,
+    drawRoundedCardBackground({
+      x: options.x,
+      y,
+      width: options.width,
+      height,
+      radius,
+      background,
       borderColor: border,
       borderWidth: 1,
     });
@@ -580,8 +687,13 @@ export async function buildQuotePdf(input: EmailTemplateInput): Promise<Uint8Arr
       return options.yTop;
     }
 
-    page.drawSvgPath(roundedRectPath(options.x, y, options.width, totalHeight, radius), {
-      color: palette.cardBackground,
+    drawRoundedCardBackground({
+      x: options.x,
+      y,
+      width: options.width,
+      height: totalHeight,
+      radius,
+      background: palette.cardBackground,
       borderColor: palette.cardBorder,
       borderWidth: 1,
     });
@@ -589,7 +701,9 @@ export async function buildQuotePdf(input: EmailTemplateInput): Promise<Uint8Arr
     let rowTop = options.yTop;
     measured.forEach((entry, index) => {
       const rowBottom = rowTop - entry.height;
-      const alt = index % 2 === 1;
+      const isFirst = index === 0;
+      const isLast = index === measured.length - 1;
+      const alt = !isFirst && !isLast && index % 2 === 1;
 
       page.drawRectangle({
         x: options.x,
@@ -597,13 +711,6 @@ export async function buildQuotePdf(input: EmailTemplateInput): Promise<Uint8Arr
         width: options.width,
         height: entry.height,
         color: alt ? palette.rowAlt : palette.cardBackground,
-      });
-      page.drawRectangle({
-        x: options.x,
-        y: rowBottom,
-        width: labelColWidth,
-        height: entry.height,
-        color: palette.labelCell,
       });
 
       if (index < measured.length - 1) {
@@ -658,8 +765,13 @@ export async function buildQuotePdf(input: EmailTemplateInput): Promise<Uint8Arr
   const footerFontSize = 9.6;
   const footerLineHeight = 13;
 
-  page.drawSvgPath(roundedRectPath(cardX, cardY, cardWidth, cardHeight, cardRadius), {
-    color: palette.cardBackground,
+  drawRoundedCardBackground({
+    x: cardX,
+    y: cardY,
+    width: cardWidth,
+    height: cardHeight,
+    radius: cardRadius,
+    background: palette.cardBackground,
     borderColor: palette.cardBorder,
     borderWidth: 1,
   });
@@ -667,7 +779,12 @@ export async function buildQuotePdf(input: EmailTemplateInput): Promise<Uint8Arr
   const headerHeight = 132;
   const cardTop = cardY + cardHeight;
   const headerY = cardTop - headerHeight;
-  page.drawSvgPath(roundedTopRectPath(cardX, headerY, cardWidth, headerHeight, cardRadius), {
+  fillTopRoundedRect({
+    x: cardX,
+    y: headerY,
+    width: cardWidth,
+    height: headerHeight,
+    radius: cardRadius,
     color: palette.headerBackground,
   });
 
@@ -712,8 +829,13 @@ export async function buildQuotePdf(input: EmailTemplateInput): Promise<Uint8Arr
   const rangeCardHeight = 112;
   const rangeCardY = cursorY - rangeCardHeight;
 
-  page.drawSvgPath(roundedRectPath(contentX, rangeCardY, contentWidth, rangeCardHeight, rangeCardRadius), {
-    color: palette.rangeBackground,
+  drawRoundedCardBackground({
+    x: contentX,
+    y: rangeCardY,
+    width: contentWidth,
+    height: rangeCardHeight,
+    radius: rangeCardRadius,
+    background: palette.rangeBackground,
     borderColor: palette.rangeBorder,
     borderWidth: 1,
   });
@@ -806,7 +928,7 @@ export async function buildQuotePdf(input: EmailTemplateInput): Promise<Uint8Arr
     const buttonHeight = 28;
     const buttonX = contentX;
     const buttonY = cursorY - buttonHeight - 6;
-    page.drawSvgPath(roundedRectPath(buttonX, buttonY, buttonWidth, buttonHeight, 8), { color: palette.ctaBackground });
+    fillRoundedRect({ x: buttonX, y: buttonY, width: buttonWidth, height: buttonHeight, radius: 8, color: palette.ctaBackground });
     page.drawText(input.cta.label, {
       x: buttonX + 16,
       y: buttonY + 9,
