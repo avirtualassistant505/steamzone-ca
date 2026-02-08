@@ -9,6 +9,28 @@ const idempotencyKeyRegex = /^[A-Za-z0-9._:-]{8,200}$/;
 const ghlBaseUrlDefault = 'https://services.leadconnectorhq.com';
 const ghlApiVersionDefault = '2021-07-28';
 
+function asBool(value: unknown, fallback = false): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value !== 'string') return fallback;
+  const s = value.trim().toLowerCase();
+  if (!s) return fallback;
+  if (['1', 'true', 'yes', 'y', 'on', 'agree', 'agreed'].includes(s)) return true;
+  if (['0', 'false', 'no', 'n', 'off', 'disagree', 'decline', 'declined'].includes(s)) return false;
+  return fallback;
+}
+
+function clampInt(value: unknown, fallback = 0, min = 0, max = 1000000): number {
+  const n = Math.round(finiteNumber(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function pickEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  const v = typeof value === 'string' ? value : '';
+  return (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
+}
+
 type EngineModule = {
   createDefaultPricingConfig: () => PricingConfig;
   calculateEstimate: (serviceType: ServiceType, input: unknown, config: PricingConfig) => EstimateRecord['result'];
@@ -95,6 +117,20 @@ function validateContact(contact: LeadContact): string | null {
   return null;
 }
 
+function coerceContact(input: unknown): LeadContact | null {
+  const rec = asRecord(input);
+  if (!rec) return null;
+
+  return {
+    fullName: safeString(rec.fullName, safeString(rec.name, '')).trim(),
+    address: safeString(rec.address, '').trim(),
+    phone: safeString(rec.phone, '').trim(),
+    email: safeString(rec.email, '').trim(),
+    consentToContact: asBool(rec.consentToContact, false),
+    marketingOptIn: asBool(rec.marketingOptIn, false),
+  };
+}
+
 function coerceServiceType(value: unknown): ServiceType | null {
   if (value === 'window' || value === 'commercialWindow' || value === 'carpet' || value === 'postConstruction') {
     return value as ServiceType;
@@ -141,6 +177,131 @@ function formatHoursRange(low: number, high: number): string {
   const a = Number.isFinite(low) ? low : 0;
   const b = Number.isFinite(high) ? high : 0;
   return `${a.toFixed(1)} - ${b.toFixed(1)} hours`;
+}
+
+function normalizeEstimateAnswers(serviceType: ServiceType, raw: unknown, postalCode: string, zone: WindowZone, contact: LeadContact) {
+  const rec = asRecord(raw) ?? {};
+
+  if (serviceType === 'window') {
+    // Defaults are intentionally conservative; chat/workflow can send partial answers and still succeed.
+    const windowStoreys = ['bungalow', 'oneHalf', 'two', 'twoHalf', 'three'] as const;
+    const sizeBrackets = ['under1000', '1000to1500', '1500to2000', '2000to2500', '2500to3000', 'over3000'] as const;
+    const scopes = ['exterior', 'interior', 'both'] as const;
+    const screens = ['none', 'some', 'all'] as const;
+    const tracks = ['basic', 'detailed'] as const;
+    const sliding = ['none', 'threePanel', 'fivePanel'] as const;
+    const patio = ['none', 'takeApart', 'slideOnly'] as const;
+    const skylights = ['none', 'interior', 'exterior', 'both'] as const;
+    const railing = ['none', 'oneSide', 'twoSides'] as const;
+    const french = ['none', 'some', 'lots'] as const;
+
+    return {
+      postalCode,
+      zone,
+      storey: pickEnum(rec.storey, windowStoreys, 'bungalow'),
+      sizeBracket: pickEnum(rec.sizeBracket, sizeBrackets, 'under1000'),
+      scope: pickEnum(rec.scope, scopes, 'exterior'),
+      screens: pickEnum(rec.screens, screens, 'none'),
+      tracks: pickEnum(rec.tracks, tracks, 'basic'),
+      hardToReach: asBool(rec.hardToReach, false),
+      hardWaterRemoval: asBool(rec.hardWaterRemoval, false),
+      constructionDebris: asBool(rec.constructionDebris, false),
+      slidingRemoval: pickEnum(rec.slidingRemoval, sliding, 'none'),
+      slidingQuantity: clampInt(rec.slidingQuantity, 0, 0, 50),
+      patioDoors: pickEnum(rec.patioDoors, patio, 'none'),
+      patioQuantity: clampInt(rec.patioQuantity, 0, 0, 50),
+      skylights: pickEnum(rec.skylights, skylights, 'none'),
+      skylightQuantity: clampInt(rec.skylightQuantity, 0, 0, 50),
+      railingGlass: pickEnum(rec.railingGlass, railing, 'none'),
+      frenchPanes: pickEnum(rec.frenchPanes, french, 'none'),
+      sunroom: asBool(rec.sunroom, false),
+      walkoutBasement: asBool(rec.walkoutBasement, false),
+      contact,
+    };
+  }
+
+  if (serviceType === 'commercialWindow') {
+    const buildingType = ['storefront', 'lowRise', 'midRise', 'highRise'] as const;
+    const storeys = ['ground', 'twoToThree', 'fourToEight', 'ninePlus'] as const;
+    const sizeMode = ['paneCount', 'frontage'] as const;
+    const scope = ['exterior', 'both'] as const;
+    const frequency = ['oneTime', 'monthly', 'biweekly', 'weekly'] as const;
+
+    return {
+      postalCode,
+      zone,
+      buildingType: pickEnum(rec.buildingType, buildingType, 'storefront'),
+      storeys: pickEnum(rec.storeys, storeys, 'ground'),
+      sizeMode: pickEnum(rec.sizeMode, sizeMode, 'paneCount'),
+      paneCount: clampInt(rec.paneCount, 20, 0, 10000),
+      frontageFeet: clampInt(rec.frontageFeet, 30, 0, 100000),
+      glassDoors: clampInt(rec.glassDoors, 0, 0, 1000),
+      scope: pickEnum(rec.scope, scope, 'exterior'),
+      frequency: pickEnum(rec.frequency, frequency, 'oneTime'),
+      liftRequired: asBool(rec.liftRequired, false),
+      afterHours: asBool(rec.afterHours, false),
+      overspray: asBool(rec.overspray, false),
+      hardWater: asBool(rec.hardWater, false),
+      contact,
+    };
+  }
+
+  if (serviceType === 'carpet') {
+    const estimateMode = ['rooms', 'sqft'] as const;
+    const sqftBracket = ['under500', '500to1000', '1000to1500', '1500to2000', 'over2000'] as const;
+    const condition = ['light', 'moderate', 'heavy'] as const;
+    const furniture = ['none', 'light', 'heavy'] as const;
+    const schedule = ['asap', 'nextWeek', 'flexible', 'tomorrow'] as const;
+
+    return {
+      postalCode,
+      zone,
+      estimateMode: pickEnum(rec.estimateMode, estimateMode, 'rooms'),
+      rooms: clampInt(rec.rooms, 3, 0, 50),
+      sqftBracket: pickEnum(rec.sqftBracket, sqftBracket, 'under500'),
+      condition: pickEnum(rec.condition, condition, 'moderate'),
+      stairsSteps: clampInt(rec.stairsSteps, 0, 0, 200),
+      hallways: clampInt(rec.hallways, 0, 0, 50),
+      advancedStainRemoval: asBool(rec.advancedStainRemoval, false),
+      odorElimination: asBool(rec.odorElimination, false),
+      petTreatment: asBool(rec.petTreatment, false),
+      stainProtector: asBool(rec.stainProtector, false),
+      furnitureMoving: pickEnum(rec.furnitureMoving, furniture, 'none'),
+      unusualCondition: asBool(rec.unusualCondition, false),
+      schedule: pickEnum(rec.schedule, schedule, 'flexible'),
+      contact,
+    };
+  }
+
+  // postConstruction
+  const projectType = ['residential', 'commercial'] as const;
+  const buildType = ['renovation', 'newBuild'] as const;
+  const sqftBracket = ['under1000', '1000to2500', '2500to5000', 'over5000'] as const;
+  const stage = ['rough', 'light', 'final', 'touchUp'] as const;
+  const dustLoad = ['light', 'medium', 'heavy'] as const;
+  const addOnSize = ['none', 'small', 'medium', 'large'] as const;
+  const scraping = ['none', 'some', 'lots'] as const;
+  const schedule = ['asap', 'nextWeek', 'flexible', 'tomorrow'] as const;
+
+  return {
+    postalCode,
+    zone,
+    projectType: pickEnum(rec.projectType, projectType, 'residential'),
+    buildType: pickEnum(rec.buildType, buildType, 'renovation'),
+    sqftBracket: pickEnum(rec.sqftBracket, sqftBracket, '1000to2500'),
+    floors: clampInt(rec.floors, 1, 1, 100),
+    stage: pickEnum(rec.stage, stage, 'final'),
+    dustLoad: pickEnum(rec.dustLoad, dustLoad, 'medium'),
+    interiorWindows: pickEnum(rec.interiorWindows, addOnSize, 'none'),
+    scraping: pickEnum(rec.scraping, scraping, 'none'),
+    insideCabinets: asBool(rec.insideCabinets, false),
+    appliances: asBool(rec.appliances, false),
+    floorDetailing: pickEnum(rec.floorDetailing, addOnSize, 'none'),
+    specialDetailing: asBool(rec.specialDetailing, false),
+    multiTenantAccess: asBool(rec.multiTenantAccess, false),
+    schedule: pickEnum(rec.schedule, schedule, 'flexible'),
+    contact,
+  };
 }
 
 async function loadPricingConfigForEstimate(): Promise<{ config: PricingConfig; source: string }> {
@@ -858,7 +1019,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       return;
     }
 
-    const contact = answers.contact as LeadContact | undefined;
+    const contact = coerceContact(answers.contact);
     if (!contact) {
       res.status(400).json({ message: 'Missing contact details.' });
       return;
@@ -905,12 +1066,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
     const engine = await getEngine();
     const zone = engine.detectZoneFromPostalCode(postalCode);
-    const normalizedAnswers = {
-      ...answers,
-      postalCode,
-      zone,
-      contact,
-    };
+    const normalizedAnswers = normalizeEstimateAnswers(serviceType, answers, postalCode, zone, contact);
 
     const { config: pricingConfig, source: pricingSource } = await loadPricingConfigForEstimate();
     const estimate = engine.calculateEstimate(serviceType, normalizedAnswers, pricingConfig);
