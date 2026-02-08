@@ -1,5 +1,5 @@
 import { Resend } from 'resend';
-import type { EstimateRecord, LeadContact, PricingConfig, ServiceType, WindowZone } from '../src/lib/estimateEngine';
+import type { EstimateRecord, LeadContact, PricingConfig, ServiceType, WindowZone } from '../shared/estimateEngine';
 
 type ApiRequest = { method?: string; body?: unknown; headers?: Record<string, string | string[] | undefined> };
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
@@ -48,7 +48,7 @@ function formatHoursRange(low: number, high: number): string {
 }
 
 async function loadPricingConfigForEstimate(): Promise<{ config: PricingConfig; source: string }> {
-  const engine = await import('../src/lib/estimateEngine');
+  const engine = await import('../shared/estimateEngine');
   const defaults = engine.createDefaultPricingConfig() as PricingConfig;
 
   const url = process.env.SUPABASE_URL;
@@ -173,7 +173,7 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
 
   const resend = new Resend(resendApiKey);
 
-  const engine = await import('../src/lib/estimateEngine');
+  const engine = await import('../shared/estimateEngine');
   const estimateRange = `${engine.formatCurrency(record.result.estimateLow)} - ${engine.formatCurrency(record.result.estimateHigh)}`;
   const durationRange = formatHoursRange(record.result.durationLowHours, record.result.durationHighHours);
   const service = engine.formatServiceLabel(record.serviceType);
@@ -315,7 +315,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     return;
   }
 
-  const engine = await import('../src/lib/estimateEngine');
+  const engine = await import('../shared/estimateEngine');
   const zone = engine.detectZoneFromPostalCode(postalCode);
   const normalizedAnswers = {
     ...answers,
