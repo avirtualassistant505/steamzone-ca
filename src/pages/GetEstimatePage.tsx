@@ -2310,7 +2310,7 @@ function ContactStep({ section, contact, schedule, onScheduleChange, onContactCh
           onChange={(event) => onContactChange('marketingOptIn', event.target.checked)}
           className="mt-0.5"
         />
-        Yes, I’d like to receive occasional offers and service updates from Steam Zone by text/email. I can opt out anytime.
+        Yes, I'd like to receive occasional offers and service updates from Steam Zone by text/email. I can opt out anytime.
       </label>
     </div>
   );
