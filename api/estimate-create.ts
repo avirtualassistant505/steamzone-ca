@@ -267,7 +267,11 @@ async function storeEstimateRecordWithIdempotency(
     }
 
     const message = error?.message ?? '';
-    if (message.toLowerCase().includes('idempotency_key') && message.toLowerCase().includes('does not exist')) {
+    const lowerMessage = message.toLowerCase();
+    const idempotencyKeyMissing =
+      lowerMessage.includes('idempotency_key') &&
+      (lowerMessage.includes('does not exist') || lowerMessage.includes('schema cache') || lowerMessage.includes('could not find'));
+    if (idempotencyKeyMissing) {
       const legacy = await storeEstimateRecord(record);
       return { stored: legacy.stored, recordId: legacy.recordId, error: legacy.error };
     }
