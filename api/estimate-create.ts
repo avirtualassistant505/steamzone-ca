@@ -189,114 +189,118 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
     };
   }
 
-  const resend = new Resend(resendApiKey);
+  try {
+    const resend = new Resend(resendApiKey);
 
-  const engine = await getEngine();
-  const estimateRange = `${engine.formatCurrency(record.result.estimateLow)} - ${engine.formatCurrency(record.result.estimateHigh)}`;
-  const durationRange = formatHoursRange(record.result.durationLowHours, record.result.durationHighHours);
-  const service = engine.formatServiceLabel(record.serviceType);
+    const engine = await getEngine();
+    const estimateRange = `${engine.formatCurrency(record.result.estimateLow)} - ${engine.formatCurrency(record.result.estimateHigh)}`;
+    const durationRange = formatHoursRange(record.result.durationLowHours, record.result.durationHighHours);
+    const service = engine.formatServiceLabel(record.serviceType);
 
-  const to = usesResendOnboardingSender ? [internalInbox as string] : [record.contact.email];
-  const bcc = !usesResendOnboardingSender && internalInbox ? [internalInbox] : undefined;
-  const replyTo = usesResendOnboardingSender ? record.contact.email : undefined;
-  const subject = usesResendOnboardingSender
-    ? `New Steam Zone estimate lead ${record.quoteNumber}`.trim()
-    : `Your Steam Zone Estimate ${record.quoteNumber}`.trim();
+    const to = usesResendOnboardingSender ? [internalInbox as string] : [record.contact.email];
+    const bcc = !usesResendOnboardingSender && internalInbox ? [internalInbox] : undefined;
+    const replyTo = usesResendOnboardingSender ? record.contact.email : undefined;
+    const subject = usesResendOnboardingSender
+      ? `New Steam Zone estimate lead ${record.quoteNumber}`.trim()
+      : `Your Steam Zone Estimate ${record.quoteNumber}`.trim();
 
-  const templateInput = usesResendOnboardingSender
-    ? {
-        preheader: `New estimate lead ${record.quoteNumber} from ${record.contact.fullName}.`,
-        heading: 'New Estimate Lead',
-        subheading: 'A customer submitted a live estimate request from steamzone.ca.',
-        intro: 'The lead details and estimate summary are below. PDF quote is attached for your team.',
-        estimateRange,
-        durationRange,
-        quoteNumber: record.quoteNumber,
-        detailRows: [
-          { label: 'Customer', value: record.contact.fullName },
-          { label: 'Email', value: record.contact.email },
-          { label: 'Phone', value: record.contact.phone },
-          { label: 'Service', value: service },
-          { label: 'Address', value: record.contact.address?.trim() ? record.contact.address : 'Not provided' },
-          { label: 'Postal / Zone', value: `${record.postalCode} / ${engine.formatZoneLabel(record.zone as WindowZone)}` },
-          { label: 'Next Step', value: record.result.bookingMode },
-        ],
-        notes: record.result.notes ?? [],
-        redFlags: record.result.redFlags ?? [],
-        footerLine: 'Reply to this email to follow up with the lead and schedule next steps.',
-      }
-    : {
-        preheader: `Your estimate range is ${estimateRange}.`,
-        heading: 'Your Steam Zone Estimate',
-        subheading: 'Thanks for requesting an instant quote. A PDF copy is attached to your records.',
-        intro:
-          'Review the estimate summary below. Final pricing is confirmed based on site conditions and selected add-ons.',
-        estimateRange,
-        durationRange,
-        quoteNumber: record.quoteNumber,
-        detailRows: [
-          { label: 'Customer', value: record.contact.fullName },
-          { label: 'Service', value: service },
-          { label: 'Quote Number', value: record.quoteNumber },
-          { label: 'Estimated Duration', value: durationRange },
-          { label: 'Address', value: record.contact.address?.trim() ? record.contact.address : 'Not provided' },
-          { label: 'Postal / Zone', value: `${record.postalCode} / ${engine.formatZoneLabel(record.zone as WindowZone)}` },
-          { label: 'Next Step', value: record.result.bookingMode },
-        ],
-        notes: record.result.notes ?? [],
-        redFlags: record.result.redFlags ?? [],
-        footerLine:
-          'To book or confirm details, reply to this email or call Steam Zone at (431) 205-3909. We appreciate your business.',
-      };
+    const templateInput = usesResendOnboardingSender
+      ? {
+          preheader: `New estimate lead ${record.quoteNumber} from ${record.contact.fullName}.`,
+          heading: 'New Estimate Lead',
+          subheading: 'A customer submitted a live estimate request from steamzone.ca.',
+          intro: 'The lead details and estimate summary are below. PDF quote is attached for your team.',
+          estimateRange,
+          durationRange,
+          quoteNumber: record.quoteNumber,
+          detailRows: [
+            { label: 'Customer', value: record.contact.fullName },
+            { label: 'Email', value: record.contact.email },
+            { label: 'Phone', value: record.contact.phone },
+            { label: 'Service', value: service },
+            { label: 'Address', value: record.contact.address?.trim() ? record.contact.address : 'Not provided' },
+            { label: 'Postal / Zone', value: `${record.postalCode} / ${engine.formatZoneLabel(record.zone as WindowZone)}` },
+            { label: 'Next Step', value: record.result.bookingMode },
+          ],
+          notes: record.result.notes ?? [],
+          redFlags: record.result.redFlags ?? [],
+          footerLine: 'Reply to this email to follow up with the lead and schedule next steps.',
+        }
+      : {
+          preheader: `Your estimate range is ${estimateRange}.`,
+          heading: 'Your Steam Zone Estimate',
+          subheading: 'Thanks for requesting an instant quote. A PDF copy is attached to your records.',
+          intro:
+            'Review the estimate summary below. Final pricing is confirmed based on site conditions and selected add-ons.',
+          estimateRange,
+          durationRange,
+          quoteNumber: record.quoteNumber,
+          detailRows: [
+            { label: 'Customer', value: record.contact.fullName },
+            { label: 'Service', value: service },
+            { label: 'Quote Number', value: record.quoteNumber },
+            { label: 'Estimated Duration', value: durationRange },
+            { label: 'Address', value: record.contact.address?.trim() ? record.contact.address : 'Not provided' },
+            { label: 'Postal / Zone', value: `${record.postalCode} / ${engine.formatZoneLabel(record.zone as WindowZone)}` },
+            { label: 'Next Step', value: record.result.bookingMode },
+          ],
+          notes: record.result.notes ?? [],
+          redFlags: record.result.redFlags ?? [],
+          footerLine:
+            'To book or confirm details, reply to this email or call Steam Zone at (431) 205-3909. We appreciate your business.',
+        };
 
-  const mailer = await import('./send-estimate');
-  const html = mailer.renderEmailTemplate(templateInput);
-  const pdfBytes = await mailer.buildQuotePdf(templateInput);
-  const text = usesResendOnboardingSender
-    ? [
-        `New Steam Zone estimate lead ${record.quoteNumber}`,
-        `Name: ${record.contact.fullName}`,
-        `Email: ${record.contact.email}`,
-        `Phone: ${record.contact.phone}`,
-        `Service: ${service}`,
-        `Estimate Range: ${estimateRange}`,
-        `Duration: ${durationRange}`,
-      ].join('\n')
-    : [
-        `Hi ${record.contact.fullName},`,
-        '',
-        `Thanks for requesting an estimate from Steam Zone.`,
-        `Quote Number: ${record.quoteNumber}`,
-        `Service: ${service}`,
-        `Estimate Range: ${estimateRange}`,
-        `Estimated Duration: ${durationRange}`,
-        '',
-        'Your PDF estimate is attached. Reply to this email or call (431) 205-3909 to book.',
-      ].join('\n');
+    const mailer = await import('./send-estimate');
+    const html = mailer.renderEmailTemplate(templateInput);
+    const pdfBytes = await mailer.buildQuotePdf(templateInput);
+    const text = usesResendOnboardingSender
+      ? [
+          `New Steam Zone estimate lead ${record.quoteNumber}`,
+          `Name: ${record.contact.fullName}`,
+          `Email: ${record.contact.email}`,
+          `Phone: ${record.contact.phone}`,
+          `Service: ${service}`,
+          `Estimate Range: ${estimateRange}`,
+          `Duration: ${durationRange}`,
+        ].join('\n')
+      : [
+          `Hi ${record.contact.fullName},`,
+          '',
+          `Thanks for requesting an estimate from Steam Zone.`,
+          `Quote Number: ${record.quoteNumber}`,
+          `Service: ${service}`,
+          `Estimate Range: ${estimateRange}`,
+          `Estimated Duration: ${durationRange}`,
+          '',
+          'Your PDF estimate is attached. Reply to this email or call (431) 205-3909 to book.',
+        ].join('\n');
 
-  const emailResult = await resend.emails.send({
-    from: fromEmail,
-    to,
-    bcc,
-    replyTo,
-    subject,
-    html,
-    text,
-    attachments: [
-      {
-        filename: `${record.quoteNumber}.pdf`,
-        content: Buffer.from(pdfBytes).toString('base64'),
-      },
-    ],
-  });
+    const emailResult = await resend.emails.send({
+      from: fromEmail,
+      to,
+      bcc,
+      replyTo,
+      subject,
+      html,
+      text,
+      attachments: [
+        {
+          filename: `${record.quoteNumber}.pdf`,
+          content: Buffer.from(pdfBytes).toString('base64'),
+        },
+      ],
+    });
 
-  if (emailResult.error) {
-    return { success: false, message: emailResult.error.message };
+    if (emailResult.error) {
+      return { success: false, message: emailResult.error.message };
+    }
+
+    return usesResendOnboardingSender
+      ? { success: true, message: 'Estimate captured and sent to Steam Zone inbox for follow-up.', deliveryMode: 'internal' }
+      : { success: true, message: 'Estimate email sent successfully.', deliveryMode: 'customer' };
+  } catch (error) {
+    return { success: false, message: error instanceof Error ? error.message : 'Unknown email delivery error.' };
   }
-
-  return usesResendOnboardingSender
-    ? { success: true, message: 'Estimate captured and sent to Steam Zone inbox for follow-up.', deliveryMode: 'internal' }
-    : { success: true, message: 'Estimate email sent successfully.', deliveryMode: 'customer' };
 }
 
 export default async function handler(req: ApiRequest, res: ApiResponse) {
@@ -305,74 +309,89 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     return;
   }
 
-  const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-  const serviceType = coerceServiceType(body?.serviceType);
-  const answers = body?.answers;
+  try {
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const serviceType = coerceServiceType(body?.serviceType);
+    const answers = body?.answers;
 
-  if (!serviceType || !answers) {
-    res.status(400).json({ message: 'Missing serviceType or answers.' });
-    return;
+    if (!serviceType || !answers) {
+      res.status(400).json({ message: 'Missing serviceType or answers.' });
+      return;
+    }
+
+    const postalCode = safeString(answers.postalCode, '').trim();
+    const postalError = validatePostalCode(postalCode);
+    if (postalError) {
+      res.status(400).json({ message: postalError });
+      return;
+    }
+
+    const contact = answers.contact as LeadContact | undefined;
+    if (!contact) {
+      res.status(400).json({ message: 'Missing contact details.' });
+      return;
+    }
+
+    const contactError = validateContact(contact);
+    if (contactError) {
+      res.status(400).json({ message: contactError });
+      return;
+    }
+
+    const engine = await getEngine();
+    const zone = engine.detectZoneFromPostalCode(postalCode);
+    const normalizedAnswers = {
+      ...answers,
+      postalCode,
+      zone,
+      contact,
+    };
+
+    const { config: pricingConfig, source: pricingSource } = await loadPricingConfigForEstimate();
+    const estimate = engine.calculateEstimate(serviceType, normalizedAnswers, pricingConfig);
+
+    const createdAt = nowIso();
+    const quoteNumber = generateQuoteNumber();
+    const record: EstimateRecord = {
+      id:
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2, 11),
+      quoteNumber,
+      createdAt,
+      serviceType,
+      postalCode,
+      zone,
+      contact,
+      answers: normalizedAnswers,
+      result: estimate,
+      pricingVersion: pricingConfig.version,
+      utm: (body?.utm ?? {}) as EstimateRecord['utm'],
+    };
+
+    try {
+      const stored = await storeEstimateRecord(record);
+      if (stored.recordId) {
+        record.id = stored.recordId;
+      }
+
+      const [email, ghl] = await Promise.all([sendEstimateEmail(record), postToGhl(record)]);
+
+      res.status(200).json({
+        record,
+        email,
+        storage: { stored: stored.stored },
+        pricing: { source: pricingSource, version: pricingConfig.version },
+        ghl,
+      });
+    } catch (error) {
+      res.status(200).json({
+        record,
+        email: { success: false, message: error instanceof Error ? error.message : 'Unknown estimate-create error.' },
+        storage: { stored: false },
+        pricing: { source: pricingSource, version: pricingConfig.version },
+        ghl: { posted: false },
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Unknown estimate-create error.' });
   }
-
-  const postalCode = safeString(answers.postalCode, '').trim();
-  const postalError = validatePostalCode(postalCode);
-  if (postalError) {
-    res.status(400).json({ message: postalError });
-    return;
-  }
-
-  const contact = answers.contact as LeadContact | undefined;
-  if (!contact) {
-    res.status(400).json({ message: 'Missing contact details.' });
-    return;
-  }
-
-  const contactError = validateContact(contact);
-  if (contactError) {
-    res.status(400).json({ message: contactError });
-    return;
-  }
-
-  const engine = await getEngine();
-  const zone = engine.detectZoneFromPostalCode(postalCode);
-  const normalizedAnswers = {
-    ...answers,
-    postalCode,
-    zone,
-    contact,
-  };
-
-  const { config: pricingConfig, source: pricingSource } = await loadPricingConfigForEstimate();
-  const estimate = engine.calculateEstimate(serviceType, normalizedAnswers, pricingConfig);
-
-  const createdAt = nowIso();
-  const quoteNumber = generateQuoteNumber();
-  const record: EstimateRecord = {
-    id: typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2, 11),
-    quoteNumber,
-    createdAt,
-    serviceType,
-    postalCode,
-    zone,
-    contact,
-    answers: normalizedAnswers,
-    result: estimate,
-    pricingVersion: pricingConfig.version,
-    utm: (body?.utm ?? {}) as EstimateRecord['utm'],
-  };
-
-  const stored = await storeEstimateRecord(record);
-  if (stored.recordId) {
-    record.id = stored.recordId;
-  }
-
-  const [email, ghl] = await Promise.all([sendEstimateEmail(record), postToGhl(record)]);
-
-  res.status(200).json({
-    record,
-    email,
-    storage: { stored: stored.stored },
-    pricing: { source: pricingSource, version: pricingConfig.version },
-    ghl,
-  });
 }
