@@ -125,11 +125,11 @@ async function loadPricingConfigForEstimate(): Promise<{ config: PricingConfig; 
   }
 }
 
-async function storeEstimateRecord(record: EstimateRecord): Promise<{ stored: boolean; recordId?: string }> {
+async function storeEstimateRecord(record: EstimateRecord): Promise<{ stored: boolean; recordId?: string; error?: string }> {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) {
-    return { stored: false };
+    return { stored: false, error: 'supabase_env_missing' };
   }
 
   try {
@@ -155,12 +155,12 @@ async function storeEstimateRecord(record: EstimateRecord): Promise<{ stored: bo
 
     if (error) {
       // Storage failure should not prevent the quote from being generated/sent.
-      return { stored: false };
+      return { stored: false, error: error.message };
     }
 
     return { stored: true, recordId: (data as { id?: string } | null)?.id };
   } catch {
-    return { stored: false };
+    return { stored: false, error: 'supabase_store_exception' };
   }
 }
 
@@ -223,16 +223,16 @@ async function fetchEstimateRecordByIdempotencyKey(idempotencyKey: string): Prom
 async function storeEstimateRecordWithIdempotency(
   record: EstimateRecord,
   idempotencyKey: string | null
-): Promise<{ stored: boolean; recordId?: string; existing?: EstimateRecord }> {
+): Promise<{ stored: boolean; recordId?: string; existing?: EstimateRecord; error?: string }> {
   if (!idempotencyKey) {
     const stored = await storeEstimateRecord(record);
-    return { stored: stored.stored, recordId: stored.recordId };
+    return { stored: stored.stored, recordId: stored.recordId, error: stored.error };
   }
 
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) {
-    return { stored: false };
+    return { stored: false, error: 'supabase_env_missing' };
   }
 
   try {
@@ -269,7 +269,7 @@ async function storeEstimateRecordWithIdempotency(
     const message = error?.message ?? '';
     if (message.toLowerCase().includes('idempotency_key') && message.toLowerCase().includes('does not exist')) {
       const legacy = await storeEstimateRecord(record);
-      return { stored: legacy.stored, recordId: legacy.recordId };
+      return { stored: legacy.stored, recordId: legacy.recordId, error: legacy.error };
     }
 
     // Handle race: if another request inserted first, fetch the stored record and return it.
@@ -278,9 +278,9 @@ async function storeEstimateRecordWithIdempotency(
       return { stored: true, recordId: raced.id, existing: raced };
     }
 
-    return { stored: false };
+    return { stored: false, error: message || 'supabase_store_failed' };
   } catch {
-    return { stored: false };
+    return { stored: false, error: 'supabase_store_exception' };
   }
 }
 
@@ -587,7 +587,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       res.status(200).json({
         record,
         email,
-        storage: { stored: stored.stored },
+        storage: { stored: stored.stored, error: stored.error },
         pricing: { source: pricingSource, version: pricingConfig.version },
         ghl,
       });
