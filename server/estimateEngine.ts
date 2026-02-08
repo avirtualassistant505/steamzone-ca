@@ -48,6 +48,7 @@ export interface LeadContact {
   phone: string;
   email: string;
   consentToContact: boolean;
+  marketingOptIn: boolean;
 }
 
 export interface WindowEstimateInput {
@@ -937,7 +938,10 @@ export function createDefaultLeadContact(): LeadContact {
     address: '',
     phone: '',
     email: '',
-    consentToContact: true,
+    // Consent should be an explicit opt-in (required at submission time).
+    consentToContact: false,
+    // Optional marketing consent for offers/updates.
+    marketingOptIn: false,
   };
 }
 

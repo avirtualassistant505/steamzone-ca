@@ -450,11 +450,16 @@ async function syncToGhlViaApi(record: EstimateRecord): Promise<GhlResult> {
     setCF('red_flags', (record.result.redFlags ?? []).join('\n'));
     setCF('estimate_notes', (record.result.notes ?? []).join('\n'));
     setCF('wizard_answers_json', JSON.stringify(record.answers ?? {}));
+    setCF('consent_to_contact', record.contact.consentToContact ? 'true' : '');
+    setCF('marketing_opt_in', record.contact.marketingOptIn ? 'true' : '');
 
     const tags: string[] = [];
     tags.push('estimate_new');
     tags.push(record.result.confidence === 'green' ? 'estimate_green' : record.result.confidence === 'yellow' ? 'estimate_yellow' : 'estimate_red');
     tags.push(record.utm && Object.keys(record.utm).length > 0 ? 'source_ai_estimate' : 'source_website_estimate');
+    if (record.contact.marketingOptIn) {
+      tags.push('marketing_opt_in');
+    }
 
     const upsertPayload = await ghl.request('/contacts/upsert', {
       method: 'POST',
@@ -593,6 +598,8 @@ async function postToGhlWebhook(record: EstimateRecord): Promise<GhlResult> {
           phone: record.contact.phone,
           address: record.contact.address,
           postalCode: record.postalCode,
+          consentToContact: record.contact.consentToContact ? true : undefined,
+          marketingOptIn: record.contact.marketingOptIn ? true : undefined,
         },
         estimate: {
           quote_number: record.quoteNumber,
@@ -611,6 +618,8 @@ async function postToGhlWebhook(record: EstimateRecord): Promise<GhlResult> {
           red_flags: (record.result.redFlags ?? []).join('\n'),
           estimate_notes: (record.result.notes ?? []).join('\n'),
           wizard_answers_json: JSON.stringify(record.answers ?? {}),
+          consent_to_contact: record.contact.consentToContact,
+          marketing_opt_in: record.contact.marketingOptIn,
         },
         utm: record.utm,
       }),

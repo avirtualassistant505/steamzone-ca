@@ -2288,13 +2288,30 @@ function ContactStep({ section, contact, schedule, onScheduleChange, onContactCh
           onChange={(event) => onContactChange('consentToContact', event.target.checked)}
           className="mt-0.5"
         />
-        I give permission for Steam Zone to contact me regarding this estimate and project details.
+        I give permission for Steam Zone to store my details in their CRM and contact me by text/email regarding this estimate and project details.
+        I can opt out at any time.
       </label>
       {errors['contact.consentToContact'] && (
         <p id={`${section}-consent-error`} className="-mt-2 md:col-span-2 text-xs text-rose-700">
           {errors['contact.consentToContact']}
         </p>
       )}
+
+      <label
+        htmlFor={`${section}-marketing`}
+        className="md:col-span-2 flex items-start gap-2 rounded-lg border border-gray-200 p-3 text-sm text-gray-700"
+      >
+        <input
+          id={`${section}-marketing`}
+          name="marketingOptIn"
+          data-testid={tid('contact', 'marketing_opt_in')}
+          type="checkbox"
+          checked={contact.marketingOptIn}
+          onChange={(event) => onContactChange('marketingOptIn', event.target.checked)}
+          className="mt-0.5"
+        />
+        Yes, I’d like to receive occasional offers and service updates from Steam Zone by text/email. I can opt out anytime.
+      </label>
     </div>
   );
 }
