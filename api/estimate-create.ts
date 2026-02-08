@@ -121,14 +121,66 @@ function coerceContact(input: unknown): LeadContact | null {
   const rec = asRecord(input);
   if (!rec) return null;
 
+  const firstName = safeString(rec.firstName, safeString(rec.first_name, '')).trim();
+  const lastName = safeString(rec.lastName, safeString(rec.last_name, '')).trim();
+  const joinedName = [firstName, lastName].filter(Boolean).join(' ').trim();
+
   return {
-    fullName: safeString(rec.fullName, safeString(rec.name, '')).trim(),
+    fullName: safeString(rec.fullName, safeString(rec.name, joinedName)).trim(),
     address: safeString(rec.address, '').trim(),
     phone: safeString(rec.phone, '').trim(),
     email: safeString(rec.email, '').trim(),
     consentToContact: asBool(rec.consentToContact, false),
     marketingOptIn: asBool(rec.marketingOptIn, false),
   };
+}
+
+function maybeExtractGhlWebhookPayload(body: unknown): { serviceType?: unknown; answers?: unknown } | null {
+  const root = asRecord(body);
+  if (!root) return null;
+
+  const customData = asRecord(root.customData) ?? asRecord(root.custom_data) ?? null;
+  const contactBlock = asRecord(root.contact) ?? null;
+
+  // If this doesn't look like a GHL webhook payload, bail.
+  if (!customData && !contactBlock) return null;
+
+  const serviceType =
+    root.serviceType ??
+    root.service_type ??
+    customData?.serviceType ??
+    customData?.service_type ??
+    customData?.service ??
+    customData?.serviceKey ??
+    customData?.service_key ??
+    null;
+
+  const postalCode =
+    safeString(root.postalCode, safeString(root.postal_code, '')).trim() ||
+    safeString(contactBlock?.postalCode, safeString(contactBlock?.postal_code, '')).trim() ||
+    safeString(customData?.postalCode, safeString(customData?.postal_code, '')).trim();
+
+  const contact = coerceContact(customData?.contact) ?? coerceContact(contactBlock) ?? coerceContact(customData) ?? null;
+
+  // Flatten customData into answers (works with GHL webhook key/value custom payload).
+  const answers: Record<string, unknown> = {
+    ...(customData ? customData : {}),
+    postalCode,
+    contact: {
+      ...(contact ?? {}),
+      // Allow consent + marketing to be supplied as separate custom keys (common in workflows).
+      consentToContact: asBool(
+        customData?.consentToContact ?? customData?.consent_to_contact ?? (contact as LeadContact | null)?.consentToContact,
+        false
+      ),
+      marketingOptIn: asBool(
+        customData?.marketingOptIn ?? customData?.marketing_opt_in ?? (contact as LeadContact | null)?.marketingOptIn,
+        false
+      ),
+    },
+  };
+
+  return { serviceType, answers };
 }
 
 function coerceServiceType(value: unknown): ServiceType | null {
@@ -1004,8 +1056,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       return;
     }
 
-    const serviceType = coerceServiceType(body?.serviceType);
-    const answers = body?.answers;
+    const extracted = maybeExtractGhlWebhookPayload(body);
+    const serviceType = coerceServiceType(extracted?.serviceType ?? body?.serviceType);
+    const answers = extracted?.answers ?? body?.answers;
 
     if (!serviceType || !answers) {
       res.status(400).json({ message: 'Missing serviceType or answers.' });
