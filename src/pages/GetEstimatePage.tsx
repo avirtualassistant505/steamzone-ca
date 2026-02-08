@@ -39,6 +39,48 @@ function tid(...parts: string[]): string {
   return ['estimate', ...parts].join('__');
 }
 
+const IDEMPOTENCY_KEY_STORAGE = 'steamzone_estimate_idempotency_key';
+const IDEMPOTENCY_FINGERPRINT_STORAGE = 'steamzone_estimate_idempotency_fingerprint';
+
+function generateIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function submissionFingerprint(serviceType: ServiceType, answers: unknown): string {
+  try {
+    return `${serviceType}:${JSON.stringify(answers)}`;
+  } catch {
+    // If something is non-serializable, fall back to a nonce so we don't accidentally reuse a key.
+    return `${serviceType}:${Date.now()}`;
+  }
+}
+
+function clearSubmissionIdempotency(): void {
+  if (typeof window === 'undefined') return;
+  sessionStorage.removeItem(IDEMPOTENCY_KEY_STORAGE);
+  sessionStorage.removeItem(IDEMPOTENCY_FINGERPRINT_STORAGE);
+}
+
+function idempotencyKeyForSubmission(serviceType: ServiceType, answers: unknown): string {
+  if (typeof window === 'undefined') return generateIdempotencyKey();
+
+  const fingerprint = submissionFingerprint(serviceType, answers);
+  const storedFingerprint = sessionStorage.getItem(IDEMPOTENCY_FINGERPRINT_STORAGE);
+  const storedKey = sessionStorage.getItem(IDEMPOTENCY_KEY_STORAGE);
+
+  if (storedFingerprint === fingerprint && storedKey) {
+    return storedKey;
+  }
+
+  const nextKey = generateIdempotencyKey();
+  sessionStorage.setItem(IDEMPOTENCY_FINGERPRINT_STORAGE, fingerprint);
+  sessionStorage.setItem(IDEMPOTENCY_KEY_STORAGE, nextKey);
+  return nextKey;
+}
+
 const fieldClass =
   'w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200';
 
@@ -216,6 +258,8 @@ export default function GetEstimatePage() {
   const [result, setResult] = useState<EstimateResult | null>(null);
   const [latestRecord, setLatestRecord] = useState<EstimateRecord | null>(null);
   const [emailDeliveryMode, setEmailDeliveryMode] = useState<EstimateDeliveryMode | null>(null);
+  const [lastIdempotencyKey, setLastIdempotencyKey] = useState<string | null>(null);
+  const [lastEmailResult, setLastEmailResult] = useState<{ success: boolean; message: string; deliveryMode?: EstimateDeliveryMode; idempotent?: boolean; resent?: boolean } | null>(null);
   const [statusMessage, setStatusMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -249,7 +293,10 @@ export default function GetEstimatePage() {
     setResult(null);
     setLatestRecord(null);
     setEmailDeliveryMode(null);
+    setLastIdempotencyKey(null);
+    setLastEmailResult(null);
     setStatusMessage('');
+    clearSubmissionIdempotency();
   }
 
   function stepForward(): void {
@@ -369,22 +416,27 @@ export default function GetEstimatePage() {
 
     const answers = currentAnswers();
     try {
+      const idempotencyKey = idempotencyKeyForSubmission(serviceType, answers);
+      setLastIdempotencyKey(idempotencyKey);
+
       const response = await fetch('/api/estimate-create', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
+          'x-idempotency-key': idempotencyKey,
         },
         body: JSON.stringify({ serviceType, answers }),
       });
 
       const payload = (await response.json()) as {
         record?: EstimateRecord;
-        email?: { success: boolean; message: string; deliveryMode?: EstimateDeliveryMode };
+        email?: { success: boolean; message: string; deliveryMode?: EstimateDeliveryMode; idempotent?: boolean; resent?: boolean };
         message?: string;
       };
 
       if (!response.ok || !payload.record) {
         setEmailDeliveryMode(null);
+        setLastEmailResult(null);
         setStatusMessage(payload.message ?? 'Unable to generate estimate. Please try again.');
         setIsSubmitting(false);
         return;
@@ -392,9 +444,16 @@ export default function GetEstimatePage() {
 
       setLatestRecord(payload.record);
       setResult(payload.record.result);
+      setLastEmailResult(payload.email ?? null);
 
       if (payload.email?.success) {
         setEmailDeliveryMode(payload.email.deliveryMode ?? 'customer');
+
+        if (payload.email.idempotent) {
+          setStatusMessage(`Quote ${payload.record.quoteNumber} already generated. Duplicate submission was prevented (no extra email sent).`);
+          setIsSubmitting(false);
+          return;
+        }
 
         if (payload.email.deliveryMode === 'internal') {
           setStatusMessage(`Quote ${payload.record.quoteNumber} generated. Estimate details were sent to Steam Zone for live follow-up.`);
@@ -412,6 +471,57 @@ export default function GetEstimatePage() {
       }
     } catch {
       setEmailDeliveryMode(null);
+      setLastEmailResult(null);
+      setStatusMessage('Unable to reach the estimate engine. Please try again later.');
+    }
+
+    setIsSubmitting(false);
+  }
+
+  async function resendLatestEmail(): Promise<void> {
+    if (!latestRecord || !lastIdempotencyKey) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    setStatusMessage('Re-sending your estimate email...');
+
+    const answers = currentAnswers();
+    try {
+      const response = await fetch('/api/estimate-create', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-idempotency-key': lastIdempotencyKey,
+          'x-idempotency-resend': '1',
+        },
+        body: JSON.stringify({ serviceType, answers }),
+      });
+
+      const payload = (await response.json()) as {
+        record?: EstimateRecord;
+        email?: { success: boolean; message: string; deliveryMode?: EstimateDeliveryMode; idempotent?: boolean; resent?: boolean };
+        message?: string;
+      };
+
+      if (!response.ok || !payload.record) {
+        setStatusMessage(payload.message ?? 'Unable to resend the email. Please try again.');
+        setIsSubmitting(false);
+        return;
+      }
+
+      setLatestRecord(payload.record);
+      setResult(payload.record.result);
+      setLastEmailResult(payload.email ?? null);
+
+      if (payload.email?.success) {
+        setEmailDeliveryMode(payload.email.deliveryMode ?? 'customer');
+        setStatusMessage(`Quote ${payload.record.quoteNumber} emailed successfully.`);
+      } else {
+        setEmailDeliveryMode(null);
+        setStatusMessage(`Quote ${payload.record.quoteNumber} generated, but email could not be delivered: ${payload.email?.message ?? 'Unknown error.'}`);
+      }
+    } catch {
       setStatusMessage('Unable to reach the estimate engine. Please try again later.');
     }
 
@@ -770,6 +880,17 @@ export default function GetEstimatePage() {
               >
                 Request Callback
               </a>
+              {emailDeliveryMode === null && latestRecord && lastEmailResult && !lastEmailResult.success && (
+                <button
+                  type="button"
+                  onClick={resendLatestEmail}
+                  disabled={isSubmitting}
+                  className="rounded-lg border border-blue-200 bg-blue-50 px-6 py-3 font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  data-testid={tid('resend_email')}
+                >
+                  Try Sending Email Again
+                </button>
+              )}
               {emailDeliveryMode === 'customer' && latestRecord?.contact.email && (
                 <div className="inline-flex items-center rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
                   <Mail className="mr-2 h-4 w-4" />

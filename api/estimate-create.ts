@@ -5,6 +5,7 @@ type ApiRequest = { method?: string; body?: unknown; headers?: Record<string, st
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
 
 const postalCodeRegex = /^[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d$/;
+const idempotencyKeyRegex = /^[A-Za-z0-9._:-]{8,200}$/;
 
 type EngineModule = {
   createDefaultPricingConfig: () => PricingConfig;
@@ -26,6 +27,17 @@ async function getEngine(): Promise<EngineModule> {
 
 function safeString(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback;
+}
+
+function headerValue(req: ApiRequest, name: string): string | null {
+  const headers = req.headers ?? {};
+  const lower = name.toLowerCase();
+  const exact = headers[name];
+  const value = exact ?? headers[lower];
+  if (Array.isArray(value)) {
+    return value[0] ?? null;
+  }
+  return typeof value === 'string' ? value : null;
 }
 
 function nowIso(): string {
@@ -139,6 +151,126 @@ async function storeEstimateRecord(record: EstimateRecord): Promise<{ stored: bo
   }
 }
 
+async function fetchEstimateRecordByIdempotencyKey(idempotencyKey: string): Promise<EstimateRecord | null> {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) {
+    return null;
+  }
+
+  try {
+    const supa = await import('@supabase/supabase-js');
+    const supabase = supa.createClient(url, key, { auth: { persistSession: false } });
+
+    const { data, error } = await supabase
+      .from('estimate_records')
+      .select(
+        'id, quote_number, created_at, service_type, postal_code, zone, contact, answers, result, pricing_version, utm'
+      )
+      .eq('idempotency_key', idempotencyKey)
+      .maybeSingle();
+
+    if (error || !data) {
+      // If the column isn't present yet (migration not run), treat as not found.
+      return null;
+    }
+
+    const row = data as unknown as {
+      id: string;
+      quote_number: string;
+      created_at: string;
+      service_type: ServiceType;
+      postal_code: string;
+      zone: WindowZone;
+      contact: LeadContact;
+      answers: unknown;
+      result: EstimateRecord['result'];
+      pricing_version: number;
+      utm?: unknown;
+    };
+
+    return {
+      id: row.id,
+      quoteNumber: row.quote_number,
+      createdAt: row.created_at,
+      serviceType: row.service_type,
+      postalCode: row.postal_code,
+      zone: row.zone,
+      contact: row.contact,
+      answers: row.answers,
+      result: row.result,
+      pricingVersion: row.pricing_version,
+      utm: (row.utm ?? {}) as EstimateRecord['utm'],
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function storeEstimateRecordWithIdempotency(
+  record: EstimateRecord,
+  idempotencyKey: string | null
+): Promise<{ stored: boolean; recordId?: string; existing?: EstimateRecord }> {
+  if (!idempotencyKey) {
+    const stored = await storeEstimateRecord(record);
+    return { stored: stored.stored, recordId: stored.recordId };
+  }
+
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) {
+    return { stored: false };
+  }
+
+  try {
+    const supa = await import('@supabase/supabase-js');
+    const supabase = supa.createClient(url, key, { auth: { persistSession: false } });
+
+    // First, check if this submission was already stored.
+    const existing = await fetchEstimateRecordByIdempotencyKey(idempotencyKey);
+    if (existing) {
+      return { stored: true, recordId: existing.id, existing };
+    }
+
+    // Try inserting with idempotency_key. If the column isn't migrated yet, fall back to legacy insert.
+    const insertPayload: Record<string, unknown> = {
+      quote_number: record.quoteNumber,
+      source: 'website',
+      service_type: record.serviceType,
+      postal_code: record.postalCode,
+      zone: record.zone,
+      contact: record.contact,
+      answers: record.answers,
+      result: record.result,
+      pricing_version: record.pricingVersion,
+      utm: record.utm,
+      idempotency_key: idempotencyKey,
+    };
+
+    const { data, error } = await supabase.from('estimate_records').insert(insertPayload).select('id').single();
+
+    if (!error && data) {
+      return { stored: true, recordId: (data as { id?: string } | null)?.id };
+    }
+
+    const message = error?.message ?? '';
+    if (message.toLowerCase().includes('idempotency_key') && message.toLowerCase().includes('does not exist')) {
+      const legacy = await storeEstimateRecord(record);
+      return { stored: legacy.stored, recordId: legacy.recordId };
+    }
+
+    // Handle race: if another request inserted first, fetch the stored record and return it.
+    const raced = await fetchEstimateRecordByIdempotencyKey(idempotencyKey);
+    if (raced) {
+      return { stored: true, recordId: raced.id, existing: raced };
+    }
+
+    return { stored: false };
+  } catch {
+    return { stored: false };
+  }
+}
+
 async function postToGhl(record: EstimateRecord): Promise<{ posted: boolean }> {
   const url = process.env.GHL_INBOUND_WEBHOOK_URL?.trim();
   if (!url) {
@@ -167,6 +299,12 @@ async function postToGhl(record: EstimateRecord): Promise<{ posted: boolean }> {
   } catch {
     return { posted: false };
   }
+}
+
+function currentDeliveryMode(): 'customer' | 'internal' {
+  const fromEmail = process.env.ESTIMATE_FROM_EMAIL;
+  const usesResendOnboardingSender = fromEmail?.toLowerCase().includes('onboarding@resend.dev') ?? false;
+  return usesResendOnboardingSender ? 'internal' : 'customer';
 }
 
 async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boolean; message: string; deliveryMode?: 'customer' | 'internal' }> {
@@ -310,6 +448,14 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
 
   try {
+    const idempotencyKeyRaw = headerValue(req, 'x-idempotency-key')?.trim() ?? '';
+    const wantsResend = (headerValue(req, 'x-idempotency-resend') ?? '').toLowerCase() === 'true' || headerValue(req, 'x-idempotency-resend') === '1';
+    const idempotencyKey = idempotencyKeyRaw ? idempotencyKeyRaw : null;
+    if (idempotencyKey && !idempotencyKeyRegex.test(idempotencyKey)) {
+      res.status(400).json({ message: 'Invalid X-Idempotency-Key header.' });
+      return;
+    }
+
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const serviceType = coerceServiceType(body?.serviceType);
     const answers = body?.answers;
@@ -336,6 +482,39 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     if (contactError) {
       res.status(400).json({ message: contactError });
       return;
+    }
+
+    // If we already created a record for this idempotency key, return it (and skip duplicate emails),
+    // unless the client explicitly asks for a resend after configuration fixes.
+    if (idempotencyKey) {
+      const existing = await fetchEstimateRecordByIdempotencyKey(idempotencyKey);
+      if (existing) {
+        if (wantsResend) {
+          const [email, ghl] = await Promise.all([sendEstimateEmail(existing), postToGhl(existing)]);
+          res.status(200).json({
+            record: existing,
+            email: { ...email, idempotent: true, resent: true, deliveryMode: email.deliveryMode ?? currentDeliveryMode() },
+            storage: { stored: true },
+            pricing: { source: 'supabase', version: existing.pricingVersion },
+            ghl,
+          });
+          return;
+        }
+
+        res.status(200).json({
+          record: existing,
+          email: {
+            success: true,
+            message: 'Duplicate submission prevented. Quote already generated; not sending a second email.',
+            deliveryMode: currentDeliveryMode(),
+            idempotent: true,
+          },
+          storage: { stored: true },
+          pricing: { source: 'supabase', version: existing.pricingVersion },
+          ghl: { posted: false, idempotent: true },
+        });
+        return;
+      }
     }
 
     const engine = await getEngine();
@@ -368,7 +547,24 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     };
 
     try {
-      const stored = await storeEstimateRecord(record);
+      const stored = await storeEstimateRecordWithIdempotency(record, idempotencyKey);
+      if (stored.existing) {
+        // Another request already inserted this idempotency key (race). Return the existing record.
+        res.status(200).json({
+          record: stored.existing,
+          email: {
+            success: true,
+            message: 'Duplicate submission prevented. Quote already generated; not sending a second email.',
+            deliveryMode: currentDeliveryMode(),
+            idempotent: true,
+          },
+          storage: { stored: true },
+          pricing: { source: pricingSource, version: pricingConfig.version },
+          ghl: { posted: false, idempotent: true },
+        });
+        return;
+      }
+
       if (stored.recordId) {
         record.id = stored.recordId;
       }
