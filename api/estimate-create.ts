@@ -560,6 +560,8 @@ type GhlClient = {
   request: (path: string, options?: { method?: string; query?: Record<string, unknown>; body?: unknown }) => Promise<unknown>;
 };
 
+type GhlSmsResult = { attempted: boolean; sent: boolean; error?: string };
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object') return null;
   return value as Record<string, unknown>;
@@ -815,6 +817,63 @@ async function syncToGhlViaApi(record: EstimateRecord): Promise<GhlResult> {
     return { posted: true, mode: 'api', contactId: String(contactId), opportunityId };
   } catch (error) {
     return { posted: false, mode: 'api', error: error instanceof Error ? error.message : 'unknown_error' };
+  }
+}
+
+async function sendEstimateSmsViaGhlApi(record: EstimateRecord, contactId: string): Promise<GhlSmsResult> {
+  // Only send SMS when we have explicit consent + a phone number to receive it.
+  const hasPhone = Boolean(record.contact.phone?.replace(/\D/g, ''));
+  if (!record.contact.consentToContact || !hasPhone) {
+    return { attempted: false, sent: false };
+  }
+
+  const token = env('GHL_PRIVATE_INTEGRATION_TOKEN') ?? env('GHL_ACCESS_TOKEN');
+  if (!token) return { attempted: false, sent: false, error: 'missing_token' };
+
+  const baseUrl = (env('GHL_BASE_URL') ?? ghlBaseUrlDefault).replace(/\/+$/, '');
+  // GHL Conversations "send message" endpoint uses a different Version header than the core CRM APIs.
+  const conversationsVersion = '2021-04-15';
+
+  try {
+    const engine = await getEngine();
+    const estimateRange = `${engine.formatCurrency(record.result.estimateLow)} - ${engine.formatCurrency(record.result.estimateHigh)}`;
+
+    const msg = [
+      `Steam Zone estimate: ${estimateRange}`,
+      `Quote: ${record.quoteNumber}`,
+      `We also emailed the PDF quote to you.`,
+      `Reply BOOK to schedule, or reply with questions.`,
+    ].join('\n');
+
+    const url = new URL(baseUrl + '/conversations/messages');
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+        Version: conversationsVersion,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'SMS',
+        contactId,
+        message: msg,
+      }),
+    });
+
+    const contentType = res.headers.get('content-type') || '';
+    const isJson = contentType.includes('application/json');
+    const payload = isJson ? await res.json().catch(() => null) : await res.text().catch(() => '');
+
+    if (!res.ok) {
+      const detail = isJson ? JSON.stringify(payload) : String(payload);
+      return { attempted: true, sent: false, error: `sms_failed:${res.status}:${detail}` };
+    }
+
+    const ok = Boolean((payload as Record<string, unknown> | null)?.success ?? true);
+    return { attempted: true, sent: ok };
+  } catch (e) {
+    return { attempted: true, sent: false, error: e instanceof Error ? e.message : 'sms_exception' };
   }
 }
 
@@ -1165,10 +1224,15 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       }
 
       const [email, ghl] = await Promise.all([sendEstimateEmail(record), syncToGhl(record)]);
+      const sms =
+        ghl?.posted && ghl?.mode === 'api' && ghl?.contactId
+          ? await sendEstimateSmsViaGhlApi(record, String(ghl.contactId))
+          : ({ attempted: false, sent: false } as GhlSmsResult);
 
       res.status(200).json({
         record,
         email,
+        sms,
         storage: { stored: stored.stored, error: stored.error },
         pricing: { source: pricingSource, version: pricingConfig.version },
         ghl,
@@ -1177,6 +1241,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       res.status(200).json({
         record,
         email: { success: false, message: error instanceof Error ? error.message : 'Unknown estimate-create error.' },
+        sms: { attempted: false, sent: false },
         storage: { stored: false },
         pricing: { source: pricingSource, version: pricingConfig.version },
         ghl: { posted: false },
