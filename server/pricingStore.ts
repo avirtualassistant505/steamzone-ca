@@ -1,5 +1,5 @@
-import type { PricingConfig } from '../shared/estimateEngine';
-import { createDefaultPricingConfig } from '../shared/estimateEngine';
+import type { PricingConfig } from './estimateEngine';
+import { createDefaultPricingConfig } from './estimateEngine';
 import { getSupabaseAdminClient } from './supabaseAdmin';
 
 type PricingSource = 'supabase' | 'defaults' | 'env_missing';

@@ -8,7 +8,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
 
   try {
-    const engine = await import('../shared/estimateEngine');
+    const engine = await import('../server/estimateEngine');
     const defaults = engine.createDefaultPricingConfig();
 
     const url = process.env.SUPABASE_URL;
