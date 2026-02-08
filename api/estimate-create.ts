@@ -1,20 +1,8 @@
 import { Resend } from 'resend';
-import {
-  calculateEstimate,
-  createDefaultPricingConfig,
-  detectZoneFromPostalCode,
-  formatCurrency,
-  formatServiceLabel,
-  formatZoneLabel,
-  type EstimateRecord,
-  type LeadContact,
-  type PricingConfig,
-  type ServiceType,
-} from '../src/lib/estimateEngine';
-import { loadActivePricingConfig } from '../server/pricingStore';
-import { getSupabaseAdminClient } from '../server/supabaseAdmin';
-import { buildQuotePdf, renderEmailTemplate } from './send-estimate';
-import type { ApiRequest, ApiResponse } from '../server/apiTypes';
+import type { EstimateRecord, LeadContact, PricingConfig, ServiceType, WindowZone } from '../src/lib/estimateEngine';
+
+type ApiRequest = { method?: string; body?: unknown; headers?: Record<string, string | string[] | undefined> };
+type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
 
 const postalCodeRegex = /^[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d$/;
 
@@ -60,44 +48,77 @@ function formatHoursRange(low: number, high: number): string {
 }
 
 async function loadPricingConfigForEstimate(): Promise<{ config: PricingConfig; source: string }> {
-  // Prefer Supabase, but always keep a deterministic fallback for early setup/local dev.
+  const engine = await import('../src/lib/estimateEngine');
+  const defaults = engine.createDefaultPricingConfig() as PricingConfig;
+
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) {
+    return { config: defaults, source: 'env_missing' };
+  }
+
   try {
-    const loaded = await loadActivePricingConfig();
-    return { config: loaded.config, source: loaded.source };
+    const supa = await import('@supabase/supabase-js');
+    const supabase = supa.createClient(url, key, { auth: { persistSession: false } });
+
+    const { data, error } = await supabase
+      .from('pricing_config')
+      .select('config, updated_at')
+      .eq('id', 'active')
+      .maybeSingle();
+
+    if (error || !data?.config) {
+      return { config: defaults, source: 'defaults' };
+    }
+
+    const config = data.config as PricingConfig;
+    if (data.updated_at) {
+      config.updatedAt = new Date(data.updated_at).toISOString();
+    }
+
+    return { config, source: 'supabase' };
   } catch {
-    return { config: createDefaultPricingConfig(), source: 'defaults_error' };
+    return { config: defaults, source: 'defaults_error' };
   }
 }
 
 async function storeEstimateRecord(record: EstimateRecord): Promise<{ stored: boolean; recordId?: string }> {
-  const supabase = await getSupabaseAdminClient();
-  if (!supabase) {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) {
     return { stored: false };
   }
 
-  const { data, error } = await supabase
-    .from('estimate_records')
-    .insert({
-      quote_number: record.quoteNumber,
-      source: 'website',
-      service_type: record.serviceType,
-      postal_code: record.postalCode,
-      zone: record.zone,
-      contact: record.contact,
-      answers: record.answers,
-      result: record.result,
-      pricing_version: record.pricingVersion,
-      utm: record.utm,
-    })
-    .select('id')
-    .single();
+  try {
+    const supa = await import('@supabase/supabase-js');
+    const supabase = supa.createClient(url, key, { auth: { persistSession: false } });
 
-  if (error) {
-    // Storage failure should not prevent the quote from being generated/sent.
+    const { data, error } = await supabase
+      .from('estimate_records')
+      .insert({
+        quote_number: record.quoteNumber,
+        source: 'website',
+        service_type: record.serviceType,
+        postal_code: record.postalCode,
+        zone: record.zone,
+        contact: record.contact,
+        answers: record.answers,
+        result: record.result,
+        pricing_version: record.pricingVersion,
+        utm: record.utm,
+      })
+      .select('id')
+      .single();
+
+    if (error) {
+      // Storage failure should not prevent the quote from being generated/sent.
+      return { stored: false };
+    }
+
+    return { stored: true, recordId: (data as { id?: string } | null)?.id };
+  } catch {
     return { stored: false };
   }
-
-  return { stored: true, recordId: data?.id as string | undefined };
 }
 
 async function postToGhl(record: EstimateRecord): Promise<{ posted: boolean }> {
@@ -152,9 +173,10 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
 
   const resend = new Resend(resendApiKey);
 
-  const estimateRange = `${formatCurrency(record.result.estimateLow)} - ${formatCurrency(record.result.estimateHigh)}`;
+  const engine = await import('../src/lib/estimateEngine');
+  const estimateRange = `${engine.formatCurrency(record.result.estimateLow)} - ${engine.formatCurrency(record.result.estimateHigh)}`;
   const durationRange = formatHoursRange(record.result.durationLowHours, record.result.durationHighHours);
-  const service = formatServiceLabel(record.serviceType);
+  const service = engine.formatServiceLabel(record.serviceType);
 
   const to = usesResendOnboardingSender ? [internalInbox as string] : [record.contact.email];
   const bcc = !usesResendOnboardingSender && internalInbox ? [internalInbox] : undefined;
@@ -178,7 +200,7 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
           { label: 'Phone', value: record.contact.phone },
           { label: 'Service', value: service },
           { label: 'Address', value: record.contact.address?.trim() ? record.contact.address : 'Not provided' },
-          { label: 'Postal / Zone', value: `${record.postalCode} / ${formatZoneLabel(record.zone)}` },
+          { label: 'Postal / Zone', value: `${record.postalCode} / ${engine.formatZoneLabel(record.zone as WindowZone)}` },
           { label: 'Next Step', value: record.result.bookingMode },
         ],
         notes: record.result.notes ?? [],
@@ -200,7 +222,7 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
           { label: 'Quote Number', value: record.quoteNumber },
           { label: 'Estimated Duration', value: durationRange },
           { label: 'Address', value: record.contact.address?.trim() ? record.contact.address : 'Not provided' },
-          { label: 'Postal / Zone', value: `${record.postalCode} / ${formatZoneLabel(record.zone)}` },
+          { label: 'Postal / Zone', value: `${record.postalCode} / ${engine.formatZoneLabel(record.zone as WindowZone)}` },
           { label: 'Next Step', value: record.result.bookingMode },
         ],
         notes: record.result.notes ?? [],
@@ -209,8 +231,9 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
           'To book or confirm details, reply to this email or call Steam Zone at (431) 205-3909. We appreciate your business.',
       };
 
-  const html = renderEmailTemplate(templateInput);
-  const pdfBytes = await buildQuotePdf(templateInput);
+  const mailer = await import('./send-estimate');
+  const html = mailer.renderEmailTemplate(templateInput);
+  const pdfBytes = await mailer.buildQuotePdf(templateInput);
   const text = usesResendOnboardingSender
     ? [
         `New Steam Zone estimate lead ${record.quoteNumber}`,
@@ -292,7 +315,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     return;
   }
 
-  const zone = detectZoneFromPostalCode(postalCode);
+  const engine = await import('../src/lib/estimateEngine');
+  const zone = engine.detectZoneFromPostalCode(postalCode);
   const normalizedAnswers = {
     ...answers,
     postalCode,
@@ -301,7 +325,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   };
 
   const { config: pricingConfig, source: pricingSource } = await loadPricingConfigForEstimate();
-  const estimate = calculateEstimate(serviceType, normalizedAnswers, pricingConfig);
+  const estimate = engine.calculateEstimate(serviceType, normalizedAnswers, pricingConfig);
 
   const createdAt = nowIso();
   const quoteNumber = generateQuoteNumber();
