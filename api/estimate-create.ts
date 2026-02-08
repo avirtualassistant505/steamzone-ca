@@ -791,15 +791,22 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
 
   try {
-    const idempotencyKeyRaw = headerValue(req, 'x-idempotency-key')?.trim() ?? '';
-    const wantsResend = (headerValue(req, 'x-idempotency-resend') ?? '').toLowerCase() === 'true' || headerValue(req, 'x-idempotency-resend') === '1';
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+
+    // Idempotency: prefer header (best practice), but allow body for tools that can't set headers.
+    const idempotencyKeyRaw =
+      headerValue(req, 'x-idempotency-key')?.trim() ??
+      safeString((body as Record<string, unknown> | null)?.idempotencyKey, '').trim() ??
+      safeString((body as Record<string, unknown> | null)?.idempotency_key, '').trim() ??
+      '';
+    const wantsResend =
+      (headerValue(req, 'x-idempotency-resend') ?? '').toLowerCase() === 'true' || headerValue(req, 'x-idempotency-resend') === '1';
     const idempotencyKey = idempotencyKeyRaw ? idempotencyKeyRaw : null;
     if (idempotencyKey && !idempotencyKeyRegex.test(idempotencyKey)) {
-      res.status(400).json({ message: 'Invalid X-Idempotency-Key header.' });
+      res.status(400).json({ message: 'Invalid idempotency key.' });
       return;
     }
 
-    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const serviceType = coerceServiceType(body?.serviceType);
     const answers = body?.answers;
 
