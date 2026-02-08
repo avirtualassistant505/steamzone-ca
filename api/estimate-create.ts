@@ -96,9 +96,45 @@ function validateContact(contact: LeadContact): string | null {
 }
 
 function coerceServiceType(value: unknown): ServiceType | null {
-  return value === 'window' || value === 'commercialWindow' || value === 'carpet' || value === 'postConstruction'
-    ? (value as ServiceType)
-    : null;
+  if (value === 'window' || value === 'commercialWindow' || value === 'carpet' || value === 'postConstruction') {
+    return value as ServiceType;
+  }
+
+  // Accept common label/synonym values so external systems (ex: GHL workflows) can submit without strict keys.
+  const raw = typeof value === 'string' ? value : '';
+  const normalized = raw.trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+  if (!normalized) return null;
+
+  if (
+    normalized === 'residential window cleaning' ||
+    normalized === 'window cleaning' ||
+    normalized === 'residential windows' ||
+    normalized === 'windows' ||
+    normalized === 'residential window'
+  ) {
+    return 'window';
+  }
+  if (
+    normalized === 'commercial window cleaning' ||
+    normalized === 'commercial windows' ||
+    normalized === 'commercial window'
+  ) {
+    return 'commercialWindow';
+  }
+  if (normalized === 'carpet cleaning' || normalized === 'carpet') {
+    return 'carpet';
+  }
+  if (
+    normalized === 'post construction' ||
+    normalized === 'post construction cleaning' ||
+    normalized === 'post-construction cleaning' ||
+    normalized === 'post construction cleanup' ||
+    normalized === 'post construction clean'
+  ) {
+    return 'postConstruction';
+  }
+
+  return null;
 }
 
 function formatHoursRange(low: number, high: number): string {
