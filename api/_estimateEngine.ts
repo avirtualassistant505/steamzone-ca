@@ -1439,7 +1439,7 @@ export function formatCurrency(value: number): string {
 }
 
 // This file exists to support server-side quote calculation inside Vercel `/api/*` routes.
-// It is also deployed as `/api/_shared/estimateEngine`, but that endpoint isn't meant to be used.
+// It is also deployed as `/api/_estimateEngine`, but that endpoint isn't meant to be used.
 type ApiRequest = { method?: string };
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
 

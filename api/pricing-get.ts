@@ -1,7 +1,7 @@
 type ApiRequest = { method?: string };
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
 
-import { createDefaultPricingConfig } from './_shared/estimateEngine';
+import { createDefaultPricingConfig } from './_estimateEngine';
 
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (req.method !== 'GET') {
