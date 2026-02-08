@@ -11,7 +11,7 @@ export interface LoadedPricingConfig {
 
 export async function loadActivePricingConfig(): Promise<LoadedPricingConfig> {
   const defaults = createDefaultPricingConfig();
-  const supabase = getSupabaseAdminClient();
+  const supabase = await getSupabaseAdminClient();
   if (!supabase) {
     return { config: defaults, source: 'env_missing' };
   }
@@ -36,7 +36,7 @@ export async function loadActivePricingConfig(): Promise<LoadedPricingConfig> {
 }
 
 export async function saveActivePricingConfig(next: PricingConfig): Promise<PricingConfig> {
-  const supabase = getSupabaseAdminClient();
+  const supabase = await getSupabaseAdminClient();
   if (!supabase) {
     throw new Error('Supabase admin credentials are missing.');
   }
@@ -62,4 +62,3 @@ export async function saveActivePricingConfig(next: PricingConfig): Promise<Pric
 
   return saved;
 }
-

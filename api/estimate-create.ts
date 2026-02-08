@@ -70,7 +70,7 @@ async function loadPricingConfigForEstimate(): Promise<{ config: PricingConfig; 
 }
 
 async function storeEstimateRecord(record: EstimateRecord): Promise<{ stored: boolean; recordId?: string }> {
-  const supabase = getSupabaseAdminClient();
+  const supabase = await getSupabaseAdminClient();
   if (!supabase) {
     return { stored: false };
   }
