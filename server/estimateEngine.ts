@@ -938,8 +938,8 @@ export function createDefaultLeadContact(): LeadContact {
     address: '',
     phone: '',
     email: '',
-    // Consent should be an explicit opt-in (required at submission time).
-    consentToContact: false,
+    // Start checked per business preference (user can uncheck).
+    consentToContact: true,
     // Optional marketing consent for offers/updates.
     marketingOptIn: false,
   };
