@@ -629,7 +629,7 @@ async function syncToGhl(record: EstimateRecord): Promise<GhlResult> {
   if (process.env.GHL_INBOUND_WEBHOOK_URL?.trim()) {
     return postToGhlWebhook(record);
   }
-  return { posted: false };
+  return { posted: false, error: 'missing_env' };
 }
 
 function currentDeliveryMode(): 'customer' | 'internal' {
