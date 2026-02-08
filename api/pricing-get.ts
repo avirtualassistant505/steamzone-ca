@@ -1,6 +1,8 @@
 type ApiRequest = { method?: string };
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
 
+import { createDefaultPricingConfig } from './_shared/estimateEngine';
+
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (req.method !== 'GET') {
     res.status(405).json({ message: 'Method not allowed' });
@@ -8,8 +10,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
 
   try {
-    const engine = await import('../server/estimateEngine');
-    const defaults = engine.createDefaultPricingConfig();
+    const defaults = createDefaultPricingConfig();
 
     const url = process.env.SUPABASE_URL;
     const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
