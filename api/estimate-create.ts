@@ -1,22 +1,28 @@
 import { Resend } from 'resend';
-import {
-  calculateEstimate,
-  createDefaultPricingConfig,
-  detectZoneFromPostalCode,
-  formatCurrency,
-  formatServiceLabel,
-  formatZoneLabel,
-  type EstimateRecord,
-  type LeadContact,
-  type PricingConfig,
-  type ServiceType,
-  type WindowZone,
-} from './estimate-engine';
+import type { EstimateRecord, LeadContact, PricingConfig, ServiceType, WindowZone } from '../src/lib/estimateEngine';
 
 type ApiRequest = { method?: string; body?: unknown; headers?: Record<string, string | string[] | undefined> };
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
 
 const postalCodeRegex = /^[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d$/;
+
+type EngineModule = {
+  createDefaultPricingConfig: () => PricingConfig;
+  calculateEstimate: (serviceType: ServiceType, input: unknown, config: PricingConfig) => EstimateRecord['result'];
+  detectZoneFromPostalCode: (postalCode: string) => WindowZone;
+  formatCurrency: (value: number) => string;
+  formatServiceLabel: (serviceType: ServiceType) => string;
+  formatZoneLabel: (zone: WindowZone) => string;
+};
+
+let enginePromise: Promise<EngineModule> | null = null;
+
+async function getEngine(): Promise<EngineModule> {
+  if (!enginePromise) {
+    enginePromise = import('../server/estimateEngineRuntime.mjs').then((mod) => mod as unknown as EngineModule);
+  }
+  return enginePromise;
+}
 
 function safeString(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback;
@@ -60,7 +66,8 @@ function formatHoursRange(low: number, high: number): string {
 }
 
 async function loadPricingConfigForEstimate(): Promise<{ config: PricingConfig; source: string }> {
-  const defaults = createDefaultPricingConfig() as PricingConfig;
+  const engine = await getEngine();
+  const defaults = engine.createDefaultPricingConfig() as PricingConfig;
 
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -184,9 +191,10 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
 
   const resend = new Resend(resendApiKey);
 
-  const estimateRange = `${formatCurrency(record.result.estimateLow)} - ${formatCurrency(record.result.estimateHigh)}`;
+  const engine = await getEngine();
+  const estimateRange = `${engine.formatCurrency(record.result.estimateLow)} - ${engine.formatCurrency(record.result.estimateHigh)}`;
   const durationRange = formatHoursRange(record.result.durationLowHours, record.result.durationHighHours);
-  const service = formatServiceLabel(record.serviceType);
+  const service = engine.formatServiceLabel(record.serviceType);
 
   const to = usesResendOnboardingSender ? [internalInbox as string] : [record.contact.email];
   const bcc = !usesResendOnboardingSender && internalInbox ? [internalInbox] : undefined;
@@ -210,7 +218,7 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
           { label: 'Phone', value: record.contact.phone },
           { label: 'Service', value: service },
           { label: 'Address', value: record.contact.address?.trim() ? record.contact.address : 'Not provided' },
-          { label: 'Postal / Zone', value: `${record.postalCode} / ${formatZoneLabel(record.zone as WindowZone)}` },
+          { label: 'Postal / Zone', value: `${record.postalCode} / ${engine.formatZoneLabel(record.zone as WindowZone)}` },
           { label: 'Next Step', value: record.result.bookingMode },
         ],
         notes: record.result.notes ?? [],
@@ -232,7 +240,7 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
           { label: 'Quote Number', value: record.quoteNumber },
           { label: 'Estimated Duration', value: durationRange },
           { label: 'Address', value: record.contact.address?.trim() ? record.contact.address : 'Not provided' },
-          { label: 'Postal / Zone', value: `${record.postalCode} / ${formatZoneLabel(record.zone as WindowZone)}` },
+          { label: 'Postal / Zone', value: `${record.postalCode} / ${engine.formatZoneLabel(record.zone as WindowZone)}` },
           { label: 'Next Step', value: record.result.bookingMode },
         ],
         notes: record.result.notes ?? [],
@@ -325,7 +333,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     return;
   }
 
-  const zone = detectZoneFromPostalCode(postalCode);
+  const engine = await getEngine();
+  const zone = engine.detectZoneFromPostalCode(postalCode);
   const normalizedAnswers = {
     ...answers,
     postalCode,
@@ -334,7 +343,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   };
 
   const { config: pricingConfig, source: pricingSource } = await loadPricingConfigForEstimate();
-  const estimate = calculateEstimate(serviceType, normalizedAnswers, pricingConfig);
+  const estimate = engine.calculateEstimate(serviceType, normalizedAnswers, pricingConfig);
 
   const createdAt = nowIso();
   const quoteNumber = generateQuoteNumber();

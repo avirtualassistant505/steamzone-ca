@@ -3,6 +3,11 @@
   "installCommand": "npm ci",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
+  "functions": {
+    "api/*.ts": {
+      "includeFiles": "server/estimateEngineRuntime.mjs"
+    }
+  },
   "rewrites": [
     {
       "source": "/api/(.*)",
