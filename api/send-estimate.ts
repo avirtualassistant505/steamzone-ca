@@ -1,5 +1,6 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { Resend } from 'resend';
+import type { ApiRequest, ApiResponse } from '../server/apiTypes';
 
 interface IncomingRecord {
   quoteNumber?: string;
@@ -52,13 +53,6 @@ interface EmailTemplateInput {
 }
 
 type PdfColor = ReturnType<typeof rgb>;
-type PdfRowTone = 'default' | 'muted' | 'danger';
-
-interface PdfCardRow {
-  label: string;
-  value: string;
-  tone?: PdfRowTone;
-}
 
 function hexColor(hex: string): PdfColor {
   const value = hex.trim().replace('#', '');
@@ -72,43 +66,6 @@ function hexColor(hex: string): PdfColor {
   return rgb(r, g, b);
 }
 
-function roundedRectPath(x: number, y: number, width: number, height: number, radius: number): string {
-  const r = Math.max(0, Math.min(radius, width / 2, height / 2));
-  const x0 = x;
-  const y0 = y;
-  const x1 = x + width;
-  const y1 = y + height;
-  return [
-    `M ${x0 + r} ${y0}`,
-    `L ${x1 - r} ${y0}`,
-    `Q ${x1} ${y0} ${x1} ${y0 + r}`,
-    `L ${x1} ${y1 - r}`,
-    `Q ${x1} ${y1} ${x1 - r} ${y1}`,
-    `L ${x0 + r} ${y1}`,
-    `Q ${x0} ${y1} ${x0} ${y1 - r}`,
-    `L ${x0} ${y0 + r}`,
-    `Q ${x0} ${y0} ${x0 + r} ${y0}`,
-    'Z',
-  ].join(' ');
-}
-
-function roundedTopRectPath(x: number, y: number, width: number, height: number, radius: number): string {
-  const r = Math.max(0, Math.min(radius, width / 2, height));
-  const x0 = x;
-  const y0 = y;
-  const x1 = x + width;
-  const y1 = y + height;
-  return [
-    `M ${x0} ${y0}`,
-    `L ${x1} ${y0}`,
-    `L ${x1} ${y1 - r}`,
-    `Q ${x1} ${y1} ${x1 - r} ${y1}`,
-    `L ${x0 + r} ${y1}`,
-    `Q ${x0} ${y1} ${x0} ${y1 - r}`,
-    `L ${x0} ${y0}`,
-    'Z',
-  ].join(' ');
-}
 
 function money(value: number): string {
   return new Intl.NumberFormat('en-CA', {
@@ -167,47 +124,6 @@ function formatHoursRange(low: number | undefined, high: number | undefined): st
   return `${finite(low).toFixed(1)} - ${finite(high).toFixed(1)} hours`;
 }
 
-function wrapText(text: string, maxCharsPerLine: number): string[] {
-  const compact = text.trim();
-  if (!compact) {
-    return [];
-  }
-
-  const words = compact.split(/\s+/);
-  const lines: string[] = [];
-  let current = '';
-
-  for (const word of words) {
-    const chunks: string[] = [];
-    if (word.length <= maxCharsPerLine) {
-      chunks.push(word);
-    } else {
-      for (let index = 0; index < word.length; index += maxCharsPerLine - 1) {
-        const slice = word.slice(index, index + maxCharsPerLine - 1);
-        const hasNext = index + maxCharsPerLine - 1 < word.length;
-        chunks.push(hasNext ? `${slice}-` : slice);
-      }
-    }
-
-    for (const chunk of chunks) {
-      const next = current.length > 0 ? `${current} ${chunk}` : chunk;
-      if (next.length <= maxCharsPerLine) {
-        current = next;
-      } else {
-        if (current.length > 0) {
-          lines.push(current);
-        }
-        current = chunk;
-      }
-    }
-  }
-
-  if (current.length > 0) {
-    lines.push(current);
-  }
-
-  return lines;
-}
 
 function escapeHtml(value: string): string {
   return value
@@ -274,7 +190,7 @@ function renderEmailListCard(title: string, items: string[], tone: 'neutral' | '
   `;
 }
 
-function renderEmailTemplate(input: EmailTemplateInput): string {
+export function renderEmailTemplate(input: EmailTemplateInput): string {
   const details = renderEmailDetailsTable(input.detailRows);
   const noteCard = renderEmailListCard('Project Notes', input.notes, 'neutral');
   const redFlagCard = renderEmailListCard('Items Requiring Confirmation', input.redFlags, 'danger');
@@ -965,7 +881,7 @@ export async function buildQuotePdf(input: EmailTemplateInput): Promise<Uint8Arr
   return pdfDoc.save();
 }
 
-export default async function handler(req: any, res: any) {
+export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (req.method !== 'POST') {
     res.status(405).json({ message: 'Method not allowed' });
     return;

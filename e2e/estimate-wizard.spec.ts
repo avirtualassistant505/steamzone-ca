@@ -1,14 +1,50 @@
 import { expect, test, type Page } from '@playwright/test';
 
-async function mockSendEstimate(page: Page): Promise<void> {
+async function mockEstimateCreate(page: Page): Promise<void> {
   // Playwright rule: selectors must use page.getByTestId(...) (no text selectors, no nth-child).
-  await page.route('**/api/send-estimate', async (route) => {
+  await page.route('**/api/estimate-create', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        message: 'Estimate captured and sent to Steam Zone inbox for follow-up.',
-        deliveryMode: 'internal',
+        record: {
+          id: 'test-record',
+          quoteNumber: 'SZ-260208-ABCD',
+          createdAt: new Date().toISOString(),
+          serviceType: 'window',
+          postalCode: 'R5G 2X3',
+          zone: 'zoneA',
+          contact: {
+            fullName: 'Jane Test',
+            address: '120 Parkside Crescent, Mitchell',
+            phone: '(431) 205-3909',
+            email: 'colinunger@gmail.com',
+            consentToContact: true,
+          },
+          answers: {},
+          result: {
+            serviceType: 'window',
+            subtotal: 350,
+            estimateLow: 280,
+            estimateHigh: 430,
+            durationLowHours: 2.5,
+            durationHighHours: 4.0,
+            confidence: 'green',
+            bookingMode: 'instant_book',
+            complexityScore: 0,
+            estimatedSqft: 0,
+            redFlags: [],
+            includedItems: ['Test include'],
+            notes: ['Test note'],
+          },
+          pricingVersion: 2,
+          utm: {},
+        },
+        email: {
+          success: true,
+          message: 'Estimate captured and sent to Steam Zone inbox for follow-up.',
+          deliveryMode: 'internal',
+        },
       }),
     });
   });
@@ -32,7 +68,7 @@ async function submitAndAssertConfirmation(page: Page): Promise<void> {
 }
 
 test('residential windows wizard (window)', async ({ page }) => {
-  await mockSendEstimate(page);
+  await mockEstimateCreate(page);
   await page.goto('/estimate');
 
   await page.getByTestId('estimate__service__window').click();
@@ -73,7 +109,7 @@ test('residential windows wizard (window)', async ({ page }) => {
 });
 
 test('commercial windows wizard (commercialWindow)', async ({ page }) => {
-  await mockSendEstimate(page);
+  await mockEstimateCreate(page);
   await page.goto('/estimate');
 
   await page.getByTestId('estimate__service__commercialWindow').click();
@@ -106,7 +142,7 @@ test('commercial windows wizard (commercialWindow)', async ({ page }) => {
 });
 
 test('carpet cleaning wizard (carpet)', async ({ page }) => {
-  await mockSendEstimate(page);
+  await mockEstimateCreate(page);
   await page.goto('/estimate');
 
   await page.getByTestId('estimate__service__carpet').click();
@@ -139,7 +175,7 @@ test('carpet cleaning wizard (carpet)', async ({ page }) => {
 });
 
 test('post-construction wizard (postConstruction)', async ({ page }) => {
-  await mockSendEstimate(page);
+  await mockEstimateCreate(page);
   await page.goto('/estimate');
 
   await page.getByTestId('estimate__service__postConstruction').click();

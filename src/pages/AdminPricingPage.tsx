@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Clock3, Database, RefreshCw, Save } from 'lucide-react';
+import { Clock3, Database, Save } from 'lucide-react';
 import {
+  createDefaultPricingConfig,
   formatBookingMode,
   formatConfidence,
   formatCurrency,
   formatServiceLabel,
-  loadEstimateRecords,
   type EstimateRecord,
   type PricingConfig,
   type WindowZone,
@@ -13,8 +13,8 @@ import {
 
 interface AdminPricingPageProps {
   pricingConfig: PricingConfig;
-  onSavePricingConfig: (nextConfig: PricingConfig) => void;
-  onResetPricingConfig: () => void;
+  onPricingConfigChange: (nextConfig: PricingConfig) => void;
+  pricingStatus: 'loading' | 'ready' | 'error';
 }
 
 const cardClass = 'rounded-2xl border border-gray-200 bg-white p-6 shadow-sm';
@@ -64,10 +64,12 @@ function ToggleField({
   );
 }
 
-export default function AdminPricingPage({ pricingConfig, onSavePricingConfig, onResetPricingConfig }: AdminPricingPageProps) {
+export default function AdminPricingPage({ pricingConfig, onPricingConfigChange, pricingStatus }: AdminPricingPageProps) {
   const [draftConfig, setDraftConfig] = useState<PricingConfig>(pricingConfig);
   const [saveMessage, setSaveMessage] = useState('');
-  const [records, setRecords] = useState<EstimateRecord[]>(() => loadEstimateRecords());
+  const [saveToken, setSaveToken] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [records] = useState<EstimateRecord[]>([]);
 
   useEffect(() => {
     setDraftConfig(pricingConfig);
@@ -75,18 +77,45 @@ export default function AdminPricingPage({ pricingConfig, onSavePricingConfig, o
 
   const latestRecords = useMemo(() => records.slice(0, 15), [records]);
 
-  function refreshRecords(): void {
-    setRecords(loadEstimateRecords());
-  }
+  async function handleSave(): Promise<void> {
+    if (!saveToken.trim()) {
+      setSaveMessage('Enter the admin token to save pricing rules.');
+      return;
+    }
 
-  function handleSave(): void {
-    onSavePricingConfig(draftConfig);
-    setSaveMessage('Pricing rules saved. All new quotes now use this configuration.');
+    setIsSaving(true);
+    setSaveMessage('Saving pricing rules to Supabase...');
+
+    try {
+      const response = await fetch('/api/pricing-save', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${saveToken.trim()}`,
+        },
+        body: JSON.stringify({ config: draftConfig }),
+      });
+
+      const payload = (await response.json()) as { config?: PricingConfig; message?: string };
+      if (!response.ok || !payload.config) {
+        setSaveMessage(payload.message ?? 'Unable to save pricing rules. Check server env vars and token.');
+        setIsSaving(false);
+        return;
+      }
+
+      onPricingConfigChange(payload.config);
+      setSaveMessage('Pricing rules saved. All new quotes now use this configuration.');
+      setIsSaving(false);
+    } catch {
+      setSaveMessage('Unable to reach pricing-save endpoint. Deploy serverless routes and set env variables in Vercel.');
+      setIsSaving(false);
+    }
   }
 
   function handleReset(): void {
-    onResetPricingConfig();
-    setSaveMessage('Pricing rules reset to defaults.');
+    const defaults = createDefaultPricingConfig();
+    setDraftConfig(defaults);
+    setSaveMessage('Draft reset to defaults. Click Save to publish defaults to Supabase.');
   }
 
   function updateTravelFee(zone: WindowZone, value: number): void {
@@ -116,10 +145,11 @@ export default function AdminPricingPage({ pricingConfig, onSavePricingConfig, o
             <button
               type="button"
               onClick={handleSave}
-              className="inline-flex items-center rounded-lg bg-blue-600 px-5 py-2.5 font-semibold text-white transition hover:bg-blue-700"
+              disabled={isSaving}
+              className="inline-flex items-center rounded-lg bg-blue-600 px-5 py-2.5 font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <Save className="mr-2 h-4 w-4" />
-              Save Pricing Rules
+              {isSaving ? 'Saving...' : 'Save Pricing Rules'}
             </button>
             <button
               type="button"
@@ -134,6 +164,26 @@ export default function AdminPricingPage({ pricingConfig, onSavePricingConfig, o
         {saveMessage && <p className="mb-6 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">{saveMessage}</p>}
 
         <section className={cardClass}>
+          <h2 className="text-xl font-bold text-gray-900">Supabase Pricing Storage</h2>
+          <p className="mt-2 text-sm text-gray-600">
+            Pricing rules are loaded from <code className="rounded bg-slate-100 px-1 py-0.5">/api/pricing-get</code>. To publish changes, enter your admin
+            token and click Save.
+          </p>
+          <p className="mt-2 text-sm text-gray-500">Pricing load status: {pricingStatus}</p>
+
+          <label className="mt-4 block max-w-xl">
+            <span className="mb-1 block text-sm font-medium text-gray-700">Admin token (server env: ADMIN_PRICING_TOKEN)</span>
+            <input
+              type="password"
+              value={saveToken}
+              onChange={(event) => setSaveToken(event.target.value)}
+              placeholder="Paste token to enable saving"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+            />
+          </label>
+        </section>
+
+        <section className={`${cardClass} mt-6`}>
           <h2 className="text-xl font-bold text-gray-900">Global Estimate Range + Travel Zones</h2>
 
           <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -886,19 +936,12 @@ export default function AdminPricingPage({ pricingConfig, onSavePricingConfig, o
         <section className={`${cardClass} mt-6`}>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-xl font-bold text-gray-900">Recent Estimate Records</h2>
-            <button
-              type="button"
-              onClick={refreshRecords}
-              className="inline-flex items-center rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
-            >
-              <RefreshCw className="mr-2 h-4 w-4" />
-              Refresh
-            </button>
           </div>
 
           {latestRecords.length === 0 ? (
             <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 px-4 py-6 text-gray-600">
-              No estimate records yet. Generate estimates from the Get Estimate page to populate this table.
+              Quote history is now stored server-side in Supabase. Add an admin endpoint to list records if you want this
+              table populated again.
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -947,8 +990,8 @@ export default function AdminPricingPage({ pricingConfig, onSavePricingConfig, o
             <p className="font-semibold">Storage note</p>
             <p className="mt-1 inline-flex items-center">
               <Database className="mr-2 h-4 w-4" />
-              Pricing and estimates are currently browser-local. For multi-user shared admin and CRM sync, connect this
-              schema to Supabase.
+              Pricing and estimate creation now run server-side. Pricing loads from Supabase and estimates are stored in
+              the <code className="mx-1 rounded bg-blue-100 px-1 py-0.5">estimate_records</code> table.
             </p>
           </div>
         </section>

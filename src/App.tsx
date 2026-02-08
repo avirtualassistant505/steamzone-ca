@@ -10,9 +10,7 @@ import BrandLogo from './components/BrandLogo';
 import GetEstimatePage from './pages/GetEstimatePage';
 import AdminPricingPage from './pages/AdminPricingPage';
 import {
-  loadPricingConfig,
-  resetPricingConfig,
-  savePricingConfig,
+  createDefaultPricingConfig,
   type PricingConfig,
 } from './lib/estimateEngine';
 
@@ -61,7 +59,8 @@ function NotFound() {
 
 function App() {
   const [route, setRoute] = useState<AppRoute>(() => normalizeRoute(window.location.pathname));
-  const [pricingConfig, setPricingConfig] = useState<PricingConfig>(() => loadPricingConfig());
+  const [pricingConfig, setPricingConfig] = useState<PricingConfig>(() => createDefaultPricingConfig());
+  const [pricingStatus, setPricingStatus] = useState<'loading' | 'ready' | 'error'>('loading');
 
   useEffect(() => {
     const onPopState = () => {
@@ -72,22 +71,41 @@ function App() {
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadFromApi(): Promise<void> {
+      try {
+        const response = await fetch('/api/pricing-get');
+        if (!response.ok) {
+          throw new Error('pricing-get failed');
+        }
+
+        const payload = (await response.json()) as { config?: PricingConfig };
+        if (!cancelled && payload.config) {
+          setPricingConfig(payload.config);
+          setPricingStatus('ready');
+        }
+      } catch {
+        if (!cancelled) {
+          // Keep defaults so the site is usable even before Supabase is configured.
+          setPricingStatus('error');
+        }
+      }
+    }
+
+    loadFromApi();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   function navigate(next: Exclude<AppRoute, 'notFound'>): void {
     if (window.location.pathname !== next) {
       window.history.pushState({}, '', next);
     }
     setRoute(next);
     window.scrollTo({ top: 0, behavior: 'auto' });
-  }
-
-  function handleSavePricing(next: PricingConfig): void {
-    const saved = savePricingConfig(next);
-    setPricingConfig(saved);
-  }
-
-  function handleResetPricing(): void {
-    const defaults = resetPricingConfig();
-    setPricingConfig(defaults);
   }
 
   let content: JSX.Element;
@@ -102,13 +120,13 @@ function App() {
       </>
     );
   } else if (route === '/estimate') {
-    content = <GetEstimatePage pricingConfig={pricingConfig} />;
+    content = <GetEstimatePage />;
   } else if (route === '/admin') {
     content = (
       <AdminPricingPage
         pricingConfig={pricingConfig}
-        onSavePricingConfig={handleSavePricing}
-        onResetPricingConfig={handleResetPricing}
+        onPricingConfigChange={setPricingConfig}
+        pricingStatus={pricingStatus}
       />
     );
   } else {

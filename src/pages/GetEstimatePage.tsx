@@ -11,7 +11,6 @@ import {
   Timer,
 } from 'lucide-react';
 import {
-  calculateEstimate,
   createDefaultCarpetInput,
   createDefaultCommercialWindowInput,
   createDefaultPostConstructionInput,
@@ -21,24 +20,18 @@ import {
   formatConfidence,
   formatCurrency,
   formatServiceLabel,
-  saveEstimateRecord,
   type CarpetEstimateInput,
   type CommercialWindowEstimateInput,
   type EstimateRecord,
   type EstimateResult,
   type LeadContact,
   type PostConstructionEstimateInput,
-  type PricingConfig,
   type SchedulePreference,
   type ServiceType,
   type WindowEstimateInput,
   type WindowZone,
 } from '../lib/estimateEngine';
-import { sendEstimateEmail, type EstimateDeliveryMode } from '../lib/estimateMailer';
-
-interface GetEstimatePageProps {
-  pricingConfig: PricingConfig;
-}
+import type { EstimateDeliveryMode } from '../lib/estimateMailer';
 
 type FieldErrors = Record<string, string>;
 
@@ -209,7 +202,7 @@ function validateWizardStep(
   return {};
 }
 
-export default function GetEstimatePage({ pricingConfig }: GetEstimatePageProps) {
+export default function GetEstimatePage() {
   const [serviceType, setServiceType] = useState<ServiceType>('window');
   const [step, setStep] = useState(1);
   const wizardRef = useRef<HTMLElement | null>(null);
@@ -375,36 +368,51 @@ export default function GetEstimatePage({ pricingConfig }: GetEstimatePageProps)
     setStatusMessage('Generating your estimate and preparing email delivery...');
 
     const answers = currentAnswers();
-    const estimate = calculateEstimate(serviceType, answers, pricingConfig);
+    try {
+      const response = await fetch('/api/estimate-create', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ serviceType, answers }),
+      });
 
-    const record = saveEstimateRecord({
-      serviceType,
-      postalCode: answers.postalCode,
-      zone: answers.zone,
-      contact: answers.contact,
-      answers,
-      result: estimate,
-      pricingVersion: pricingConfig.version,
-    });
+      const payload = (await response.json()) as {
+        record?: EstimateRecord;
+        email?: { success: boolean; message: string; deliveryMode?: EstimateDeliveryMode };
+        message?: string;
+      };
 
-    setResult(estimate);
-    setLatestRecord(record);
-
-    const emailResult = await sendEstimateEmail(record);
-
-    if (emailResult.success) {
-      setEmailDeliveryMode(emailResult.deliveryMode ?? 'customer');
-
-      if (emailResult.deliveryMode === 'internal') {
-        setStatusMessage(`Quote ${record.quoteNumber} generated. Estimate details were sent to Steam Zone for live follow-up.`);
-      } else {
-        setStatusMessage(`Quote ${record.quoteNumber} generated. Your estimate PDF was emailed instantly to ${record.contact.email}.`);
+      if (!response.ok || !payload.record) {
+        setEmailDeliveryMode(null);
+        setStatusMessage(payload.message ?? 'Unable to generate estimate. Please try again.');
+        setIsSubmitting(false);
+        return;
       }
-    } else {
+
+      setLatestRecord(payload.record);
+      setResult(payload.record.result);
+
+      if (payload.email?.success) {
+        setEmailDeliveryMode(payload.email.deliveryMode ?? 'customer');
+
+        if (payload.email.deliveryMode === 'internal') {
+          setStatusMessage(`Quote ${payload.record.quoteNumber} generated. Estimate details were sent to Steam Zone for live follow-up.`);
+        } else {
+          setStatusMessage(`Quote ${payload.record.quoteNumber} generated. Your estimate PDF was emailed instantly to ${payload.record.contact.email}.`);
+        }
+      } else {
+        setEmailDeliveryMode(null);
+        setStatusMessage(
+          `Quote ${payload.record.quoteNumber} generated, but email delivery needs setup: ${
+            payload.email?.message ??
+            'Email delivery endpoint is not fully configured yet. Add RESEND_API_KEY and sender env vars in Vercel.'
+          }`
+        );
+      }
+    } catch {
       setEmailDeliveryMode(null);
-      setStatusMessage(
-        `Quote ${record.quoteNumber} generated, but email delivery needs setup: ${emailResult.message}`
-      );
+      setStatusMessage('Unable to reach the estimate engine. Please try again later.');
     }
 
     setIsSubmitting(false);
