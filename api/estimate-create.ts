@@ -1,4 +1,5 @@
 import { Resend } from 'resend';
+import { buildQuotePdf, renderEmailTemplate } from './send-estimate';
 import type { EstimateRecord, LeadContact, PricingConfig, ServiceType, WindowZone } from '../src/lib/estimateEngine';
 
 type ApiRequest = { method?: string; body?: unknown; headers?: Record<string, string | string[] | undefined> };
@@ -280,7 +281,7 @@ async function postToGhl(record: EstimateRecord): Promise<{ posted: boolean }> {
   const secret = process.env.GHL_WEBHOOK_SECRET?.trim();
 
   try {
-    await fetch(url, {
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -295,7 +296,7 @@ async function postToGhl(record: EstimateRecord): Promise<{ posted: boolean }> {
         utm: record.utm,
       }),
     });
-    return { posted: true };
+    return { posted: response.ok };
   } catch {
     return { posted: false };
   }
@@ -388,9 +389,8 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
             'To book or confirm details, reply to this email or call Steam Zone at (431) 205-3909. We appreciate your business.',
         };
 
-    const mailer = await import('./send-estimate');
-    const html = mailer.renderEmailTemplate(templateInput);
-    const pdfBytes = await mailer.buildQuotePdf(templateInput);
+    const html = renderEmailTemplate(templateInput);
+    const pdfBytes = await buildQuotePdf(templateInput);
     const text = usesResendOnboardingSender
       ? [
           `New Steam Zone estimate lead ${record.quoteNumber}`,
