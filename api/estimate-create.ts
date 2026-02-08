@@ -297,18 +297,48 @@ async function postToGhl(record: EstimateRecord): Promise<{ posted: boolean }> {
   const secret = process.env.GHL_WEBHOOK_SECRET?.trim();
 
   try {
+    const engine = await getEngine();
+    const contactName = record.contact.fullName?.trim() ?? '';
+    const [firstName, ...rest] = contactName.split(/\s+/).filter(Boolean);
+    const lastName = rest.length > 0 ? rest.join(' ') : undefined;
+    const serviceLabel = engine.formatServiceLabel(record.serviceType);
+    const zoneLabel = engine.formatZoneLabel(record.zone as WindowZone);
+
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         secret: secret || undefined,
-        quoteNumber: record.quoteNumber,
-        createdAt: record.createdAt,
-        serviceType: record.serviceType,
-        postalCode: record.postalCode,
-        zone: record.zone,
-        contact: record.contact,
-        result: record.result,
+        source: record.utm?.source ?? record.utm?.utm_source ?? record.utm?.utmSource ?? 'website',
+        event: 'estimate_received',
+        locationId: process.env.GHL_LOCATION_ID ?? undefined,
+        contact: {
+          firstName: firstName || undefined,
+          lastName,
+          name: contactName || undefined,
+          email: record.contact.email,
+          phone: record.contact.phone,
+          address: record.contact.address,
+          postalCode: record.postalCode,
+        },
+        estimate: {
+          quote_number: record.quoteNumber,
+          created_at: record.createdAt,
+          service_type: serviceLabel,
+          service_type_key: record.serviceType,
+          postal_code: record.postalCode,
+          travel_zone: zoneLabel,
+          travel_zone_key: record.zone,
+          estimate_low: record.result.estimateLow,
+          estimate_high: record.result.estimateHigh,
+          duration_low_hours: record.result.durationLowHours,
+          duration_high_hours: record.result.durationHighHours,
+          confidence: record.result.confidence,
+          booking_mode: record.result.bookingMode,
+          red_flags: (record.result.redFlags ?? []).join('\n'),
+          estimate_notes: (record.result.notes ?? []).join('\n'),
+          wizard_answers_json: JSON.stringify(record.answers ?? {}),
+        },
         utm: record.utm,
       }),
     });
