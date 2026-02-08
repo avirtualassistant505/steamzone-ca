@@ -457,6 +457,9 @@ async function syncToGhlViaApi(record: EstimateRecord): Promise<GhlResult> {
     tags.push('estimate_new');
     tags.push(record.result.confidence === 'green' ? 'estimate_green' : record.result.confidence === 'yellow' ? 'estimate_yellow' : 'estimate_red');
     tags.push(record.utm && Object.keys(record.utm).length > 0 ? 'source_ai_estimate' : 'source_website_estimate');
+    if (record.contact.consentToContact) {
+      tags.push('consent_to_contact');
+    }
     if (record.contact.marketingOptIn) {
       tags.push('marketing_opt_in');
     }
