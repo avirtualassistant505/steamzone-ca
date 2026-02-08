@@ -1,5 +1,4 @@
 import { Resend } from 'resend';
-import { buildQuotePdf, renderEmailTemplate } from './send-estimate';
 import type { EstimateRecord, LeadContact, PricingConfig, ServiceType, WindowZone } from '../src/lib/estimateEngine';
 
 type ApiRequest = { method?: string; body?: unknown; headers?: Record<string, string | string[] | undefined> };
@@ -17,13 +16,26 @@ type EngineModule = {
   formatZoneLabel: (zone: WindowZone) => string;
 };
 
+type MailerModule = {
+  renderEmailTemplate: (input: unknown) => string;
+  buildQuotePdf: (input: unknown) => Promise<Uint8Array>;
+};
+
 let enginePromise: Promise<EngineModule> | null = null;
+let mailerPromise: Promise<MailerModule> | null = null;
 
 async function getEngine(): Promise<EngineModule> {
   if (!enginePromise) {
     enginePromise = import('../server/estimateEngineRuntime.mjs').then((mod) => mod as unknown as EngineModule);
   }
   return enginePromise;
+}
+
+async function getMailer(): Promise<MailerModule> {
+  if (!mailerPromise) {
+    mailerPromise = import('../server/sendEstimateRuntime.mjs').then((mod) => mod as unknown as MailerModule);
+  }
+  return mailerPromise;
 }
 
 function safeString(value: unknown, fallback = ''): string {
@@ -389,8 +401,9 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
             'To book or confirm details, reply to this email or call Steam Zone at (431) 205-3909. We appreciate your business.',
         };
 
-    const html = renderEmailTemplate(templateInput);
-    const pdfBytes = await buildQuotePdf(templateInput);
+    const mailer = await getMailer();
+    const html = mailer.renderEmailTemplate(templateInput);
+    const pdfBytes = await mailer.buildQuotePdf(templateInput);
     const text = usesResendOnboardingSender
       ? [
           `New Steam Zone estimate lead ${record.quoteNumber}`,
