@@ -8,6 +8,7 @@ const postalCodeRegex = /^[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d$/;
 const idempotencyKeyRegex = /^[A-Za-z0-9._:-]{8,200}$/;
 const ghlBaseUrlDefault = 'https://services.leadconnectorhq.com';
 const ghlApiVersionDefault = '2021-07-28';
+const ghlConversationsApiVersion = '2021-04-15';
 
 function asBool(value: unknown, fallback = false): boolean {
   if (typeof value === 'boolean') return value;
@@ -109,9 +110,17 @@ function validatePostalCode(postalCode: string): string | null {
   return null;
 }
 
-function validateContact(contact: LeadContact): string | null {
-  if (!contact.fullName?.trim() || contact.fullName.trim().length < 2) return 'Full name is required.';
-  if (!contact.phone?.replace(/\D/g, '') || contact.phone.replace(/\D/g, '').length < 7) return 'Phone number is required.';
+function validateContact(
+  contact: LeadContact,
+  opts: { requireName?: boolean; requirePhone?: boolean } = {}
+): string | null {
+  const requireName = opts.requireName ?? true;
+  const requirePhone = opts.requirePhone ?? true;
+
+  if (requireName && (!contact.fullName?.trim() || contact.fullName.trim().length < 2)) return 'Full name is required.';
+  if (requirePhone && (!contact.phone?.replace(/\D/g, '') || contact.phone.replace(/\D/g, '').length < 7)) {
+    return 'Phone number is required.';
+  }
   if (!contact.email?.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email.trim())) return 'Valid email is required.';
   if (!contact.consentToContact) return 'Consent is required.';
   return null;
@@ -124,18 +133,23 @@ function coerceContact(input: unknown): LeadContact | null {
   const firstName = safeString(rec.firstName, safeString(rec.first_name, '')).trim();
   const lastName = safeString(rec.lastName, safeString(rec.last_name, '')).trim();
   const joinedName = [firstName, lastName].filter(Boolean).join(' ').trim();
+  const email = safeString(rec.email, '').trim();
+  const fallbackName = email ? email.split('@')[0]?.replace(/[._-]+/g, ' ').trim() : '';
+  const bestName = safeString(rec.fullName, safeString(rec.name, joinedName || fallbackName)).trim();
 
   return {
-    fullName: safeString(rec.fullName, safeString(rec.name, joinedName)).trim(),
+    fullName: bestName,
     address: safeString(rec.address, '').trim(),
     phone: safeString(rec.phone, '').trim(),
-    email: safeString(rec.email, '').trim(),
+    email,
     consentToContact: asBool(rec.consentToContact, false),
     marketingOptIn: asBool(rec.marketingOptIn, false),
   };
 }
 
-function maybeExtractGhlWebhookPayload(body: unknown): { serviceType?: unknown; answers?: unknown } | null {
+type GhlWebhookContext = { isGhlWebhook: true; contactId?: string | null; conversationId?: string | null };
+
+function maybeExtractGhlWebhookPayload(body: unknown): { serviceType?: unknown; answers?: unknown; ghl?: GhlWebhookContext } | null {
   const root = asRecord(body);
   if (!root) return null;
 
@@ -144,6 +158,14 @@ function maybeExtractGhlWebhookPayload(body: unknown): { serviceType?: unknown; 
 
   // If this doesn't look like a GHL webhook payload, bail.
   if (!customData && !contactBlock) return null;
+
+  const contactId =
+    safeString(contactBlock?.id, '').trim() ||
+    safeString(customData?.contactId, safeString(customData?.contact_id, '')).trim() ||
+    null;
+
+  const conversationId =
+    safeString(customData?.conversationId, safeString(customData?.conversation_id, '')).trim() || null;
 
   const serviceType =
     root.serviceType ??
@@ -180,7 +202,129 @@ function maybeExtractGhlWebhookPayload(body: unknown): { serviceType?: unknown; 
     },
   };
 
-  return { serviceType, answers };
+  return { serviceType, answers, ghl: { isGhlWebhook: true, contactId, conversationId } };
+}
+
+function extractCanadianPostalCodeFromText(text: string): string | null {
+  const hit = text.match(/[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d/);
+  if (!hit) return null;
+  return hit[0].toUpperCase().replace(/\s+/g, ' ').trim();
+}
+
+function extractEmailFromText(text: string): string | null {
+  const hit = text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+  return hit ? hit[0].trim() : null;
+}
+
+function inferServiceTypeFromText(text: string): ServiceType | null {
+  const s = normalizeKey(text);
+  if (!s) return null;
+  if (s.includes('post') && s.includes('construction')) return 'postConstruction';
+  if (s.includes('carpet')) return 'carpet';
+  if (s.includes('commercial') && s.includes('window')) return 'commercialWindow';
+  if (s.includes('window')) return 'window';
+  return null;
+}
+
+type GhlConversationMessage = { direction?: string; body?: string; dateAdded?: string };
+
+function extractMessagesArray(payload: unknown): GhlConversationMessage[] {
+  const p = asRecord(payload);
+  if (!p) return [];
+  const messagesContainer = p['messages'];
+  if (Array.isArray(messagesContainer)) return messagesContainer as GhlConversationMessage[];
+  const container = asRecord(messagesContainer);
+  const nested = container?.['messages'];
+  if (Array.isArray(nested)) return nested as GhlConversationMessage[];
+  return [];
+}
+
+async function inferIntakeFromGhlConversation(contactId: string): Promise<{
+  serviceType?: ServiceType | null;
+  postalCode?: string | null;
+  consentToContact?: boolean | null;
+  marketingOptIn?: boolean | null;
+  email?: string | null;
+}> {
+  const token = env('GHL_PRIVATE_INTEGRATION_TOKEN') ?? env('GHL_ACCESS_TOKEN');
+  const locationId = env('GHL_LOCATION_ID');
+  if (!token || !locationId) return {};
+
+  const baseUrl = (env('GHL_BASE_URL') ?? ghlBaseUrlDefault).replace(/\/+$/, '');
+
+  const request = async (path: string, query?: Record<string, unknown>) => {
+    const url = new URL(baseUrl + (path.startsWith('/') ? path : `/${path}`));
+    if (query) {
+      for (const [k, v] of Object.entries(query)) {
+        if (v === undefined || v === null || v === '') continue;
+        url.searchParams.set(k, String(v));
+      }
+    }
+
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+        Version: ghlConversationsApiVersion,
+      },
+    });
+
+    const contentType = res.headers.get('content-type') || '';
+    const isJson = contentType.includes('application/json');
+    const payload = isJson ? await res.json().catch(() => null) : await res.text().catch(() => '');
+    if (!res.ok) return null;
+    return payload;
+  };
+
+  const convoSearch = await request('/conversations/search', { locationId, contactId, limit: 1 });
+  const convoObj = asRecord(convoSearch);
+  const conversations = Array.isArray(convoObj?.['conversations']) ? (convoObj?.['conversations'] as unknown[]) : [];
+  const convo = asRecord(conversations[0]);
+  const conversationId = convo && typeof convo['id'] === 'string' ? (convo['id'] as string) : null;
+  if (!conversationId) return {};
+
+  const messagesPayload = await request(`/conversations/${conversationId}/messages`, { limit: 50 });
+  const messages = extractMessagesArray(messagesPayload)
+    .map((m) => ({
+      direction: typeof m.direction === 'string' ? m.direction : '',
+      body: typeof m.body === 'string' ? m.body : '',
+      dateAdded: typeof m.dateAdded === 'string' ? m.dateAdded : '',
+    }))
+    .filter((m) => m.body)
+    .sort((a, b) => (a.dateAdded || '').localeCompare(b.dateAdded || ''));
+
+  const transcript = messages.map((m) => m.body).join('\n');
+  const inbound = messages.filter((m) => m.direction === 'inbound').map((m) => m.body).join('\n');
+
+  const serviceType = inferServiceTypeFromText(transcript);
+  const postalCode = extractCanadianPostalCodeFromText(transcript);
+  const email = extractEmailFromText(transcript);
+
+  let consentToContact: boolean | null = null;
+  let marketingOptIn: boolean | null = null;
+  for (let i = 0; i < messages.length - 1; i += 1) {
+    const cur = messages[i];
+    const next = messages[i + 1];
+    if (cur.direction !== 'outbound' || next.direction !== 'inbound') continue;
+    const q = normalizeKey(cur.body);
+    const a = normalizeKey(next.body);
+    if (consentToContact === null && (q.includes('permission') || q.includes('consent'))) {
+      consentToContact = asBool(a, false);
+    }
+    if (marketingOptIn === null && (q.includes('offers') || q.includes('service updates') || q.includes('updates'))) {
+      marketingOptIn = asBool(a, false);
+    }
+  }
+
+  if (consentToContact === null && inbound.trim()) {
+    const inboundHasYes = /\byes\b/i.test(inbound);
+    if (inboundHasYes && normalizeKey(transcript).includes('estimate')) {
+      consentToContact = true;
+    }
+  }
+
+  return { serviceType, postalCode, consentToContact, marketingOptIn, email };
 }
 
 function coerceServiceType(value: unknown): ServiceType | null {
@@ -1116,28 +1260,60 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     }
 
     const extracted = maybeExtractGhlWebhookPayload(body);
-    const serviceType = coerceServiceType(extracted?.serviceType ?? body?.serviceType);
-    const answers = extracted?.answers ?? body?.answers;
+    const isGhlWebhook = Boolean(extracted?.ghl?.isGhlWebhook);
+    const ghlContactId = extracted?.ghl?.contactId ?? null;
+
+    let serviceType = coerceServiceType(extracted?.serviceType ?? body?.serviceType);
+    let answers: unknown = extracted?.answers ?? body?.answers;
+
+    // If the call came from a GHL workflow, we may not receive structured answers/custom fields.
+    // Try to infer missing pieces from the conversation transcript (contactId -> conversation -> messages).
+    if (isGhlWebhook && ghlContactId) {
+      const inferred = await inferIntakeFromGhlConversation(String(ghlContactId));
+      if (!serviceType && inferred.serviceType) {
+        serviceType = inferred.serviceType;
+      }
+
+      const answersRec = asRecord(answers) ?? {};
+      const postalFromAnswers = safeString(answersRec.postalCode, '').trim();
+      if (!postalFromAnswers && inferred.postalCode) {
+        answersRec.postalCode = inferred.postalCode;
+      }
+
+      const contactRec = asRecord(answersRec.contact) ?? {};
+      if (!safeString(contactRec.email, '').trim() && inferred.email) {
+        contactRec.email = inferred.email;
+      }
+      if (contactRec.consentToContact === undefined && inferred.consentToContact !== undefined && inferred.consentToContact !== null) {
+        contactRec.consentToContact = inferred.consentToContact;
+      }
+      if (contactRec.marketingOptIn === undefined && inferred.marketingOptIn !== undefined && inferred.marketingOptIn !== null) {
+        contactRec.marketingOptIn = inferred.marketingOptIn;
+      }
+      answersRec.contact = contactRec;
+      answers = answersRec;
+    }
 
     if (!serviceType || !answers) {
       res.status(400).json({ message: 'Missing serviceType or answers.' });
       return;
     }
 
-    const postalCode = safeString(answers.postalCode, '').trim();
+    const answersRec = asRecord(answers) ?? {};
+    const postalCode = safeString(answersRec.postalCode, '').trim();
     const postalError = validatePostalCode(postalCode);
     if (postalError) {
       res.status(400).json({ message: postalError });
       return;
     }
 
-    const contact = coerceContact(answers.contact);
+    const contact = coerceContact(answersRec.contact);
     if (!contact) {
       res.status(400).json({ message: 'Missing contact details.' });
       return;
     }
 
-    const contactError = validateContact(contact);
+    const contactError = validateContact(contact, isGhlWebhook ? { requireName: false, requirePhone: false } : undefined);
     if (contactError) {
       res.status(400).json({ message: contactError });
       return;
