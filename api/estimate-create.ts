@@ -1284,10 +1284,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       if (!safeString(contactRec.email, '').trim() && inferred.email) {
         contactRec.email = inferred.email;
       }
-      if (contactRec.consentToContact === undefined && inferred.consentToContact !== undefined && inferred.consentToContact !== null) {
+      // When the workflow doesn't pass custom fields, our extracted payload defaults these to false.
+      // If we can infer a real answer from the chat transcript, prefer the inferred value.
+      if (inferred.consentToContact !== undefined && inferred.consentToContact !== null) {
         contactRec.consentToContact = inferred.consentToContact;
       }
-      if (contactRec.marketingOptIn === undefined && inferred.marketingOptIn !== undefined && inferred.marketingOptIn !== null) {
+      if (inferred.marketingOptIn !== undefined && inferred.marketingOptIn !== null) {
         contactRec.marketingOptIn = inferred.marketingOptIn;
       }
       answersRec.contact = contactRec;
