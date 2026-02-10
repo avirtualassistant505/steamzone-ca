@@ -150,9 +150,9 @@ function App() {
               <button type="button" onClick={() => navigate('/admin')} className={navLinkClass(route === '/admin')}>
                 Admin
               </button>
-              <a href="tel:7828217802" className="flex items-center text-blue-600 font-semibold">
+              <a href="tel:12365066570" className="flex items-center text-blue-600 font-semibold">
                 <Phone className="h-4 w-4 mr-2" />
-                (782) 821-7802
+                (236) 506-6570
               </a>
             </div>
           </div>

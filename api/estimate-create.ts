@@ -1181,7 +1181,7 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
           notes: record.result.notes ?? [],
           redFlags: record.result.redFlags ?? [],
           footerLine:
-            'To book or confirm details, reply to this email or call Steam Zone at (782) 821-7802. We appreciate your business.',
+            'To book or confirm details, reply to this email or call Steam Zone at (236) 506-6570. We appreciate your business.',
         };
 
     const mailer = await getMailer();
@@ -1206,7 +1206,7 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
           `Estimate Range: ${estimateRange}`,
           `Estimated Duration: ${durationRange}`,
           '',
-          'Your PDF estimate is attached. Reply to this email or call (782) 821-7802 to book.',
+          'Your PDF estimate is attached. Reply to this email or call (236) 506-6570 to book.',
         ].join('\n');
 
     const emailResult = await resend.emails.send({

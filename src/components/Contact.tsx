@@ -22,8 +22,8 @@ export default function Contact() {
                 </div>
                 <div>
                   <h4 className="font-semibold text-gray-900 mb-1">Phone</h4>
-                  <a href="tel:7828217802" className="text-lg text-blue-600 hover:text-blue-700">
-                    (782) 821-7802
+                  <a href="tel:12365066570" className="text-lg text-blue-600 hover:text-blue-700">
+                    (236) 506-6570
                   </a>
                 </div>
               </div>
@@ -105,7 +105,7 @@ export default function Contact() {
                   type="tel"
                   id="phone"
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-transparent outline-none transition"
-                  placeholder="(782) 821-7802"
+                  placeholder="(236) 506-6570"
                 />
               </div>
 

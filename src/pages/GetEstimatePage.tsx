@@ -871,7 +871,7 @@ export default function GetEstimatePage() {
             </div>
 
             <div className="mt-8 flex flex-wrap gap-3">
-              <a href="tel:7828217802" className="rounded-lg bg-blue-600 px-6 py-3 font-semibold text-white transition hover:bg-blue-700">
+              <a href="tel:12365066570" className="rounded-lg bg-blue-600 px-6 py-3 font-semibold text-white transition hover:bg-blue-700">
                 Call to Book
               </a>
               <a
@@ -2199,7 +2199,7 @@ function ContactStep({ section, contact, schedule, onScheduleChange, onContactCh
           value={contact.phone}
           onChange={(event) => onContactChange('phone', event.target.value)}
           className={`${fieldClass} ${errors['contact.phone'] ? 'border-rose-500 focus:border-rose-600 focus:ring-rose-200' : ''}`}
-          placeholder="(782) 821-7802"
+          placeholder="(236) 506-6570"
           autoComplete="tel"
           inputMode="tel"
           aria-invalid={errors['contact.phone'] ? 'true' : 'false'}
