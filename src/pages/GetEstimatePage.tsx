@@ -871,7 +871,7 @@ export default function GetEstimatePage() {
             </div>
 
             <div className="mt-8 flex flex-wrap gap-3">
-              <a href="tel:4312053909" className="rounded-lg bg-blue-600 px-6 py-3 font-semibold text-white transition hover:bg-blue-700">
+              <a href="tel:7828217802" className="rounded-lg bg-blue-600 px-6 py-3 font-semibold text-white transition hover:bg-blue-700">
                 Call to Book
               </a>
               <a
@@ -2199,7 +2199,7 @@ function ContactStep({ section, contact, schedule, onScheduleChange, onContactCh
           value={contact.phone}
           onChange={(event) => onContactChange('phone', event.target.value)}
           className={`${fieldClass} ${errors['contact.phone'] ? 'border-rose-500 focus:border-rose-600 focus:ring-rose-200' : ''}`}
-          placeholder="(431) 205-3909"
+          placeholder="(782) 821-7802"
           autoComplete="tel"
           inputMode="tel"
           aria-invalid={errors['contact.phone'] ? 'true' : 'false'}
@@ -2288,8 +2288,7 @@ function ContactStep({ section, contact, schedule, onScheduleChange, onContactCh
           onChange={(event) => onContactChange('consentToContact', event.target.checked)}
           className="mt-0.5"
         />
-        I give permission for Steam Zone to store my details in their CRM and contact me by text/email regarding this estimate and project details.
-        I can opt out at any time.
+        I give permission for Steam Zone to contact me by text/email to send my estimate. I can opt out at any time.
       </label>
       {errors['contact.consentToContact'] && (
         <p id={`${section}-consent-error`} className="-mt-2 md:col-span-2 text-xs text-rose-700">

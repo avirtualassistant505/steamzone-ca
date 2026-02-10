@@ -13,7 +13,7 @@ export default function Footer() {
               and post-construction cleanup services.
             </p>
             <div className="flex space-x-4">
-              <a href="tel:4312053909" className="text-gray-400 hover:text-white transition">
+              <a href="tel:7828217802" className="text-gray-400 hover:text-white transition">
                 <Phone className="h-5 w-5" />
               </a>
               <a href="mailto:info@steamzone.ca" className="text-gray-400 hover:text-white transition">

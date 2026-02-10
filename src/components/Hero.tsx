@@ -23,7 +23,7 @@ export default function Hero() {
                 <ArrowRight className="ml-2 h-5 w-5" />
               </a>
               <a
-                href="tel:4312053909"
+                href="tel:7828217802"
                 className="inline-flex items-center justify-center px-8 py-4 bg-white text-blue-600 font-semibold rounded-lg hover:bg-gray-50 transition border-2 border-blue-600"
               >
                 Call Now

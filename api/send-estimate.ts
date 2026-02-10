@@ -985,10 +985,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           notes,
           redFlags,
           footerLine:
-            'To book or confirm details, reply to this email or call Steam Zone at (431) 205-3909. We appreciate your business.',
+            'To book or confirm details, reply to this email or call Steam Zone at (782) 821-7802. We appreciate your business.',
           cta: {
-            label: 'Call Steam Zone: (431) 205-3909',
-            href: 'tel:+14312053909',
+            label: 'Call Steam Zone: (782) 821-7802',
+            href: 'tel:+17828217802',
             helper: 'Prefer email? Just hit reply and we will follow up quickly.',
           },
         };
@@ -1015,7 +1015,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           `Estimate Range: ${estimateRange}`,
           `Estimated Duration: ${durationRange}`,
           '',
-          'Your PDF estimate is attached. Reply to this email or call (431) 205-3909 to book.',
+          'Your PDF estimate is attached. Reply to this email or call (782) 821-7802 to book.',
         ].join('\n');
 
     const emailResult = await resend.emails.send({

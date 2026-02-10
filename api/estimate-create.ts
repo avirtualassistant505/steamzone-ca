@@ -484,7 +484,8 @@ function normalizeEstimateAnswers(serviceType: ServiceType, raw: unknown, postal
     zone,
     projectType: pickEnum(rec.projectType, projectType, 'residential'),
     buildType: pickEnum(rec.buildType, buildType, 'renovation'),
-    sqftBracket: pickEnum(rec.sqftBracket, sqftBracket, '1000to2500'),
+    // Accept alternate key so external tools can avoid parameter name collisions.
+    sqftBracket: pickEnum(rec.sqftBracket ?? rec.postSqftBracket, sqftBracket, '1000to2500'),
     floors: clampInt(rec.floors, 1, 1, 100),
     stage: pickEnum(rec.stage, stage, 'final'),
     dustLoad: pickEnum(rec.dustLoad, dustLoad, 'medium'),
@@ -1180,7 +1181,7 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
           notes: record.result.notes ?? [],
           redFlags: record.result.redFlags ?? [],
           footerLine:
-            'To book or confirm details, reply to this email or call Steam Zone at (431) 205-3909. We appreciate your business.',
+            'To book or confirm details, reply to this email or call Steam Zone at (782) 821-7802. We appreciate your business.',
         };
 
     const mailer = await getMailer();
@@ -1205,7 +1206,7 @@ async function sendEstimateEmail(record: EstimateRecord): Promise<{ success: boo
           `Estimate Range: ${estimateRange}`,
           `Estimated Duration: ${durationRange}`,
           '',
-          'Your PDF estimate is attached. Reply to this email or call (431) 205-3909 to book.',
+          'Your PDF estimate is attached. Reply to this email or call (782) 821-7802 to book.',
         ].join('\n');
 
     const emailResult = await resend.emails.send({
@@ -1264,7 +1265,13 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const ghlContactId = extracted?.ghl?.contactId ?? null;
 
     let serviceType = coerceServiceType(extracted?.serviceType ?? body?.serviceType);
+    // Allow both:
+    // - { serviceType, answers: {...} } (site/app)
+    // - { serviceType, ...answersFields } (tools that can't nest under "answers")
     let answers: unknown = extracted?.answers ?? body?.answers;
+    if (!answers && body && typeof body === 'object') {
+      answers = body;
+    }
 
     // If the call came from a GHL workflow, we may not receive structured answers/custom fields.
     // Try to infer missing pieces from the conversation transcript (contactId -> conversation -> messages).
@@ -1309,7 +1316,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       return;
     }
 
-    const contact = coerceContact(answersRec.contact);
+    // Prefer answers.contact, but accept flattened contact fields too.
+    const contact = coerceContact(answersRec.contact) ?? coerceContact(answersRec);
     if (!contact) {
       res.status(400).json({ message: 'Missing contact details.' });
       return;
