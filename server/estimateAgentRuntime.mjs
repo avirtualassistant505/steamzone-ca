@@ -12496,7 +12496,11 @@ async function getSupabaseAdminClient() {
   }
   inflight = (async () => {
     const mod = await Promise.resolve().then(() => __toESM(require_main5(), 1));
-    cached = mod.createClient(url, key, {
+    const createClient = typeof mod.createClient === "function" ? mod.createClient : typeof mod.default?.createClient === "function" ? mod.default.createClient : null;
+    if (!createClient || typeof createClient !== "function") {
+      throw new Error("Unable to initialize Supabase client from @supabase/supabase-js module shape.");
+    }
+    cached = createClient(url, key, {
       auth: { persistSession: false }
     });
     return cached;
