@@ -1,18 +1,61 @@
-import {
-  peekNextQuestion,
-  summaryState,
-  toolComputeQuote,
-  toolGetSchema,
-  toolGetState,
-  toolNextQuestion,
-  toolNormalizeAndValidate,
-  toolSetAnswer,
-} from '../../server/estimateAgentTools';
-import { appendTranscript, getSession } from '../../server/estimateAgentSessionStore';
-import { validateRequiredAnswers } from '../../src/quote/normalization';
-
 type ApiRequest = { method?: string; body?: unknown };
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
+
+type SessionRecord = {
+  answers: Record<string, unknown>;
+  asked_keys: string[];
+  last_question_key: string | null;
+};
+
+type NextHint = {
+  done: boolean;
+  next_field_key?: string;
+  question_text?: string;
+  input_ui_hint?: {
+    type: string;
+    options?: Array<{ value: string; label: string }>;
+    min?: number;
+    max?: number;
+    placeholder?: string;
+  };
+};
+
+type EstimateAgentRuntimeModule = {
+  toolGetSchema: () => Promise<unknown>;
+  toolGetState: (sessionId: string) => Promise<SessionRecord>;
+  toolNormalizeAndValidate: (
+    fieldKey: string,
+    userText: string,
+    answersSoFar: Record<string, unknown>
+  ) => Promise<unknown>;
+  toolSetAnswer: (sessionId: string, fieldKey: string, normalizedValue: unknown) => Promise<SessionRecord>;
+  toolNextQuestion: (sessionId: string) => Promise<NextHint>;
+  toolComputeQuote: (sessionId: string) => Promise<unknown>;
+  appendTranscript: (
+    sessionId: string,
+    entry: { role: 'user' | 'assistant' | 'tool'; content: string; at: string }
+  ) => Promise<SessionRecord>;
+  getSession: (sessionId: string) => Promise<SessionRecord>;
+  validateRequiredAnswers: (answers: Record<string, unknown>) => string[];
+  summaryState: (session: SessionRecord) => {
+    answers: Record<string, unknown>;
+    asked_keys: string[];
+    last_question_key: string | null;
+    service_type?: string;
+  };
+  peekNextQuestion: (sessionId: string) => Promise<NextHint>;
+};
+
+let runtimePromise: Promise<EstimateAgentRuntimeModule> | null = null;
+
+async function getRuntime(): Promise<EstimateAgentRuntimeModule> {
+  if (!runtimePromise) {
+    runtimePromise = import('../../server/estimateAgentRuntime.mjs').then(
+      (mod) => mod as unknown as EstimateAgentRuntimeModule
+    );
+  }
+  return runtimePromise;
+}
 
 type ResponseFunctionCall = {
   type: 'function_call';
@@ -190,20 +233,21 @@ async function callOpenAI(apiKey: string, payload: Record<string, unknown>): Pro
 }
 
 async function executeTool(
+  runtime: EstimateAgentRuntimeModule,
   name: string,
   args: Record<string, unknown>,
   sessionId: string
 ): Promise<unknown> {
   if (name === 'get_schema') {
-    return toolGetSchema();
+    return runtime.toolGetSchema();
   }
 
   if (name === 'get_state') {
-    return toolGetState(String(args.session_id ?? sessionId));
+    return runtime.toolGetState(String(args.session_id ?? sessionId));
   }
 
   if (name === 'normalize_and_validate') {
-    return toolNormalizeAndValidate(
+    return runtime.toolNormalizeAndValidate(
       String(args.field_key ?? ''),
       String(args.user_text ?? ''),
       (asRecord(args.answers_so_far) ?? {})
@@ -211,7 +255,7 @@ async function executeTool(
   }
 
   if (name === 'set_answer') {
-    return toolSetAnswer(
+    return runtime.toolSetAnswer(
       String(args.session_id ?? sessionId),
       String(args.field_key ?? ''),
       args.normalized_value
@@ -219,11 +263,11 @@ async function executeTool(
   }
 
   if (name === 'next_question') {
-    return toolNextQuestion(String(args.session_id ?? sessionId));
+    return runtime.toolNextQuestion(String(args.session_id ?? sessionId));
   }
 
   if (name === 'compute_quote') {
-    return toolComputeQuote(String(args.session_id ?? sessionId));
+    return runtime.toolComputeQuote(String(args.session_id ?? sessionId));
   }
 
   throw new Error(`Unsupported tool: ${name}`);
@@ -244,6 +288,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
 
   try {
+    const runtime = await getRuntime();
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const payload = asRecord(body);
     const sessionId = String(payload?.session_id ?? '').trim();
@@ -255,7 +300,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     }
 
     const userMessage = userMessageRaw || 'Start the estimate intake flow.';
-    await appendTranscript(sessionId, { role: 'user', content: userMessage, at: new Date().toISOString() });
+    await runtime.appendTranscript(sessionId, { role: 'user', content: userMessage, at: new Date().toISOString() });
 
     let response = await callOpenAI(apiKey, {
       model: MODEL,
@@ -283,7 +328,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
       for (const call of calls) {
         const args = parseArgs(call.arguments);
-        const result = await executeTool(call.name, args, sessionId);
+        const result = await executeTool(runtime, call.name, args, sessionId);
 
         if (call.name === 'compute_quote') {
           quote = result;
@@ -311,24 +356,24 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       }
     }
 
-    const session = await getSession(sessionId);
-    const done = validateRequiredAnswers(session.answers).length === 0;
-    const nextHint = done ? { done: true } : await peekNextQuestion(sessionId);
+    const session = await runtime.getSession(sessionId);
+    const done = runtime.validateRequiredAnswers(session.answers).length === 0;
+    const nextHint = done ? { done: true } : await runtime.peekNextQuestion(sessionId);
 
     if (!assistantMessage) {
       if (quote && done) {
         assistantMessage = 'Your estimate is ready. I included the full quote details below.';
       } else {
-        const next = await toolNextQuestion(sessionId);
+        const next = await runtime.toolNextQuestion(sessionId);
         assistantMessage = next.question_text ?? 'Please provide the next estimate detail.';
       }
     }
 
-    await appendTranscript(sessionId, { role: 'assistant', content: assistantMessage, at: new Date().toISOString() });
+    await runtime.appendTranscript(sessionId, { role: 'assistant', content: assistantMessage, at: new Date().toISOString() });
 
     res.status(200).json({
       assistant_message: assistantMessage,
-      state: summaryState(await getSession(sessionId)),
+      state: runtime.summaryState(await runtime.getSession(sessionId)),
       quote,
       done,
       next_question: nextHint.done
