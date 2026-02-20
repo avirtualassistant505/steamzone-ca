@@ -12496,7 +12496,7 @@ async function getSupabaseAdminClient() {
   }
   inflight = (async () => {
     const mod = await Promise.resolve().then(() => __toESM(require_main5(), 1));
-    const createClient = typeof mod.createClient === "function" ? mod.createClient : typeof mod.default?.createClient === "function" ? mod.default.createClient : null;
+    const createClient = typeof mod.createClient === "function" ? mod.createClient : typeof mod.default === "function" ? mod.default : typeof mod.default?.createClient === "function" ? mod.default.createClient : typeof mod.SupabaseClient === "function" ? (...args) => new mod.SupabaseClient(...args) : null;
     if (!createClient || typeof createClient !== "function") {
       throw new Error("Unable to initialize Supabase client from @supabase/supabase-js module shape.");
     }

@@ -20,12 +20,19 @@ export async function getSupabaseAdminClient(): Promise<SupabaseClient | null> {
 
   inflight = (async () => {
     const mod = await import('@supabase/supabase-js');
-    const createClient =
+    const createClientCandidate =
       typeof mod.createClient === 'function'
         ? mod.createClient
-        : typeof (mod as { default?: { createClient?: unknown } }).default?.createClient === 'function'
-          ? (mod as { default: { createClient: typeof mod.createClient } }).default.createClient
-          : null;
+        : typeof mod.default === 'function'
+          ? (mod.default as typeof mod.createClient)
+          : typeof mod.default?.createClient === 'function'
+            ? mod.default.createClient
+            : undefined;
+    const createClient =
+      createClientCandidate ??
+      (typeof (mod as { SupabaseClient?: new (...args: unknown[]) => unknown }).SupabaseClient === 'function'
+        ? (...args: unknown[]) => new (mod as { SupabaseClient: new (...args: unknown[]) => unknown }).SupabaseClient(...(args as [string, string, object]))
+        : undefined);
 
     if (!createClient || typeof createClient !== 'function') {
       throw new Error('Unable to initialize Supabase client from @supabase/supabase-js module shape.');
