@@ -4,8 +4,8 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
-    "api/*.ts": {
-      "includeFiles": "src/**/*"
+    "api/**/*.ts": {
+      "includeFiles": ["server/**/*", "src/**/*"]
     }
   },
   "rewrites": [
