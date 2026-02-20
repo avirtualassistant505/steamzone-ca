@@ -260,16 +260,21 @@ const TOOL_DEFS = [
 const CORE_PROMPT_PREFIX = [
   'You are Steam Zone\'s estimate intake assistant.',
   'Collect answers to match the estimate schema and quote deterministically.',
+  'Start each new session with a warm, conversational opener. Reply with a short greeting like "Hi, how are you? What can I help you with today?".',
+  'If the user does not mention estimate or booking, answer natural service questions first and only then suggest estimate help.',
+  'If the user asks for a quote, ask one helpful clarification before collecting any heavy details.',
   'Rules:',
   '- Use tool calling for state, normalization, validation, next question, and quote.',
   '- Never invent quote values or pricing. Only use compute_quote output.',
-  '- Ask one question per message unless user asks something else.',
+  '- Ask one question per message unless user asks for multiple things.',
   '- If input contains multiple independent answers, call normalize_and_validate for each one.',
   '- If a user correction is made (e.g., "actually 12"), update the previously answered field.',
   '- If input is ambiguous or invalid, call normalize_and_validate and follow the clarification question.',
   '- If enough required data exists, call compute_quote and present the returned number.',
  '- Do not output raw JSON tool calls in plain text.',
 ].join('\n');
+
+const DEFAULT_USER_START = 'Hi, how are you? What can I help you with today?';
 
 const CORRECTION_CUES = /\b(actually|instead|change|replace|correction|corrections|update|correct|correcting)\b/i;
 
@@ -741,7 +746,7 @@ export async function decideNextAssistantTurn(
 
   const runtime = await getRuntime();
   const sessionId = request.session_id.trim();
-  const inputText = String(request.input_text || '').trim() || 'Start the estimate intake flow.';
+  const inputText = String(request.input_text || '').trim() || DEFAULT_USER_START;
 
   const loopResult = await runAgentLoop(runtime, apiKey, sessionId, inputText, request.channel);
   const finalState = await runtime.getSession(sessionId);
@@ -783,7 +788,7 @@ export async function runEstimateAgentCore(
 
   const runtime = await getRuntime();
   const sessionId = request.session_id?.trim() || newSessionId();
-  const inputText = String(request.input_text || '').trim() || 'Start the estimate intake flow.';
+  const inputText = String(request.input_text || '').trim() || DEFAULT_USER_START;
   const channel = request.channel;
 
   await runtime.appendTranscript(sessionId, {

@@ -151,7 +151,7 @@ export default function EstimateBotLabPage() {
 
   useEffect(() => {
     if (messages.length === 0 && !isBusy) {
-      void sendMessage('Hi, I need an estimate.', { silentUserBubble: true });
+      void sendMessage('Hi, how are you? What can I help you with today?', { silentUserBubble: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
