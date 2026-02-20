@@ -5,6 +5,7 @@
   "outputDirectory": "dist",
   "functions": {
     "api/*.ts": {
+      "runtime": "nodejs20.x",
       "includeFiles": "server/*.mjs"
     }
   },
