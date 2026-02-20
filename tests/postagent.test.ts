@@ -4,7 +4,7 @@ import {
   loadSchema,
   normalizeAndSetAnswersFromInput,
 } from '../src/estimate/core/estimateAgentCore';
-import * as estimateAgentRuntime from '../server/estimateAgentRuntimeEntry';
+import * as estimateAgentRuntime from '../server/estimateAgentRuntime.mjs';
 
 interface MockRes {
   code: number;

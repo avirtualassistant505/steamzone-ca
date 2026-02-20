@@ -7,7 +7,7 @@ import {
   type SchemaOption,
   type ServiceType,
 } from '../../quote/schema';
-import * as estimateAgentRuntime from '../../../server/estimateAgentRuntimeEntry';
+import * as estimateAgentRuntime from '../../../server/estimateAgentRuntime.mjs';
 
 export type PostagentChannel = 'web' | 'voice' | 'sms' | 'test';
 
