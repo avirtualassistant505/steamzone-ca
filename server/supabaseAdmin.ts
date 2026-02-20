@@ -1,5 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+type CreateClientFn = (url: string, key: string, options: { auth: { persistSession: boolean } }) => unknown;
+
 let cached: SupabaseClient | null = null;
 let inflight: Promise<SupabaseClient | null> | null = null;
 
@@ -42,9 +44,14 @@ export async function getSupabaseAdminClient(): Promise<SupabaseClient | null> {
         return null;
       }
 
-      cached = createClient(url, key, {
+      const candidate = (createClient as CreateClientFn)(url, key, {
         auth: { persistSession: false },
       });
+      if (!candidate) {
+        return null;
+      }
+
+      cached = candidate as SupabaseClient;
       return cached;
     } catch {
       return null;

@@ -56,6 +56,41 @@ function parseEmail(input: string): string | null {
   return hit ? hit[0].trim().toLowerCase() : null;
 }
 
+function extractName(input: string): string | null {
+  const cleaned = input.trim();
+  const patterns = [
+    /my name is\s+([^,.!?;]+)/i,
+    /i['’]?m\s+([^,.!?;]+)/i,
+    /i am\s+([^,.!?;]+)/i,
+    /call me\s+([^,.!?;]+)/i,
+    /name:\s*([^,.!?;]+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = cleaned.match(pattern);
+    if (match?.[1]) {
+      const parsed = match[1]
+        .split(/\band\b|\bbut\b/i)[0]
+        .trim();
+      if (parsed.length >= 2) {
+        return parsed;
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractAddress(input: string): string | null {
+  const match = input.match(/(?:address|at)\s+([^.,!?;]+)/i);
+  if (!match?.[1]) {
+    return null;
+  }
+
+  const parsed = match[1].trim();
+  return parsed.length > 0 ? parsed : null;
+}
+
 function parsePostalCode(input: string): string | null {
   const hit = input.match(/[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d/);
   if (!hit) return null;
@@ -310,7 +345,13 @@ export function normalizeAndValidateField(
   } else if (field.type === 'select') {
     normalizedValue = coerceSelect(field, raw, answersSoFar);
   } else if (field.type === 'string') {
-    normalizedValue = raw.trim();
+    if (field.key === 'contact.fullName') {
+      normalizedValue = extractName(raw) ?? raw.trim();
+    } else if (field.key === 'contact.address') {
+      normalizedValue = extractAddress(raw) ?? raw.trim();
+    } else {
+      normalizedValue = raw.trim();
+    }
   }
 
   if (normalizedValue === null || normalizedValue === undefined || normalizedValue === '') {

@@ -120,14 +120,14 @@ export default function EstimateBotLabPage() {
     }
 
     try {
-      const response = await fetch('/api/estimate-agent/chat', {
+      const response = await fetch('/api/postagent/estimate', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
           session_id: sessionId,
-          user_message: trimmed || 'Start the estimate intake flow.',
+          input_text: trimmed || 'Start the estimate intake flow.',
         }),
       });
 

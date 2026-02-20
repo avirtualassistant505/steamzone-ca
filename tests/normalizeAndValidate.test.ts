@@ -84,6 +84,14 @@ describe('normalize_and_validate', () => {
     expect(result.normalized_value).toBe('test.user+tag@example.com');
   });
 
+  it('extracts full name from natural language phrase', () => {
+    const result = normalizeAndValidateField('contact.fullName', 'Hi, my name is Jane Test and I am ready to start.', {
+      serviceType: 'window',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.normalized_value).toBe('Jane Test');
+  });
+
   it('asks clarification for same as last time', () => {
     const result = normalizeAndValidateField('projectType', 'same as last time', {
       serviceType: 'postConstruction',
