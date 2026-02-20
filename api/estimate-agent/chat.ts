@@ -1,4 +1,4 @@
-import { handlerForEstimateAgentPost } from '../../src/estimate/core/estimateAgentCore';
+import { handlerForEstimateAgentPost } from '../../server/estimateAgentCoreRuntime.mjs';
 
 type ApiRequest = { method?: string; body?: unknown };
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };

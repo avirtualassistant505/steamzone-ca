@@ -5,6 +5,7 @@ import {
   normalizeAndSetAnswersFromInput,
 } from '../src/estimate/core/estimateAgentCore';
 import * as estimateAgentRuntime from '../server/estimateAgentRuntime.mjs';
+import * as estimateAgentCoreRuntime from '../server/estimateAgentCoreRuntime.mjs';
 
 interface MockRes {
   code: number;
@@ -49,23 +50,23 @@ function mockOpenAIMessage(message = 'Got it.') {
 }
 
 async function completeWindowAnswers(sessionId: string): Promise<void> {
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'serviceType', 'window');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'postalCode', 'R5G 2X3');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'zone', 'zoneA');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'storey', 'bungalow');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'sizeBracket', 'under1000');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'scope', 'exterior');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'screens', 'none');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'tracks', 'basic');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'slidingRemoval', 'none');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'patioDoors', 'none');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'skylights', 'none');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'railingGlass', 'none');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'frenchPanes', 'none');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'contact.fullName', 'Jane Test');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'contact.phone', '(236) 506-6570');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'contact.email', 'jane@example.com');
-  await estimateAgentRuntime.toolSetAnswer(sessionId, 'contact.consentToContact', true);
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'serviceType', 'window');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'postalCode', 'R5G 2X3');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'zone', 'zoneA');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'storey', 'bungalow');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'sizeBracket', 'under1000');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'scope', 'exterior');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'screens', 'none');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'tracks', 'basic');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'slidingRemoval', 'none');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'patioDoors', 'none');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'skylights', 'none');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'railingGlass', 'none');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'frenchPanes', 'none');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'contact.fullName', 'Jane Test');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'contact.phone', '(236) 506-6570');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'contact.email', 'jane@example.com');
+  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'contact.consentToContact', true);
 }
 
 describe('POST /api/postagent/estimate', () => {
