@@ -19,29 +19,36 @@ export async function getSupabaseAdminClient(): Promise<SupabaseClient | null> {
   }
 
   inflight = (async () => {
-    const mod = await import('@supabase/supabase-js');
-    const createClientCandidate =
-      typeof mod.createClient === 'function'
-        ? mod.createClient
-        : typeof mod.default === 'function'
-          ? (mod.default as typeof mod.createClient)
-          : typeof mod.default?.createClient === 'function'
-            ? mod.default.createClient
-            : undefined;
-    const createClient =
-      createClientCandidate ??
-      (typeof (mod as { SupabaseClient?: new (...args: unknown[]) => unknown }).SupabaseClient === 'function'
-        ? (...args: unknown[]) => new (mod as { SupabaseClient: new (...args: unknown[]) => unknown }).SupabaseClient(...(args as [string, string, object]))
-        : undefined);
+    try {
+      const mod = await import('@supabase/supabase-js');
+      const createClientCandidate =
+        typeof mod.createClient === 'function'
+          ? mod.createClient
+          : typeof mod.default === 'function'
+            ? (mod.default as typeof mod.createClient)
+            : typeof mod.default?.createClient === 'function'
+              ? mod.default.createClient
+              : undefined;
+      const createClient =
+        createClientCandidate ??
+        (typeof (mod as { SupabaseClient?: new (...args: unknown[]) => unknown }).SupabaseClient === 'function'
+          ? (...args: unknown[]) =>
+              new (mod as { SupabaseClient: new (...args: unknown[]) => unknown }).SupabaseClient(
+                ...(args as [string, string, object])
+              )
+          : undefined);
 
-    if (!createClient || typeof createClient !== 'function') {
-      throw new Error('Unable to initialize Supabase client from @supabase/supabase-js module shape.');
+      if (!createClient || typeof createClient !== 'function') {
+        return null;
+      }
+
+      cached = createClient(url, key, {
+        auth: { persistSession: false },
+      });
+      return cached;
+    } catch {
+      return null;
     }
-
-    cached = createClient(url, key, {
-      auth: { persistSession: false },
-    });
-    return cached;
   })().finally(() => {
     inflight = null;
   });
