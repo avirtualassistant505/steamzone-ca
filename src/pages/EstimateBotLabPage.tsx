@@ -51,6 +51,7 @@ interface AgentResponse {
 }
 
 const SESSION_STORAGE_KEY = 'steamzone_estimate_bot_lab_session_id';
+const WARM_OPENER = 'Hi, how are you? What can I help you with today?';
 
 function newMessageId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -127,7 +128,7 @@ export default function EstimateBotLabPage() {
         },
         body: JSON.stringify({
           session_id: sessionId,
-          input_text: trimmed || 'Start the estimate intake flow.',
+          input_text: trimmed || WARM_OPENER,
         }),
       });
 
@@ -151,7 +152,7 @@ export default function EstimateBotLabPage() {
 
   useEffect(() => {
     if (messages.length === 0 && !isBusy) {
-      void sendMessage('Hi, how are you? What can I help you with today?', { silentUserBubble: true });
+      void sendMessage(WARM_OPENER, { silentUserBubble: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
