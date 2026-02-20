@@ -1,0 +1,144 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import quoteHandler from '../api/quote';
+import estimateAgentChatHandler from '../api/estimate-agent/chat';
+
+interface MockRes {
+  code: number;
+  payload: unknown;
+  status: (code: number) => MockRes;
+  json: (body: unknown) => void;
+}
+
+function makeRes(): MockRes {
+  return {
+    code: 200,
+    payload: null,
+    status(code: number) {
+      this.code = code;
+      return this;
+    },
+    json(body: unknown) {
+      this.payload = body;
+    },
+  };
+}
+
+describe('API routes', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  it('POST /api/quote returns validation failure for missing required fields', async () => {
+    const res = makeRes();
+    await quoteHandler(
+      {
+        method: 'POST',
+        body: {
+          answers: {
+            serviceType: 'window',
+          },
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(400);
+    const payload = res.payload as { message: string; errors: string[] };
+    expect(payload.message).toMatch(/validation failed/i);
+    expect(payload.errors.length).toBeGreaterThan(0);
+  });
+
+  it('POST /api/quote returns deterministic quote on success', async () => {
+    const res = makeRes();
+    await quoteHandler(
+      {
+        method: 'POST',
+        body: {
+          answers: {
+            serviceType: 'window',
+            postalCode: 'R5G 2X3',
+            zone: 'zoneA',
+            storey: 'bungalow',
+            sizeBracket: '1000to1500',
+            scope: 'exterior',
+            screens: 'none',
+            tracks: 'basic',
+            slidingRemoval: 'none',
+            patioDoors: 'none',
+            skylights: 'none',
+            railingGlass: 'none',
+            frenchPanes: 'none',
+            contact: {
+              fullName: 'Jane Test',
+              address: '',
+              phone: '(236) 506-6570',
+              email: 'jane@example.com',
+              consentToContact: true,
+              marketingOptIn: false,
+            },
+            'contact.fullName': 'Jane Test',
+            'contact.phone': '(236) 506-6570',
+            'contact.email': 'jane@example.com',
+            'contact.consentToContact': true,
+          },
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { quote: { quote_id: string; total: number; currency: string; line_items: unknown[] } };
+    expect(payload.quote.quote_id).toMatch(/^Q-/);
+    expect(payload.quote.total).toBeGreaterThan(0);
+    expect(payload.quote.currency).toBe('CAD');
+    expect(payload.quote.line_items.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('POST /api/estimate-agent/chat returns assistant message on basic happy path', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({
+          id: 'resp_1',
+          output: [
+            {
+              type: 'message',
+              content: [{ type: 'output_text', text: 'Sure, what service do you need an estimate for?' }],
+            },
+          ],
+          output_text: 'Sure, what service do you need an estimate for?',
+        }),
+      }))
+    );
+
+    const res = makeRes();
+    await estimateAgentChatHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: 'session-test-1',
+          user_message: 'Hi there',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as {
+      assistant_message: string;
+      state: { answers: Record<string, unknown>; asked_keys: string[]; last_question_key: string | null };
+      done: boolean;
+    };
+
+    expect(payload.assistant_message).toMatch(/service/i);
+    expect(payload.state).toBeTruthy();
+    expect(Array.isArray(payload.state.asked_keys)).toBe(true);
+    expect(typeof payload.done).toBe('boolean');
+  });
+});

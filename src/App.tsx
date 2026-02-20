@@ -7,14 +7,16 @@ import ServiceAreas from './components/ServiceAreas';
 import Contact from './components/Contact';
 import Footer from './components/Footer';
 import BrandLogo from './components/BrandLogo';
+import GhlWidgetLoader from './components/GhlWidgetLoader';
 import GetEstimatePage from './pages/GetEstimatePage';
 import AdminPricingPage from './pages/AdminPricingPage';
+import EstimateBotLabPage from './pages/EstimateBotLabPage';
 import {
   createDefaultPricingConfig,
   type PricingConfig,
 } from './lib/estimateEngine';
 
-type AppRoute = '/' | '/estimate' | '/admin' | 'notFound';
+type AppRoute = '/' | '/estimate' | '/estimate-bot-lab' | '/admin' | 'notFound';
 
 function normalizeRoute(pathname: string): AppRoute {
   const trimmed = pathname.replace(/\/+$/, '') || '/';
@@ -25,6 +27,10 @@ function normalizeRoute(pathname: string): AppRoute {
 
   if (trimmed === '/estimate') {
     return '/estimate';
+  }
+
+  if (trimmed === '/estimate-bot-lab') {
+    return '/estimate-bot-lab';
   }
 
   if (trimmed === '/admin') {
@@ -121,6 +127,8 @@ function App() {
     );
   } else if (route === '/estimate') {
     content = <GetEstimatePage />;
+  } else if (route === '/estimate-bot-lab') {
+    content = <EstimateBotLabPage />;
   } else if (route === '/admin') {
     content = (
       <AdminPricingPage
@@ -135,6 +143,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-white">
+      <GhlWidgetLoader enabled={route !== '/estimate-bot-lab'} />
       <nav className="bg-white shadow-md fixed w-full z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-24">
