@@ -41,6 +41,7 @@ interface InputUiHint {
 }
 
 interface AgentResponse {
+  session_id?: string;
   assistant_message: string;
   state: AgentState;
   quote?: QuotePayload;
@@ -113,6 +114,7 @@ function getSpeechRecognitionCtor(): {
 }
 
 const SESSION_STORAGE_KEY = 'steamzone_estimate_bot_lab_session_id';
+const VOICE_SESSION_STORAGE_KEY = 'steamzone_estimate_bot_lab_voice_session_id';
 const WARM_OPENER = 'Hello';
 
 const ESTIMATE_INTENT_REGEX = /\b(estimate|quote|pricing|price|cost|book|booking|schedule|appointment)\b/i;
@@ -148,18 +150,18 @@ function newSessionId(): string {
   return `sess-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function readSessionId(): string {
+function readSessionId(storageKey: string): string {
   if (typeof window === 'undefined') return newSessionId();
-  const existing = window.localStorage.getItem(SESSION_STORAGE_KEY)?.trim();
+  const existing = window.localStorage.getItem(storageKey)?.trim();
   if (existing) return existing;
   const id = newSessionId();
-  window.localStorage.setItem(SESSION_STORAGE_KEY, id);
+  window.localStorage.setItem(storageKey, id);
   return id;
 }
 
-function saveSessionId(id: string): void {
+function saveSessionId(storageKey: string, id: string): void {
   if (typeof window === 'undefined') return;
-  window.localStorage.setItem(SESSION_STORAGE_KEY, id);
+  window.localStorage.setItem(storageKey, id);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -208,7 +210,7 @@ function getResponseDelayMs(replyText: string): number {
 }
 
 export default function EstimateBotLabPage() {
-  const [sessionId, setSessionId] = useState<string>(() => readSessionId());
+  const [sessionId, setSessionId] = useState<string>(() => readSessionId(SESSION_STORAGE_KEY));
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isBusy, setIsBusy] = useState(false);
@@ -228,7 +230,9 @@ export default function EstimateBotLabPage() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const endRef = useRef<HTMLDivElement | null>(null);
   const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
-  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const voiceSessionIdRef = useRef<string>(readSessionId(VOICE_SESSION_STORAGE_KEY));
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioAbortRef = useRef<AbortController | null>(null);
   const isBusyRef = useRef(false);
   const isVoiceCallActiveRef = useRef(false);
   const isSpeechRecognitionSupported =
@@ -237,6 +241,7 @@ export default function EstimateBotLabPage() {
     typeof window !== 'undefined' &&
     typeof window.speechSynthesis === 'object' &&
     typeof window.speechSynthesis.speak === 'function';
+  const isAudioPlaybackSupported = typeof window !== 'undefined' && typeof Audio !== 'undefined';
 
   const voiceStatus = useMemo(() => {
     if (!isVoiceCallActive) {
@@ -342,7 +347,7 @@ export default function EstimateBotLabPage() {
         setInput(transcript);
         setIsListening(false);
         stopListening();
-        void sendMessage(transcript, { channel: 'test' });
+        void sendMessage(transcript, { channel: 'voice' });
       };
       recognition.onend = () => {
         setIsListening(false);
@@ -371,27 +376,23 @@ export default function EstimateBotLabPage() {
       return;
     }
 
+    // Voice uses an isolated agent session, separate from text chat session state.
+    const isolatedVoiceSessionId = newSessionId();
+    voiceSessionIdRef.current = isolatedVoiceSessionId;
+    saveSessionId(VOICE_SESSION_STORAGE_KEY, isolatedVoiceSessionId);
+    setMessages([]);
+    setState(null);
+    setQuote(null);
+    setDone(false);
+    setHint(null);
+    setLastQuestionText('');
+    setHasUserTurn(false);
+    setEstimateEngaged(false);
+
     setIsVoiceCallActive(true);
     setErrorMessage('');
 
-    if (messages.length === 0 && !isBusy) {
-      await sendMessage(WARM_OPENER, { silentUserBubble: true, channel: 'test' });
-      return;
-    }
-
-    const latestAssistantMessage = [...messages].reverse().find((message) => message.role === 'assistant')?.content;
-    const kickoffPrompt =
-      latestAssistantMessage && latestAssistantMessage.length <= 220
-        ? latestAssistantMessage
-        : 'Voice mode connected. How can I help you today?';
-
-    if (isSpeechSynthesisSupported) {
-      await speakText(kickoffPrompt);
-    }
-
-    if (isVoiceCallActiveRef.current && !isBusyRef.current) {
-      startListening();
-    }
+    await sendMessage(WARM_OPENER, { silentUserBubble: true, channel: 'voice' });
   }
 
   function stopVoiceCall(): void {
@@ -401,35 +402,78 @@ export default function EstimateBotLabPage() {
   }
 
   async function speakText(text: string): Promise<void> {
-    if (!isSpeechSynthesisSupported) return;
-    const synth = window.speechSynthesis;
-    synth.cancel();
+    const safeText = text.trim();
+    if (!safeText) return;
+    stopSpeaking();
     setIsSpeaking(true);
+    const controller = new AbortController();
+    audioAbortRef.current = controller;
 
-    await new Promise<void>((resolve) => {
-      const utterance = new window.SpeechSynthesisUtterance(text);
-      utterance.rate = 1.03;
-      utterance.pitch = 1;
-      utterance.volume = 1;
-      utterance.lang = 'en-US';
-      utterance.onend = () => {
-        setIsSpeaking(false);
-        resolve();
-      };
-      utterance.onerror = () => {
-        setIsSpeaking(false);
-        resolve();
-      };
-      utteranceRef.current = utterance;
-      synth.speak(utterance);
-      window.setTimeout(() => {
-        setIsSpeaking(false);
-        resolve();
-      }, Math.max(700, Math.min(12000, text.length * 80)));
-    });
+    try {
+      const response = await fetch('/api/voice/speak', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: safeText,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(detail || `Voice synthesis failed (${response.status}).`);
+      }
+
+      const voiceBlob = await response.blob();
+      if (!isAudioPlaybackSupported) {
+        throw new Error('Audio playback is not available in this browser.');
+      }
+
+      const objectUrl = URL.createObjectURL(voiceBlob);
+      await new Promise<void>((resolve) => {
+        const audio = new Audio(objectUrl);
+        activeAudioRef.current = audio;
+        audio.onended = () => resolve();
+        audio.onerror = () => resolve();
+        void audio.play().catch(() => resolve());
+      });
+      URL.revokeObjectURL(objectUrl);
+      activeAudioRef.current = null;
+    } catch {
+      // Fallback: browser speech synthesis if server voice model is unavailable.
+      if (isSpeechSynthesisSupported) {
+        await new Promise<void>((resolve) => {
+          const utterance = new window.SpeechSynthesisUtterance(safeText);
+          utterance.rate = 1.02;
+          utterance.pitch = 1;
+          utterance.volume = 1;
+          utterance.lang = 'en-US';
+          utterance.onend = () => resolve();
+          utterance.onerror = () => resolve();
+          window.speechSynthesis.speak(utterance);
+          window.setTimeout(resolve, Math.max(700, Math.min(12000, safeText.length * 80)));
+        });
+      }
+    } finally {
+      if (audioAbortRef.current === controller) {
+        audioAbortRef.current = null;
+      }
+      setIsSpeaking(false);
+    }
   }
 
   function stopSpeaking(): void {
+    if (audioAbortRef.current) {
+      audioAbortRef.current.abort();
+      audioAbortRef.current = null;
+    }
+    if (activeAudioRef.current) {
+      activeAudioRef.current.pause();
+      activeAudioRef.current.currentTime = 0;
+      activeAudioRef.current = null;
+    }
     if (isSpeechSynthesisSupported) {
       window.speechSynthesis.cancel();
     }
@@ -450,7 +494,12 @@ export default function EstimateBotLabPage() {
     stopSpeaking();
     stopListening();
     const startedAt = Date.now();
-    const preThinkingMs = getPreThinkingDelayMs(trimmed);
+    const requestedChannel =
+      options?.channel === 'voice' || options?.channel === 'test' || options?.channel === 'sms'
+        ? options.channel
+        : 'web';
+    const isVoiceTurn = requestedChannel === 'voice' || requestedChannel === 'test';
+    const preThinkingMs = isVoiceTurn ? 0 : getPreThinkingDelayMs(trimmed);
 
     if (!options?.silentUserBubble && trimmed) {
       setMessages((prev) => [...prev, { id: newMessageId(), role: 'user', content: trimmed }]);
@@ -461,20 +510,23 @@ export default function EstimateBotLabPage() {
     }
 
     try {
+      const effectiveSessionId = isVoiceTurn ? voiceSessionIdRef.current : sessionId;
       const responsePromise = fetch('/api/postagent/estimate', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
-          session_id: sessionId,
+          session_id: effectiveSessionId,
           input_text: trimmed || WARM_OPENER,
-          channel: options?.channel === 'voice' || options?.channel === 'test' || options?.channel === 'sms' ? options.channel : 'web',
+          channel: requestedChannel,
         }),
       });
 
-      await sleep(preThinkingMs);
-      setIsThinking(true);
+      if (preThinkingMs > 0) {
+        await sleep(preThinkingMs);
+        setIsThinking(true);
+      }
 
       const response = await responsePromise;
       const parsed = await parseJsonResponse<AgentResponse & { message?: string }>(response);
@@ -484,8 +536,14 @@ export default function EstimateBotLabPage() {
       }
 
       const assistantText = sanitizeMessageText(payload.assistant_message);
-      const thinkingDelay = Math.max(0, getResponseDelayMs(assistantText) - (Date.now() - startedAt));
-      await sleep(thinkingDelay);
+      if (isVoiceTurn) {
+        setIsThinking(false);
+      } else {
+        const thinkingDelay = Math.max(0, getResponseDelayMs(assistantText) - (Date.now() - startedAt));
+        if (thinkingDelay > 0) {
+          await sleep(thinkingDelay);
+        }
+      }
 
       setMessages((prev) => [...prev, { id: newMessageId(), role: 'assistant', content: assistantText }]);
       setState(payload.state);
@@ -497,7 +555,17 @@ export default function EstimateBotLabPage() {
         setEstimateEngaged(true);
       }
 
-      if (isVoiceCallActiveRef.current && (options?.channel === 'test' || options?.channel === 'voice')) {
+      if (isVoiceTurn && payload?.session_id) {
+        voiceSessionIdRef.current = payload.session_id;
+        saveSessionId(VOICE_SESSION_STORAGE_KEY, payload.session_id);
+      }
+
+      if (!isVoiceTurn && payload?.session_id && payload.session_id !== sessionId) {
+        setSessionId(payload.session_id);
+        saveSessionId(SESSION_STORAGE_KEY, payload.session_id);
+      }
+
+      if (isVoiceCallActiveRef.current && (requestedChannel === 'voice' || requestedChannel === 'test')) {
         await speakText(assistantText);
         if (isVoiceCallActiveRef.current && !payload.done) {
           window.setTimeout(() => {
@@ -517,7 +585,7 @@ export default function EstimateBotLabPage() {
       );
       setMessages((prev) => [...prev, { id: newMessageId(), role: 'assistant', content: spokenFallback }]);
 
-      if (isVoiceCallActiveRef.current && (options?.channel === 'test' || options?.channel === 'voice')) {
+      if (isVoiceCallActiveRef.current && (requestedChannel === 'voice' || requestedChannel === 'test')) {
         await speakText(spokenFallback);
       }
     } finally {
@@ -538,13 +606,16 @@ export default function EstimateBotLabPage() {
     if (isBusy) return;
     const value = input;
     setInput('');
-    void sendMessage(value, { channel: isVoiceCallActive ? 'test' : 'web' });
+    void sendMessage(value, { channel: isVoiceCallActive ? 'voice' : 'web' });
   }
 
   function startOver(): void {
     const id = newSessionId();
-    saveSessionId(id);
+    saveSessionId(SESSION_STORAGE_KEY, id);
     setSessionId(id);
+    const voiceId = newSessionId();
+    voiceSessionIdRef.current = voiceId;
+    saveSessionId(VOICE_SESSION_STORAGE_KEY, voiceId);
     setMessages([]);
     setInput('');
     setErrorMessage('');
@@ -614,6 +685,7 @@ export default function EstimateBotLabPage() {
   const showPrompt = hasUserTurn && estimateEngaged && !done && Boolean(lastQuestionText);
   const inputPlaceholder = estimateEngaged ? hint?.placeholder ?? 'Type your answer...' : 'Ask a question or request an estimate...';
   const statusLabel = done ? 'Complete' : estimateEngaged ? 'Collecting estimate details' : 'Waiting for your question';
+  const displayedSessionId = isVoiceCallActive ? voiceSessionIdRef.current : sessionId;
 
   return (
     <main className="bg-gradient-to-br from-slate-50 via-cyan-50 to-white pb-20 pt-28">
@@ -689,7 +761,7 @@ export default function EstimateBotLabPage() {
                     type="button"
                     disabled={isBusy}
                     onClick={() => {
-                      void sendMessage(action.value, { channel: isVoiceCallActive ? 'test' : 'web' });
+                      void sendMessage(action.value, { channel: isVoiceCallActive ? 'voice' : 'web' });
                     }}
                     className="rounded-full border border-cyan-300 bg-white px-3 py-1.5 text-xs font-semibold text-cyan-700 hover:bg-cyan-50 disabled:opacity-60"
                   >
@@ -722,7 +794,7 @@ export default function EstimateBotLabPage() {
             <aside className="space-y-4">
               <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
                 <h2 className="text-base font-semibold text-gray-900">Session</h2>
-                <p className="mt-1 break-all text-xs text-gray-600">{sessionId}</p>
+                <p className="mt-1 break-all text-xs text-gray-600">{displayedSessionId}</p>
               </div>
 
               <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
