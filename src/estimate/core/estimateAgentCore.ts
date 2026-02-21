@@ -379,14 +379,33 @@ function isAllowedModel(model: string, isVoiceChannel: boolean): boolean {
 function openAIFallbackModel(model: string): string {
   const fallback = getModelOptionByValue(model)?.value ?? model;
   if (fallback.startsWith('openai/')) {
-    return fallback.replace('openai/', '');
+    const normalized = fallback.replace('openai/', '').trim();
+    const lowered = normalized.toLowerCase();
+    // Audio/realtime IDs are not valid for Responses API tool-calling fallback.
+    if (lowered.includes('audio') || lowered.includes('realtime')) {
+      return 'gpt-5.2';
+    }
+    return normalized;
   }
 
   if (/^[a-z0-9._-]+$/i.test(fallback) && !fallback.includes('/')) {
+    const lowered = fallback.toLowerCase();
+    if (lowered.includes('audio') || lowered.includes('realtime')) {
+      return 'gpt-5.2';
+    }
     return fallback;
   }
 
   return 'gpt-5.2';
+}
+
+function modelSupportsToolUse(model: string): boolean {
+  const lowered = model.trim().toLowerCase();
+  if (!lowered) return false;
+  if (lowered.includes('audio') || lowered.includes('realtime')) {
+    return false;
+  }
+  return true;
 }
 
 function createProviderHeaders(apiKey: string, provider: 'openrouter' | 'openai'): Record<string, string> {
@@ -427,11 +446,19 @@ async function resolveModelProviderConfig(channel?: PostagentChannel): Promise<A
     : isVoiceChannel
       ? AGENT_DEFAULT_VOICE_MODEL
       : AGENT_DEFAULT_MODEL;
+  const normalizedStoredTextModel = normalizeProviderModelLabel(stored.model);
+  const storedTextModel = isAllowedModel(normalizedStoredTextModel, false) ? normalizedStoredTextModel : AGENT_DEFAULT_MODEL;
+  // Tool-calling turns must use a tool-capable text model.
+  const toolSafeModel = modelSupportsToolUse(safeModel)
+    ? safeModel
+    : modelSupportsToolUse(storedTextModel)
+      ? storedTextModel
+      : AGENT_DEFAULT_MODEL;
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
   if (openRouterKey) {
     return {
-      provider: getModelProviderHint(safeModel),
-      model: safeModel,
+      provider: getModelProviderHint(toolSafeModel),
+      model: toolSafeModel,
       apiKey: openRouterKey,
       responsesUrl: OPENROUTER_RESPONSES_URL,
       headers: createProviderHeaders(openRouterKey, 'openrouter'),
@@ -447,7 +474,7 @@ async function resolveModelProviderConfig(channel?: PostagentChannel): Promise<A
 
   return {
     provider: 'openai',
-    model: openAIFallbackModel(safeModel),
+    model: openAIFallbackModel(toolSafeModel),
     apiKey: openAiKey,
     responsesUrl: OPENAI_RESPONSES_URL,
     headers: createProviderHeaders(openAiKey, 'openai'),
