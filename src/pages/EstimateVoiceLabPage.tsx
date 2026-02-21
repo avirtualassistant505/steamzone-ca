@@ -242,7 +242,7 @@ export default function EstimateVoiceLabPage() {
     if (!line) return;
 
     try {
-      await fetch('/api/postagent/log', {
+      const response = await fetch('/api/postagent/log', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -255,8 +255,17 @@ export default function EstimateVoiceLabPage() {
           metadata,
         }),
       });
+
+      if (!response.ok) {
+        appendTranscript('system', 'Voice log persistence warning: unable to save this turn.');
+      } else {
+        const parsed = await parseJsonResponse<{ ok?: boolean; storage_mode?: string; message?: string }>(response);
+        if (parsed.payload?.ok === false) {
+          appendTranscript('system', parsed.payload.message || 'Voice log persistence warning: write was not confirmed.');
+        }
+      }
     } catch {
-      // Best-effort logging only.
+      appendTranscript('system', 'Voice log persistence warning: request failed.');
     }
   }
 
@@ -464,7 +473,8 @@ export default function EstimateVoiceLabPage() {
         sendRealtimeEvent({
           type: 'response.create',
           response: {
-            instructions: 'Greet the customer briefly and ask how you can help today.',
+            instructions:
+              'Greet the customer briefly in English and ask how you can help today. Only switch language if they explicitly request it.',
           },
         });
       };

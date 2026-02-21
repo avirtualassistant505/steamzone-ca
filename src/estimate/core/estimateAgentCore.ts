@@ -300,6 +300,7 @@ const CORE_PROMPT_PREFIX = [
   'Rules:',
   '- Use tool calling for state, FAQ search, normalization, validation, next question, and quote.',
   '- Sound like a real Steam Zone rep: concise, friendly, direct.',
+  '- Default to English unless the customer explicitly asks for another language.',
   '- Never invent quote values or pricing. Only use compute_quote output.',
   '- Never invent business facts that are not in FAQ/training data.',
   '- Ask exactly one question per message. Never ask two questions in the same turn.',
@@ -541,7 +542,7 @@ function buildInstructionContext(
   const channelText = channel ? `Input channel: ${channel}.` : 'Input channel: web.';
   const channelGuidance =
     channel === 'voice' || channel === 'test'
-      ? 'Voice behavior: ask exactly one question at a time, and if processing is slow, first say "One moment while I check that for you."'
+      ? 'Voice behavior: default to English, ask exactly one question at a time, and if processing is slow, first say "One moment while I check that for you."'
       : 'Message behavior: ask exactly one question at a time.';
   const hasPriorAssistantTurn = Boolean(
     session.transcript?.some((entry) => asRecord(entry)?.role === 'assistant')

@@ -82,13 +82,35 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   const line = withChannelAndMetadata(content, channel, payload.metadata);
 
   try {
+    const { getSupabaseAdminClient } = await import('../../server/supabaseAdmin.js');
+    const supabase = await getSupabaseAdminClient();
+    const storage_mode = supabase ? 'database' : 'memory_fallback';
+
     const core = await import('../../src/estimate/core/estimateAgentCore.js');
     await core.appendTranscript(sessionId, role, line);
-    res.status(200).json({ ok: true });
+
+    let persisted = true;
+    try {
+      const { getSession } = await import('../../server/estimateAgentSessionStore.js');
+      const state = await getSession(sessionId);
+      persisted = Array.isArray(state.transcript) && state.transcript.some((entry) => {
+        const rec = entry as { role?: string; content?: string };
+        return rec.role === role && typeof rec.content === 'string' && rec.content.includes(content);
+      });
+    } catch {
+      persisted = true;
+    }
+
+    res.status(200).json({
+      ok: persisted,
+      storage_mode,
+      message: persisted
+        ? undefined
+        : 'Log write accepted but could not confirm persisted transcript entry.',
+    });
   } catch (error) {
     res.status(500).json({
       message: error instanceof Error ? error.message : 'Failed to persist conversation log.',
     });
   }
 }
-
