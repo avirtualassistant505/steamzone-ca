@@ -162,7 +162,8 @@ function normalizeTransportConfig(
 
 const REALTIME_INSTRUCTIONS = [
   'You are Steam Zone AI Voice Receptionist.',
-  'Default to English. Only switch languages if the caller explicitly asks you to.',
+  'Always start in English (en-CA). Only switch languages if the caller explicitly asks you to.',
+  'Never auto-switch to Spanish or any other language based on accent or locale.',
   'Use the postagent_estimate_turn tool for customer-facing business replies so voice stays aligned with the shared estimate/chat knowledge base.',
   'Keep responses concise, natural, and call-like.',
   'Ask exactly one question per turn. Never ask two questions in one reply.',
@@ -192,7 +193,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
-  const model = process.env.OPENAI_REALTIME_MODEL?.trim() || 'gpt-4o-realtime-preview';
+  const model = process.env.OPENAI_REALTIME_MODEL?.trim() || 'gpt-realtime';
   const voice = process.env.OPENAI_REALTIME_VOICE?.trim() || 'marin';
   const preferredConfigs = buildRealtimeSessionConfigs(model, voice);
   const attempts: RealtimeAttempt[] = preferredConfigs.flatMap((config) => [

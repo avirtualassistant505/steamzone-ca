@@ -274,6 +274,7 @@ export default function EstimateVoiceLabPage() {
       return;
     }
     pendingToolCallsRef.current.add(callId);
+    let holdTimer: number | null = null;
 
     try {
       const args = parseJsonObject(argumentsText);
@@ -314,8 +315,21 @@ export default function EstimateVoiceLabPage() {
       void persistConversationTurn('user', userText, {
         source: 'tool_call_arguments',
       });
+      holdTimer = window.setTimeout(() => {
+        sendRealtimeEvent({
+          type: 'response.create',
+          response: {
+            modalities: ['audio', 'text'],
+            instructions: 'Say exactly: "One moment while I check that for you."',
+          },
+        });
+      }, 3500);
 
       const turn = await runPostagentTurn(userText);
+      if (holdTimer !== null) {
+        window.clearTimeout(holdTimer);
+        holdTimer = null;
+      }
       const assistantText = asString(turn.assistant_message).trim();
       if (assistantText) {
         void persistConversationTurn('assistant', assistantText, {
@@ -357,6 +371,9 @@ export default function EstimateVoiceLabPage() {
       setErrorMessage(message);
       setStatus('error');
     } finally {
+      if (holdTimer !== null) {
+        window.clearTimeout(holdTimer);
+      }
       pendingToolCallsRef.current.delete(callId);
     }
   }
@@ -471,10 +488,24 @@ export default function EstimateVoiceLabPage() {
         setConnectionStage('Data channel open');
         appendTranscript('system', 'Voice call connected.');
         sendRealtimeEvent({
+          type: 'conversation.item.create',
+          item: {
+            type: 'message',
+            role: 'user',
+            content: [
+              {
+                type: 'input_text',
+                text: 'Please greet the caller now in English and ask one short opening question.',
+              },
+            ],
+          },
+        });
+        sendRealtimeEvent({
           type: 'response.create',
           response: {
+            modalities: ['audio', 'text'],
             instructions:
-              'Greet the customer briefly in English and ask how you can help today. Only switch language if they explicitly request it.',
+              'Speak in English. Say exactly: "Hi, thanks for calling Steam Zone. How can I help you today?" Then wait for the caller.',
           },
         });
       };
@@ -724,7 +755,7 @@ export default function EstimateVoiceLabPage() {
 
                 <button
                   type="button"
-                  onClick={stopCall}
+                  onClick={() => stopCall()}
                   disabled={!canStop}
                   className="inline-flex w-full items-center justify-center rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-60"
                 >

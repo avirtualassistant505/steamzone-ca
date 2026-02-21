@@ -9,7 +9,7 @@ import {
 } from '../../quote/schema.js';
 
 import { searchSteamZoneKnowledgeAsync, type KnowledgeMatch } from './steamzoneKnowledge.js';
-import * as estimateAgentRuntime from '../../../server/estimateAgentRuntime.mjs';
+import * as estimateAgentRuntime from '../../../server/estimateAgentRuntimeEntry.js';
 import {
   AGENT_DEFAULT_MODEL,
   AGENT_DEFAULT_VOICE_MODEL,
