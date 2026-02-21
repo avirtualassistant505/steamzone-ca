@@ -26,6 +26,16 @@ const TABLE_NAME = 'estimate_sessions';
 const memorySessions = new Map<string, ConversationSessionRecord>();
 let storageMode: ConversationStorageMode = 'memory_fallback';
 const DEFAULT_REVIEW_STATUS: ConversationReviewStatus = 'unprocessed';
+const CHANNEL_PREFIX_RE = /^\[(web|voice|sms|test)\]\s*/i;
+const DEDUPE_WINDOW_MS = 20_000;
+
+type ConversationChannel = 'web' | 'voice' | 'sms' | 'test' | 'unknown';
+
+type ParsedConversationContent = {
+  channel: ConversationChannel;
+  stripped: string;
+  canonical: string;
+};
 
 function coerceReviewStatus(value: unknown): ConversationReviewStatus {
   if (value === 'ready') return 'ready';
@@ -146,6 +156,57 @@ type SessionRow = {
 
 function normalizeContent(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
+}
+
+function parseConversationContent(content: string): ParsedConversationContent {
+  const normalized = normalizeContent(content);
+  const channelMatch = normalized.match(CHANNEL_PREFIX_RE);
+  const channel = (channelMatch?.[1]?.toLowerCase() as ConversationChannel | undefined) ?? 'unknown';
+  const stripped = channelMatch ? normalizeContent(normalized.slice(channelMatch[0].length)) : normalized;
+  const canonical = stripped
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return { channel, stripped, canonical };
+}
+
+function parseTimestampMs(value: string | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function shouldTreatAsNearDuplicate(previous: ConversationTurn, incoming: ConversationTurn): boolean {
+  if (previous.role !== incoming.role) {
+    return false;
+  }
+
+  const previousParsed = parseConversationContent(previous.content);
+  const incomingParsed = parseConversationContent(incoming.content);
+  if (!previousParsed.canonical || !incomingParsed.canonical) {
+    return false;
+  }
+  if (previousParsed.canonical !== incomingParsed.canonical) {
+    return false;
+  }
+
+  const previousMs = parseTimestampMs(previous.at);
+  const incomingMs = parseTimestampMs(incoming.at);
+  if (!previousMs || !incomingMs) {
+    return true;
+  }
+
+  return Math.abs(incomingMs - previousMs) <= DEDUPE_WINDOW_MS;
+}
+
+function shouldUpgradeUnknownChannel(previous: ConversationTurn, incoming: ConversationTurn): boolean {
+  const previousParsed = parseConversationContent(previous.content);
+  const incomingParsed = parseConversationContent(incoming.content);
+  return previousParsed.channel === 'unknown' && incomingParsed.channel !== 'unknown';
 }
 
 function setStorageMode(mode: ConversationStorageMode): void {
@@ -354,16 +415,86 @@ export async function appendConversationTurn(
   }
 
   const session = await loadConversationSession(normalizedSessionId);
+  const updatedAt = nowIso();
+  const persistSession = async (sessionToPersist: ConversationSessionRecord): Promise<ConversationSessionRecord> => {
+    const supabase = await getSupabaseAdminClient();
+    if (!supabase || getConversationStorageMode() === 'memory_fallback') {
+      setStorageMode('memory_fallback');
+      return writeMemorySession(sessionToPersist);
+    }
+
+    try {
+      const payload = {
+        session_id: sessionToPersist.session_id,
+        answers: sessionToPersist.answers,
+        asked_keys: sessionToPersist.asked_keys,
+        transcript: sessionToPersist.transcript,
+        last_question_key: sessionToPersist.last_question_key,
+        review_notes: sessionToPersist.review_notes,
+        review_status: sessionToPersist.review_status,
+        created_at: sessionToPersist.created_at,
+        updated_at: sessionToPersist.updated_at,
+      };
+      const minimalPayload = {
+        session_id: sessionToPersist.session_id,
+        answers: sessionToPersist.answers,
+        asked_keys: sessionToPersist.asked_keys,
+        transcript: sessionToPersist.transcript,
+        last_question_key: sessionToPersist.last_question_key,
+        created_at: sessionToPersist.created_at,
+        updated_at: sessionToPersist.updated_at,
+      };
+
+      const { error } = await supabase.from(TABLE_NAME).upsert(payload, { onConflict: 'session_id' });
+      if (error && isReviewColumnMissingError(error.message)) {
+        const retry = await supabase.from(TABLE_NAME).upsert(minimalPayload, { onConflict: 'session_id' });
+        if (retry.error) {
+          throw retry.error;
+        }
+      } else if (error) {
+        throw error;
+      }
+
+      writeMemorySession(sessionToPersist);
+      setStorageMode('database');
+      return sessionToPersist;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Supabase request failed.';
+      if (shouldFallbackToMemory(message)) {
+        setStorageMode('memory_fallback');
+        return writeMemorySession(sessionToPersist);
+      }
+      throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
+    }
+  };
+
   const previous = session.transcript[session.transcript.length - 1];
-  if (
-    previous &&
-    previous.role === normalized.role &&
-    normalizeContent(previous.content) === normalized.content
-  ) {
+  if (previous && previous.role === normalized.role && normalizeContent(previous.content) === normalized.content) {
+    if (shouldTreatAsNearDuplicate(previous, normalized)) {
+      return session;
+    }
+  }
+
+  if (previous && shouldTreatAsNearDuplicate(previous, normalized)) {
+    if (shouldUpgradeUnknownChannel(previous, normalized)) {
+      const mergedTranscript = [...session.transcript];
+      mergedTranscript[mergedTranscript.length - 1] = {
+        ...previous,
+        content: normalized.content,
+        at: normalized.at || previous.at,
+      };
+      const mergedSession: ConversationSessionRecord = {
+        ...session,
+        transcript: mergedTranscript,
+        updated_at: updatedAt,
+        created_at: session.created_at || updatedAt,
+      };
+      return persistSession(mergedSession);
+    }
+
     return session;
   }
 
-  const updatedAt = nowIso();
   const next: ConversationSessionRecord = {
     ...session,
     transcript: [...session.transcript, normalized],
@@ -371,55 +502,7 @@ export async function appendConversationTurn(
     created_at: session.created_at || updatedAt,
   };
 
-  const supabase = await getSupabaseAdminClient();
-  if (!supabase || getConversationStorageMode() === 'memory_fallback') {
-    setStorageMode('memory_fallback');
-    return writeMemorySession(next);
-  }
-
-  try {
-    const payload = {
-      session_id: next.session_id,
-      answers: next.answers,
-      asked_keys: next.asked_keys,
-      transcript: next.transcript,
-      last_question_key: next.last_question_key,
-      review_notes: next.review_notes,
-      review_status: next.review_status,
-      created_at: next.created_at,
-      updated_at: next.updated_at,
-    };
-    const minimalPayload = {
-      session_id: next.session_id,
-      answers: next.answers,
-      asked_keys: next.asked_keys,
-      transcript: next.transcript,
-      last_question_key: next.last_question_key,
-      created_at: next.created_at,
-      updated_at: next.updated_at,
-    };
-
-    const { error } = await supabase.from(TABLE_NAME).upsert(payload, { onConflict: 'session_id' });
-    if (error && isReviewColumnMissingError(error.message)) {
-      const retry = await supabase.from(TABLE_NAME).upsert(minimalPayload, { onConflict: 'session_id' });
-      if (retry.error) {
-        throw retry.error;
-      }
-    } else if (error) {
-      throw error;
-    }
-
-    writeMemorySession(next);
-    setStorageMode('database');
-    return next;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Supabase request failed.';
-    if (shouldFallbackToMemory(message)) {
-      setStorageMode('memory_fallback');
-      return writeMemorySession(next);
-    }
-    throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
-  }
+  return persistSession(next);
 }
 
 export async function setConversationReviewState(

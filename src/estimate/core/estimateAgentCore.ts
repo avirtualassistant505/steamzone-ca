@@ -1419,12 +1419,13 @@ export async function runEstimateAgentCore(
   };
 
   const assistantTranscriptAt = nowIso();
+  const assistantTranscript = transcriptLine(loopResult.assistant_message, channel);
   await runtime.appendTranscript(sessionId, {
     role: 'assistant',
-    content: loopResult.assistant_message,
+    content: assistantTranscript,
     at: assistantTranscriptAt,
   });
-  await appendDurableConversationTurn(sessionId, 'assistant', loopResult.assistant_message, assistantTranscriptAt);
+  await appendDurableConversationTurn(sessionId, 'assistant', assistantTranscript, assistantTranscriptAt);
 
   const response: PostagentEstimateResponse = {
     session_id: sessionId,

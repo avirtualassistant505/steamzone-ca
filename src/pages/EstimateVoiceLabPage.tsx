@@ -25,6 +25,8 @@ interface PostagentResponse {
 type RealtimeEventPayload = Record<string, unknown>;
 
 const VOICE_SESSION_STORAGE_KEY = 'steamzone_estimate_voice_lab_session_id';
+const DEDUPE_WINDOW_MS = 20_000;
+const DEDUPE_RETENTION_MS = 120_000;
 
 function randomId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -89,26 +91,101 @@ function parseApiErrorMessage(raw: string): string {
   return text;
 }
 
-function extractAssistantText(event: Record<string, unknown>): string {
-  const response = asRecord(event.response);
-  if (!response) return '';
+function normalizeForDedup(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
-  const output = Array.isArray(response.output) ? response.output : [];
-  for (const item of output) {
-    const rec = asRecord(item);
-    if (!rec || asString(rec.type) !== 'message') continue;
-    const content = Array.isArray(rec.content) ? rec.content : [];
+function uniqueNonEmpty(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function extractTextFragments(record: Record<string, unknown>): string[] {
+  const fragments: string[] = [];
+  const directKeys = ['text', 'transcript', 'audio_transcript'];
+  for (const key of directKeys) {
+    const value = asString(record[key]).trim();
+    if (value) fragments.push(value);
+  }
+
+  const maybeText = record.output_text;
+  if (typeof maybeText === 'string' && maybeText.trim()) {
+    fragments.push(maybeText.trim());
+  }
+
+  return uniqueNonEmpty(fragments);
+}
+
+function extractContentText(content: unknown[]): string {
+  const chunks: string[] = [];
+  for (const entry of content) {
+    const record = asRecord(entry);
+    if (!record) continue;
+    chunks.push(...extractTextFragments(record));
+  }
+  return uniqueNonEmpty(chunks).join(' ').trim();
+}
+
+function extractAssistantTextFromItem(item: Record<string, unknown>): string {
+  const role = asString(item.role).trim();
+  if (role && role !== 'assistant') {
+    return '';
+  }
+
+  const type = asString(item.type).trim();
+  if (type && type !== 'message') {
+    return '';
+  }
+
+  const content = Array.isArray(item.content) ? item.content : [];
+  const contentText = extractContentText(content);
+  if (contentText) {
+    return contentText;
+  }
+
+  return uniqueNonEmpty(extractTextFragments(item)).join(' ').trim();
+}
+
+function extractAssistantText(event: Record<string, unknown>): string {
+  const type = asString(event.type);
+
+  if (type === 'response.output_audio_transcript.done' || type === 'response.audio_transcript.done') {
+    const transcript = asString(event.transcript).trim();
+    if (transcript) return transcript;
+  }
+
+  if (type === 'response.output_item.done' || type === 'conversation.item.created') {
+    const item = asRecord(event.item);
+    if (!item) return '';
+    return extractAssistantTextFromItem(item);
+  }
+
+  if (type === 'response.done') {
+    const response = asRecord(event.response);
+    if (!response) return '';
+
+    const output = Array.isArray(response.output) ? response.output : [];
     const chunks: string[] = [];
-    for (const chunk of content) {
-      const chunkRecord = asRecord(chunk);
-      if (!chunkRecord) continue;
-      const chunkType = asString(chunkRecord.type);
-      if (chunkType === 'output_text' || chunkType === 'text') {
-        const text = asString(chunkRecord.text).trim();
-        if (text) chunks.push(text);
-      }
+    for (const item of output) {
+      const record = asRecord(item);
+      if (!record) continue;
+      const itemText = extractAssistantTextFromItem(record);
+      if (itemText) chunks.push(itemText);
     }
-    if (chunks.length > 0) return chunks.join(' ').trim();
+    const merged = uniqueNonEmpty(chunks).join(' ').trim();
+    if (merged) return merged;
   }
 
   return '';
@@ -184,6 +261,7 @@ export default function EstimateVoiceLabPage() {
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const pendingToolCallsRef = useRef<Set<string>>(new Set());
   const sessionIdRef = useRef(sessionId);
+  const recentTurnsRef = useRef<Array<{ role: 'user' | 'assistant' | 'tool'; canonical: string; at: number }>>([]);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -240,6 +318,15 @@ export default function EstimateVoiceLabPage() {
   ): Promise<void> {
     const line = content.trim();
     if (!line) return;
+    const canonical = normalizeForDedup(line);
+    if (!canonical) return;
+
+    const nowMs = Date.now();
+    recentTurnsRef.current = recentTurnsRef.current.filter((entry) => nowMs - entry.at <= DEDUPE_RETENTION_MS);
+    if (recentTurnsRef.current.some((entry) => entry.role === role && entry.canonical === canonical && nowMs - entry.at <= DEDUPE_WINDOW_MS)) {
+      return;
+    }
+    recentTurnsRef.current.push({ role, canonical, at: nowMs });
 
     try {
       const response = await fetch('/api/postagent/log', {
@@ -312,9 +399,6 @@ export default function EstimateVoiceLabPage() {
         return;
       }
 
-      void persistConversationTurn('user', userText, {
-        source: 'tool_call_arguments',
-      });
       holdTimer = window.setTimeout(() => {
         sendRealtimeEvent({
           type: 'response.create',
@@ -431,6 +515,7 @@ export default function EstimateVoiceLabPage() {
     setConnectionStage('Requesting microphone access');
     setTranscript([]);
     setTurnCount(0);
+    recentTurnsRef.current = [];
 
     const newId = newSessionId();
     sessionIdRef.current = newId;
@@ -557,17 +642,24 @@ export default function EstimateVoiceLabPage() {
         const call = extractFunctionCall(payload);
         if (call) {
           void handleToolCall(call.callId, call.name, call.argumentsText);
-          return;
+          if (type !== 'response.done') {
+            return;
+          }
         }
 
-        if (type === 'response.done') {
+        if (
+          type === 'response.done' ||
+          type === 'response.output_item.done' ||
+          type === 'conversation.item.created' ||
+          type === 'response.output_audio_transcript.done' ||
+          type === 'response.audio_transcript.done'
+        ) {
           const assistantText = extractAssistantText(payload);
           if (assistantText) {
             void persistConversationTurn('assistant', assistantText, {
-              source: 'realtime_response_done',
+              source: type,
             });
           }
-          return;
         }
 
         if (type === 'error') {
@@ -639,6 +731,7 @@ export default function EstimateVoiceLabPage() {
     setSessionId(newId);
     setTranscript([]);
     setTurnCount(0);
+    recentTurnsRef.current = [];
     setErrorMessage('');
     setConnectionStage('Idle');
     setStatus('idle');
