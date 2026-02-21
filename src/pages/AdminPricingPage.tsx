@@ -70,6 +70,8 @@ type PricingSavePayload = {
   message?: string;
 };
 
+type ConversationReviewStatus = 'unprocessed' | 'ready' | 'processed';
+
 type ConversationSummary = {
   session_id: string;
   created_at: string;
@@ -78,7 +80,7 @@ type ConversationSummary = {
   channels: string[];
   preview: string;
   last_question_key: string | null;
-  review_status: 'processed' | 'unprocessed';
+  review_status: ConversationReviewStatus;
   review_notes: string;
 };
 
@@ -96,7 +98,7 @@ type ConversationDetail = {
   answers: Record<string, unknown>;
   asked_keys: string[];
   last_question_key: string | null;
-  review_status: 'processed' | 'unprocessed';
+  review_status: ConversationReviewStatus;
   review_notes: string;
   transcript: ConversationTurn[];
 };
@@ -110,7 +112,7 @@ type TranscriptGetPayload = {
 
 type TranscriptUpdatePayload = {
   session_id: string;
-  review_status: 'processed' | 'unprocessed';
+  review_status: ConversationReviewStatus;
   review_notes?: string;
   storage_mode?: 'database' | 'memory_fallback';
   message?: string;
@@ -225,11 +227,11 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [conversationError, setConversationError] = useState('');
   const [conversationMessage, setConversationMessage] = useState('');
   const [conversationLoaded, setConversationLoaded] = useState(false);
-  const [conversationStatusFilter, setConversationStatusFilter] = useState<'all' | 'processed' | 'unprocessed'>('unprocessed');
+  const [conversationStatusFilter, setConversationStatusFilter] = useState<'all' | ConversationReviewStatus>('unprocessed');
   const [conversationStorageMode, setConversationStorageMode] = useState<'database' | 'memory_fallback' | ''>('');
   const [selectedConversationId, setSelectedConversationId] = useState('');
   const [selectedConversation, setSelectedConversation] = useState<ConversationDetail | null>(null);
-  const [reviewStatusDraft, setReviewStatusDraft] = useState<'processed' | 'unprocessed'>('unprocessed');
+  const [reviewStatusDraft, setReviewStatusDraft] = useState<ConversationReviewStatus>('unprocessed');
   const [reviewNotesDraft, setReviewNotesDraft] = useState('');
   const [conversationDetailLoading, setConversationDetailLoading] = useState(false);
   const [supabaseDiagLoading, setSupabaseDiagLoading] = useState(false);
@@ -475,14 +477,17 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
     const notesChanged = selectedConversation?.review_notes !== reviewNotesDraft;
     const statusChanged = selectedConversation?.review_status !== reviewStatusDraft;
-    const payload: {
+  const payload: {
       session_id: string;
-      review_status: 'processed' | 'unprocessed';
+      review_status?: ConversationReviewStatus;
       review_notes?: string;
     } = {
       session_id: selectedConversationId,
-      review_status: reviewStatusDraft,
     };
+
+    if (statusChanged) {
+      payload.review_status = reviewStatusDraft;
+    }
 
     if (notesChanged) {
       payload.review_notes = reviewNotesDraft;
@@ -2009,13 +2014,14 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                     <select
                       value={conversationStatusFilter}
                       onChange={(event) =>
-                        setConversationStatusFilter(event.target.value as 'all' | 'processed' | 'unprocessed')
+                        setConversationStatusFilter(event.target.value as 'all' | ConversationReviewStatus)
                       }
                       className="rounded border border-gray-300 px-2 py-1 text-sm"
                     >
                       <option value="all">All</option>
                       <option value="unprocessed">Unprocessed</option>
                       <option value="processed">Processed</option>
+                      <option value="ready">Ready</option>
                     </select>
                   </label>
                   <button
@@ -2182,12 +2188,13 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                             <select
                               value={reviewStatusDraft}
                               onChange={(event) =>
-                                setReviewStatusDraft(event.target.value as 'processed' | 'unprocessed')
+                                setReviewStatusDraft(event.target.value as ConversationReviewStatus)
                               }
                               className="w-full rounded-lg border border-gray-300 px-3 py-2"
                             >
                               <option value="unprocessed">unprocessed</option>
                               <option value="processed">processed</option>
+                              <option value="ready">ready</option>
                             </select>
                           </label>
                           <div>

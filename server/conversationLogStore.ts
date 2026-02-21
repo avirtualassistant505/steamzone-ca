@@ -2,6 +2,7 @@ import { getSupabaseAdminClient } from './supabaseAdmin.js';
 
 export type ConversationRole = 'user' | 'assistant' | 'tool';
 export type ConversationStorageMode = 'database' | 'memory_fallback';
+export type ConversationReviewStatus = 'unprocessed' | 'ready' | 'processed';
 
 export interface ConversationTurn {
   role: ConversationRole;
@@ -15,6 +16,8 @@ export interface ConversationSessionRecord {
   asked_keys: string[];
   transcript: ConversationTurn[];
   last_question_key: string | null;
+  review_notes: string;
+  review_status: ConversationReviewStatus;
   created_at: string;
   updated_at: string;
 }
@@ -22,6 +25,18 @@ export interface ConversationSessionRecord {
 const TABLE_NAME = 'estimate_sessions';
 const memorySessions = new Map<string, ConversationSessionRecord>();
 let storageMode: ConversationStorageMode = 'memory_fallback';
+const DEFAULT_REVIEW_STATUS: ConversationReviewStatus = 'unprocessed';
+
+function coerceReviewStatus(value: unknown): ConversationReviewStatus {
+  if (value === 'ready') return 'ready';
+  if (value === 'processed') return 'processed';
+  if (value === 'unprocessed') return 'unprocessed';
+  return DEFAULT_REVIEW_STATUS;
+}
+
+function normalizeReviewNotes(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -87,8 +102,16 @@ function writeMemorySession(session: ConversationSessionRecord): ConversationSes
   return normalized;
 }
 
-function listMemorySessions(limit: number): ConversationSessionRecord[] {
+function listMemorySessions(
+  limit: number,
+  reviewStatus?: ConversationReviewStatus
+): ConversationSessionRecord[] {
+  const normalizedStatus =
+    reviewStatus === 'processed' || reviewStatus === 'ready' || reviewStatus === 'unprocessed'
+      ? reviewStatus
+      : undefined;
   return Array.from(memorySessions.values())
+    .filter((row) => (normalizedStatus ? row.review_status === normalizedStatus : true))
     .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
     .slice(0, limit);
 }
@@ -104,6 +127,8 @@ function normalizeRow(
     asked_keys: (row?.asked_keys ?? []) as string[],
     transcript: (row?.transcript ?? []) as ConversationTurn[],
     last_question_key: (row?.last_question_key ?? null) as string | null,
+    review_notes: normalizeReviewNotes((row as { review_notes?: unknown })?.review_notes),
+    review_status: coerceReviewStatus((row as { review_status?: unknown })?.review_status),
     created_at: (row?.created_at as string) ?? timestamp,
     updated_at: (row?.updated_at as string) ?? timestamp,
   };
@@ -124,7 +149,9 @@ export async function loadConversationSession(sessionId: string): Promise<Conver
   try {
     const { data, error } = await supabase
       .from(TABLE_NAME)
-      .select('session_id, answers, asked_keys, transcript, last_question_key, created_at, updated_at')
+      .select(
+        'session_id, answers, asked_keys, transcript, last_question_key, review_notes, review_status, created_at, updated_at'
+      )
       .eq('session_id', normalizedSessionId)
       .maybeSingle();
 
@@ -151,25 +178,40 @@ export async function loadConversationSession(sessionId: string): Promise<Conver
   }
 }
 
-export async function listConversationSessions(limit = 100): Promise<ConversationSessionRecord[]> {
+export async function listConversationSessions(
+  limit = 100,
+  reviewStatus?: ConversationReviewStatus
+): Promise<ConversationSessionRecord[]> {
   const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.round(limit))) : 100;
+  const normalizedStatus =
+    reviewStatus === 'processed' || reviewStatus === 'ready' || reviewStatus === 'unprocessed'
+      ? reviewStatus
+      : undefined;
   const supabase = await getSupabaseAdminClient();
   if (!supabase) {
     setStorageMode('memory_fallback');
-    return listMemorySessions(normalizedLimit);
+    return listMemorySessions(normalizedLimit, normalizedStatus);
   }
 
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from(TABLE_NAME)
-      .select('session_id, answers, asked_keys, transcript, last_question_key, created_at, updated_at')
+      .select(
+        'session_id, answers, asked_keys, transcript, last_question_key, review_notes, review_status, created_at, updated_at'
+      )
       .order('updated_at', { ascending: false })
       .limit(normalizedLimit);
+
+    if (normalizedStatus) {
+      query = query.eq('review_status', normalizedStatus);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       if (shouldFallbackToMemory(error.message)) {
         setStorageMode('memory_fallback');
-        return listMemorySessions(normalizedLimit);
+        return listMemorySessions(normalizedLimit, normalizedStatus);
       }
       throw new Error(mapSupabaseErrorMessage(error.message));
     }
@@ -191,7 +233,7 @@ export async function listConversationSessions(limit = 100): Promise<Conversatio
     const message = error instanceof Error ? error.message : 'Supabase request failed.';
     if (shouldFallbackToMemory(message)) {
       setStorageMode('memory_fallback');
-      return listMemorySessions(normalizedLimit);
+      return listMemorySessions(normalizedLimit, normalizedStatus);
     }
 
     throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
@@ -248,6 +290,75 @@ export async function appendConversationTurn(
         asked_keys: next.asked_keys,
         transcript: next.transcript,
         last_question_key: next.last_question_key,
+        review_notes: next.review_notes,
+        review_status: next.review_status,
+        created_at: next.created_at,
+        updated_at: next.updated_at,
+      },
+      { onConflict: 'session_id' }
+    );
+
+    if (error) {
+      if (shouldFallbackToMemory(error.message)) {
+        setStorageMode('memory_fallback');
+        return writeMemorySession(next);
+      }
+      throw new Error(mapSupabaseErrorMessage(error.message));
+    }
+
+    writeMemorySession(next);
+    setStorageMode('database');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Supabase request failed.';
+    if (shouldFallbackToMemory(message)) {
+      setStorageMode('memory_fallback');
+      return writeMemorySession(next);
+    }
+    throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
+  }
+
+  return next;
+}
+
+export async function setConversationReviewState(
+  sessionId: string,
+  notes: string | undefined,
+  reviewStatus?: ConversationReviewStatus
+): Promise<ConversationSessionRecord> {
+  const normalizedSessionId = sessionId.trim();
+  if (!normalizedSessionId) {
+    throw new Error('session_id is required.');
+  }
+
+  const session = await loadConversationSession(normalizedSessionId);
+  const next: ConversationSessionRecord = {
+    ...session,
+    review_notes: notes === undefined ? session.review_notes : normalizeReviewNotes(notes),
+    review_status:
+      reviewStatus === undefined
+        ? notes === undefined || normalizeReviewNotes(notes) === ''
+          ? session.review_status
+          : 'ready'
+        : coerceReviewStatus(reviewStatus),
+    updated_at: nowIso(),
+  };
+
+  const supabase = await getSupabaseAdminClient();
+  if (!supabase || getConversationStorageMode() === 'memory_fallback') {
+    setStorageMode('memory_fallback');
+    return writeMemorySession(next);
+  }
+
+  try {
+    const { error } = await supabase.from(TABLE_NAME).upsert(
+      {
+        session_id: next.session_id,
+        answers: next.answers,
+        asked_keys: next.asked_keys,
+        transcript: next.transcript,
+        last_question_key: next.last_question_key,
+        review_notes: next.review_notes,
+        review_status: next.review_status,
         created_at: next.created_at,
         updated_at: next.updated_at,
       },

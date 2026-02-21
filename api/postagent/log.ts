@@ -35,17 +35,10 @@ function asText(value: unknown): string {
 
 function withChannelAndMetadata(
   content: string,
-  channel: string,
-  metadata: unknown
+  channel: string
 ): string {
   const prefix = channel ? `[${channel}] ` : '';
-  const base = `${prefix}${content}`.trim();
-  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
-    return base;
-  }
-
-  const serialized = JSON.stringify(metadata);
-  return serialized ? `${base} ${serialized}` : base;
+  return `${prefix}${content}`.trim();
 }
 
 export default async function handler(req: ApiRequest, res: ApiResponse): Promise<void> {
@@ -79,7 +72,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   }
 
   const channel = asText(payload.channel);
-  const line = withChannelAndMetadata(content, channel, payload.metadata);
+  const line = withChannelAndMetadata(content, channel);
 
   try {
     const { appendConversationTurn, getConversationStorageMode } = await import('../../server/conversationLogStore.js');

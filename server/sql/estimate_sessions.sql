@@ -5,6 +5,8 @@ create table if not exists public.estimate_sessions (
   asked_keys jsonb not null default '[]'::jsonb,
   transcript jsonb not null default '[]'::jsonb,
   last_question_key text,
+  review_notes text,
+  review_status text not null default 'unprocessed',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

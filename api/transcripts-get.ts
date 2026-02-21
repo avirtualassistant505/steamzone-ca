@@ -19,6 +19,8 @@ type ConversationTurn = {
   channel: string;
 };
 
+type ReviewStatus = 'processed' | 'ready' | 'unprocessed';
+
 type ConversationSummary = {
   session_id: string;
   created_at: string;
@@ -27,6 +29,8 @@ type ConversationSummary = {
   channels: string[];
   preview: string;
   last_question_key: string | null;
+  review_status: ReviewStatus;
+  review_notes: string;
 };
 
 function asText(value: string | string[] | undefined): string {
@@ -39,13 +43,28 @@ function asText(value: string | string[] | undefined): string {
 function detectChannel(content: string): { channel: string; stripped: string } {
   const match = content.match(/^\[(web|voice|sms|test)\]\s*/i);
   if (!match) {
-    return { channel: 'unknown', stripped: content.trim() };
+    return { channel: 'unknown', stripped: stripTrailingMetadata(content.trim()) };
   }
 
   return {
     channel: match[1].toLowerCase(),
-    stripped: content.slice(match[0].length).trim(),
+    stripped: stripTrailingMetadata(content.slice(match[0].length).trim()),
   };
+}
+
+function stripTrailingMetadata(content: string): string {
+  const trimmed = content.trim();
+  const match = trimmed.match(/^(.*?)(\s+\{.*\})$/s);
+  if (!match) return trimmed;
+
+  const text = match[1].trim();
+  const maybeMetadata = match[2].trim();
+  try {
+    JSON.parse(maybeMetadata);
+    return text;
+  } catch {
+    return trimmed;
+  }
 }
 
 function toConversationTurns(
@@ -68,6 +87,8 @@ function summarizeSession(session: {
   updated_at: string;
   transcript: Array<{ role: Role; content: string; at: string }>;
   last_question_key: string | null;
+  review_status?: ReviewStatus;
+  review_notes?: string;
 }): ConversationSummary {
   const turns = toConversationTurns(session.transcript || []);
   const channels = Array.from(
@@ -88,6 +109,8 @@ function summarizeSession(session: {
     channels,
     preview,
     last_question_key: session.last_question_key ?? null,
+    review_status: session.review_status ?? 'unprocessed',
+    review_notes: (session.review_notes ?? '').trim(),
   };
 }
 
@@ -99,8 +122,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
 
   try {
     const sessionId = asText(req.query?.session_id);
+    const rawStatus = asText(req.query?.status);
     const limitRaw = Number(asText(req.query?.limit) || '100');
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.round(limitRaw))) : 100;
+    const normalizedStatus =
+      rawStatus === 'processed' || rawStatus === 'ready' || rawStatus === 'unprocessed' ? rawStatus : undefined;
 
     if (sessionId) {
       const session = await loadConversationSession(sessionId);
@@ -115,13 +141,15 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
           answers: session.answers,
           asked_keys: session.asked_keys,
           last_question_key: session.last_question_key,
+          review_status: session.review_status,
+          review_notes: session.review_notes,
           transcript: turns,
         },
       });
       return;
     }
 
-    const sessions = await listConversationSessions(limit);
+    const sessions = await listConversationSessions(limit, normalizedStatus);
     const storageMode = getConversationStorageMode();
     const summaries = sessions
       .filter((session) => session.session_id)
@@ -132,6 +160,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
           updated_at: session.updated_at,
           transcript: session.transcript as Array<{ role: Role; content: string; at: string }>,
           last_question_key: session.last_question_key,
+          review_status: session.review_status,
+          review_notes: session.review_notes,
         })
       );
 

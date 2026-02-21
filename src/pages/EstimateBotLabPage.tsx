@@ -184,7 +184,11 @@ function speechRecognitionErrorMessage(errorCode: string): string {
   }
 }
 
-function getPreThinkingDelayMs(inputText: string): number {
+function getPreThinkingDelayMs(inputText: string, isVoiceTurn: boolean): number {
+  if (!isVoiceTurn) {
+    return 0;
+  }
+
   const normalizedLength = inputText.trim().length;
   if (!normalizedLength) {
     return 400;
@@ -196,17 +200,30 @@ function getPreThinkingDelayMs(inputText: string): number {
   return baseDelay + sizeDelay + jitter;
 }
 
-function getResponseDelayMs(replyText: string): number {
+function getResponseDelayMs(replyText: string, isVoiceTurn: boolean): number {
+  if (isVoiceTurn) {
+    const length = replyText.trim().length;
+    if (length <= 120) {
+      return 5000;
+    }
+
+    if (length <= 240) {
+      return 7000;
+    }
+
+    return 10000;
+  }
+
   const length = replyText.trim().length;
   if (length <= 120) {
-    return 5000;
+    return 250;
   }
 
   if (length <= 240) {
-    return 7000;
+    return 450;
   }
 
-  return 10000;
+  return 800;
 }
 
 export default function EstimateBotLabPage() {
@@ -444,7 +461,7 @@ export default function EstimateBotLabPage() {
         ? options.channel
         : 'web';
     const isVoiceTurn = requestedChannel === 'voice' || requestedChannel === 'test';
-    const preThinkingMs = isVoiceTurn ? 0 : getPreThinkingDelayMs(trimmed);
+    const preThinkingMs = getPreThinkingDelayMs(trimmed, isVoiceTurn);
 
     if (!options?.silentUserBubble && trimmed) {
       setMessages((prev) => [...prev, { id: newMessageId(), role: 'user', content: trimmed }]);
@@ -481,13 +498,11 @@ export default function EstimateBotLabPage() {
       }
 
       const assistantText = sanitizeMessageText(payload.assistant_message);
-      if (isVoiceTurn) {
-        setIsThinking(false);
-      } else {
-        const thinkingDelay = Math.max(0, getResponseDelayMs(assistantText) - (Date.now() - startedAt));
-        if (thinkingDelay > 0) {
-          await sleep(thinkingDelay);
-        }
+      const elapsedMs = Date.now() - startedAt;
+      const delayMs = Math.max(0, getResponseDelayMs(assistantText, isVoiceTurn) - elapsedMs);
+      const cappedDelayMs = isVoiceTurn ? delayMs : Math.min(delayMs, 900);
+      if (cappedDelayMs > 0) {
+        await sleep(cappedDelayMs);
       }
 
       setMessages((prev) => [...prev, { id: newMessageId(), role: 'assistant', content: assistantText }]);

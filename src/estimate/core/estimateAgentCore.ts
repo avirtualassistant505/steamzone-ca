@@ -191,7 +191,7 @@ type ToolExecutionResult =
   | { [key: string]: unknown }
   | unknown;
 
-const MAX_TURNS = 8;
+const MAX_TURNS = 5;
 const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses';
 const OPENROUTER_RESPONSES_URL = 'https://openrouter.ai/api/v1/responses';
 
@@ -1051,6 +1051,34 @@ async function maybeComputeQuote(
   return runtime.toolComputeQuote(sessionId);
 }
 
+function shouldSearchKnowledge(inputText: string): boolean {
+  const text = inputText.trim();
+  return text.length > 0 && (isLikelyInfoQuestion(text) || hasEstimateIntent(text));
+}
+
+function buildAgentRequestPayload(
+  modelConfig: AgentProviderConfig,
+  input: Array<{ role: 'user'; content: string } | { type: 'function_call_output'; call_id: string; output: string }>,
+  instructions: string,
+  previousResponseId?: string
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    model: modelConfig.model,
+    instructions,
+    input,
+    tools: TOOL_DEFS,
+    tool_choice: 'auto',
+    temperature: 0.2,
+    max_output_tokens: 420,
+  };
+
+  if (previousResponseId) {
+    payload.previous_response_id = previousResponseId;
+  }
+
+  return payload;
+}
+
 async function instructionsForContext(
   channel: PostagentChannel | undefined,
   session: SessionRecord,
@@ -1071,23 +1099,33 @@ async function runAgentLoop(
   let sessionContext = await runtime.toolGetState(sessionId);
   const promptConfig = await getAgentSystemPromptConfig();
   const systemPrompt = promptConfig.prompt || CORE_PROMPT_PREFIX;
-  const faqMatches = await searchSteamZoneKnowledgeAsync(inputText, 3);
+  const faqMatches = shouldSearchKnowledge(inputText)
+    ? await searchSteamZoneKnowledgeAsync(inputText, 3)
+    : [];
   const hadPriorAssistantTurn = Boolean(
     sessionContext.transcript?.some((entry) => asRecord(entry)?.role === 'assistant')
   );
+  const instructions = await instructionsForContext(
+    channel,
+    sessionContext,
+    inputText,
+    faqMatches,
+    systemPrompt
+  );
 
-  let response = await callOpenAIWithFallback(modelConfig, {
-    model: modelConfig.model,
-    instructions: await instructionsForContext(channel, sessionContext, inputText, faqMatches, systemPrompt),
-    input: [
-      {
-        role: 'user',
-        content: inputText,
-      },
-    ],
-    tools: TOOL_DEFS,
-    tool_choice: 'auto',
-  });
+  let response = await callOpenAIWithFallback(
+    modelConfig,
+    buildAgentRequestPayload(
+      modelConfig,
+      [
+        {
+          role: 'user',
+          content: inputText,
+        },
+      ],
+      instructions
+    )
+  );
 
   let assistantMessage = readAssistantText(response);
   let quote: unknown = null;
@@ -1112,14 +1150,10 @@ async function runAgentLoop(
 
     sessionContext = await runtime.toolGetState(sessionId);
 
-      response = await callOpenAIWithFallback(modelConfig, {
-        model: modelConfig.model,
-        instructions: await instructionsForContext(channel, sessionContext, inputText, faqMatches, systemPrompt),
-        previous_response_id: response.id,
-        input: outputs,
-        tools: TOOL_DEFS,
-        tool_choice: 'auto',
-      });
+      response = await callOpenAIWithFallback(
+        modelConfig,
+        buildAgentRequestPayload(modelConfig, outputs, instructions, response.id)
+      );
 
     const textOut = readAssistantText(response);
     if (textOut) {
