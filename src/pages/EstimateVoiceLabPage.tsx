@@ -74,6 +74,45 @@ function parseJsonObject(raw: string): Record<string, unknown> {
   }
 }
 
+function parseApiErrorMessage(raw: string): string {
+  const text = raw.trim();
+  if (!text) return '';
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const message = parsed?.message;
+    if (typeof message === 'string' && message.trim()) {
+      return message.trim();
+    }
+  } catch {
+    // Keep raw text when server did not return JSON.
+  }
+  return text;
+}
+
+async function waitForIceGatheringComplete(peer: RTCPeerConnection, timeoutMs = 5000): Promise<void> {
+  if (peer.iceGatheringState === 'complete') {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      peer.removeEventListener('icegatheringstatechange', onStateChange);
+      window.clearTimeout(timeoutId);
+      resolve();
+    };
+    const onStateChange = (): void => {
+      if (peer.iceGatheringState === 'complete') {
+        finish();
+      }
+    };
+    const timeoutId = window.setTimeout(finish, timeoutMs);
+    peer.addEventListener('icegatheringstatechange', onStateChange);
+  });
+}
+
 function extractAssistantText(event: Record<string, unknown>): string {
   const response = asRecord(event.response);
   if (!response) return '';
@@ -288,7 +327,7 @@ export default function EstimateVoiceLabPage() {
     }
   }
 
-  function stopCall(): void {
+  function stopCall(options?: { preserveStatus?: boolean }): void {
     const dataChannel = dataChannelRef.current;
     if (dataChannel) {
       try {
@@ -326,8 +365,8 @@ export default function EstimateVoiceLabPage() {
 
     pendingToolCallsRef.current.clear();
     setIsListening(false);
-    if (status !== 'error') {
-      setStatus('idle');
+    if (!options?.preserveStatus) {
+      setStatus((previous) => (previous === 'error' ? 'error' : 'idle'));
     }
   }
 
@@ -352,6 +391,22 @@ export default function EstimateVoiceLabPage() {
 
       const peer = new RTCPeerConnection();
       peerRef.current = peer;
+
+      peer.oniceconnectionstatechange = () => {
+        if (peer.iceConnectionState === 'failed' || peer.iceConnectionState === 'disconnected') {
+          setErrorMessage(`WebRTC ${peer.iceConnectionState}. Please start the call again.`);
+          setStatus('error');
+          stopCall({ preserveStatus: true });
+        }
+      };
+
+      peer.onconnectionstatechange = () => {
+        if (peer.connectionState === 'failed' || peer.connectionState === 'closed') {
+          setErrorMessage(`Connection ${peer.connectionState}. Please retry.`);
+          setStatus('error');
+          stopCall({ preserveStatus: true });
+        }
+      };
 
       for (const track of localStream.getTracks()) {
         peer.addTrack(track, localStream);
@@ -451,8 +506,9 @@ export default function EstimateVoiceLabPage() {
         offerToReceiveAudio: true,
       });
       await peer.setLocalDescription(offer);
+      await waitForIceGatheringComplete(peer);
 
-      const sdpBody = offer.sdp ?? '';
+      const sdpBody = peer.localDescription?.sdp ?? offer.sdp ?? '';
       if (!sdpBody) {
         throw new Error('Failed to generate local SDP offer.');
       }
@@ -467,7 +523,8 @@ export default function EstimateVoiceLabPage() {
 
       if (!answerResponse.ok) {
         const details = await answerResponse.text();
-        throw new Error(details || `Realtime call setup failed (${answerResponse.status}).`);
+        const errorMessage = parseApiErrorMessage(details);
+        throw new Error(errorMessage || `Realtime call setup failed (${answerResponse.status}).`);
       }
 
       const answerSdp = await answerResponse.text();
@@ -476,9 +533,9 @@ export default function EstimateVoiceLabPage() {
         sdp: answerSdp,
       });
     } catch (error) {
+      stopCall({ preserveStatus: true });
       setStatus('error');
       setErrorMessage(error instanceof Error ? error.message : 'Failed to start voice call.');
-      stopCall();
     }
   }
 
