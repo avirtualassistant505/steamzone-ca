@@ -22,6 +22,10 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function normalizeTranscriptContent(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
 function cloneSession(session: EstimateSessionRecord): EstimateSessionRecord {
   return {
     ...session,
@@ -159,9 +163,22 @@ export async function appendTranscript(
   entry: TranscriptEntry
 ): Promise<EstimateSessionRecord> {
   const session = await getSession(sessionId);
+  const normalizedEntry: TranscriptEntry = {
+    ...entry,
+    content: normalizeTranscriptContent(entry.content),
+  };
+  const previous = session.transcript[session.transcript.length - 1];
+  if (
+    previous &&
+    previous.role === normalizedEntry.role &&
+    normalizeTranscriptContent(previous.content) === normalizedEntry.content
+  ) {
+    return session;
+  }
+
   const next: EstimateSessionRecord = {
     ...session,
-    transcript: [...session.transcript, entry].slice(-200),
+    transcript: [...session.transcript, normalizedEntry],
   };
   return saveSession(next);
 }

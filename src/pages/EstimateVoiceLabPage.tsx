@@ -89,6 +89,31 @@ function parseApiErrorMessage(raw: string): string {
   return text;
 }
 
+function extractAssistantText(event: Record<string, unknown>): string {
+  const response = asRecord(event.response);
+  if (!response) return '';
+
+  const output = Array.isArray(response.output) ? response.output : [];
+  for (const item of output) {
+    const rec = asRecord(item);
+    if (!rec || asString(rec.type) !== 'message') continue;
+    const content = Array.isArray(rec.content) ? rec.content : [];
+    const chunks: string[] = [];
+    for (const chunk of content) {
+      const chunkRecord = asRecord(chunk);
+      if (!chunkRecord) continue;
+      const chunkType = asString(chunkRecord.type);
+      if (chunkType === 'output_text' || chunkType === 'text') {
+        const text = asString(chunkRecord.text).trim();
+        if (text) chunks.push(text);
+      }
+    }
+    if (chunks.length > 0) return chunks.join(' ').trim();
+  }
+
+  return '';
+}
+
 async function waitForIceGatheringComplete(peer: RTCPeerConnection, timeoutMs = 5000): Promise<void> {
   if (peer.iceGatheringState === 'complete') {
     return;
@@ -206,6 +231,33 @@ export default function EstimateVoiceLabPage() {
     }
 
     return payload;
+  }
+
+  async function persistConversationTurn(
+    role: 'user' | 'assistant' | 'tool',
+    content: string,
+    metadata?: Record<string, unknown>
+  ): Promise<void> {
+    const line = content.trim();
+    if (!line) return;
+
+    try {
+      await fetch('/api/postagent/log', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          session_id: sessionIdRef.current,
+          role,
+          content: line,
+          channel: 'voice',
+          metadata,
+        }),
+      });
+    } catch {
+      // Best-effort logging only.
+    }
   }
 
   async function handleToolCall(callId: string, name: string, argumentsText: string): Promise<void> {
@@ -445,6 +497,12 @@ export default function EstimateVoiceLabPage() {
         }
 
         if (type === 'conversation.item.input_audio_transcription.completed') {
+          const transcriptText = asString(payload.transcript).trim();
+          if (transcriptText) {
+            void persistConversationTurn('user', transcriptText, {
+              source: 'realtime_transcription',
+            });
+          }
           return;
         }
 
@@ -455,6 +513,12 @@ export default function EstimateVoiceLabPage() {
         }
 
         if (type === 'response.done') {
+          const assistantText = extractAssistantText(payload);
+          if (assistantText) {
+            void persistConversationTurn('assistant', assistantText, {
+              source: 'realtime_response_done',
+            });
+          }
           return;
         }
 
