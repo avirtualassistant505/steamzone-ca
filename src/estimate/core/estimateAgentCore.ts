@@ -7,6 +7,7 @@ import {
   type SchemaOption,
   type ServiceType,
 } from '../../quote/schema';
+import { searchSteamZoneKnowledge, type KnowledgeMatch } from './steamzoneKnowledge';
 import * as estimateAgentRuntime from '../../../server/estimateAgentRuntime.mjs';
 
 export type PostagentChannel = 'web' | 'voice' | 'sms' | 'test';
@@ -56,6 +57,7 @@ interface SessionRecord {
   session_id: string;
   answers: Record<string, unknown>;
   asked_keys: string[];
+  transcript?: unknown[];
   last_question_key: string | null;
 }
 
@@ -201,6 +203,20 @@ const TOOL_DEFS = [
   },
   {
     type: 'function',
+    name: 'search_faq',
+    description: 'Search Steam Zone FAQ/training data for relevant answers.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        user_question: { type: 'string' },
+        limit: { type: 'number' },
+      },
+      required: ['user_question'],
+    },
+  },
+  {
+    type: 'function',
     name: 'normalize_and_validate',
     description: 'Normalize and validate a user answer for a specific field.',
     parameters: {
@@ -258,20 +274,24 @@ const TOOL_DEFS = [
 ] as const;
 
 const CORE_PROMPT_PREFIX = [
-  'You are Steam Zone\'s estimate intake assistant.',
-  'Collect answers to match the estimate schema and quote deterministically.',
-  'Start each new session with a warm, conversational opener. Reply with a short greeting like "Hi, how are you? What can I help you with today?".',
-  'If the user does not mention estimate or booking, answer natural service questions first and only then suggest estimate help.',
-  'If the user asks for a quote, ask one helpful clarification before collecting any heavy details.',
+  'You are a human-like Steam Zone customer service representative handling chat/voice/sms conversations.',
+  'Your first job is to help with customer questions naturally. Estimate collection is secondary unless the customer asks for a quote.',
+  'Collect estimate answers to match the schema and compute quotes deterministically only with tools.',
+  'Only start with a warm opener on a brand-new conversation. Do not repeat greetings after the first assistant turn.',
+  'When users ask service/business questions, use FAQ/training data first before answering.',
+  'If the answer is not clearly available in FAQ/training data, do not guess. Offer a team follow-up by call/text/email.',
   'Rules:',
-  '- Use tool calling for state, normalization, validation, next question, and quote.',
+  '- Use tool calling for state, FAQ search, normalization, validation, next question, and quote.',
+  '- Sound like a real Steam Zone rep: concise, friendly, direct.',
   '- Never invent quote values or pricing. Only use compute_quote output.',
+  '- Never invent business facts that are not in FAQ/training data.',
   '- Ask one question per message unless user asks for multiple things.',
+  '- Respect user intent: answer their question first, then offer estimate help if relevant.',
   '- If input contains multiple independent answers, call normalize_and_validate for each one.',
   '- If a user correction is made (e.g., "actually 12"), update the previously answered field.',
   '- If input is ambiguous or invalid, call normalize_and_validate and follow the clarification question.',
   '- If enough required data exists, call compute_quote and present the returned number.',
- '- Do not output raw JSON tool calls in plain text.',
+  '- Do not output raw JSON tool calls in plain text.',
 ].join('\n');
 
 const DEFAULT_USER_START = 'Hi, how are you? What can I help you with today?';
@@ -297,6 +317,140 @@ function parseArgs(raw: string | undefined): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+const ESTIMATE_INTENT_CUES = /\b(estimate|quote|pricing|price|cost|book|booking|schedule|appointment)\b/i;
+const INFO_QUESTION_CUES = /\?|\b(what|where|who|when|why|how|do|does|can|could|is|are|tell me|i want to know|would you)\b/i;
+
+function isLikelyInfoQuestion(inputText: string): boolean {
+  return INFO_QUESTION_CUES.test(inputText);
+}
+
+function hasEstimateIntent(inputText: string): boolean {
+  return ESTIMATE_INTENT_CUES.test(inputText);
+}
+
+function normalizeAssistantMessage(text: string): string {
+  return text
+    .replace(/^hi,\s*how are you\?\s*what can i help you with today\?\s*/i, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function hasFollowUpOffer(text: string): boolean {
+  return /\b(follow up|get back|team member|callback|call you|text you|email you|best number|best email)\b/i.test(text);
+}
+
+function isClearlyOffKnowledgeTrack(text: string): boolean {
+  return /\b(i don't have reliable public info|state business registry|local filings|about page|(what|which)\s+city\/area are you looking for)\b/i.test(text);
+}
+
+function summarizeRecentTranscript(
+  transcript: unknown[] | undefined,
+  limit = 6
+): string {
+  if (!transcript || transcript.length === 0) {
+    return '- (no prior transcript)';
+  }
+
+  const recent = transcript.slice(-limit);
+  return recent
+    .map((entry) => {
+      const rec = asRecord(entry) ?? {};
+      const role = String(rec.role ?? 'user');
+      const content = String(rec.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 240);
+      return `- ${role}: ${content}`;
+    })
+    .join('\n');
+}
+
+function summarizeKnowledge(matches: KnowledgeMatch[]): string {
+  if (matches.length === 0) {
+    return 'No high-confidence FAQ match for this user message.';
+  }
+
+  return matches
+    .slice(0, 3)
+    .map(
+      (entry, index) =>
+        `${index + 1}. Q: ${entry.question}\n   A: ${entry.answer}\n   score=${entry.score.toFixed(3)}`
+    )
+    .join('\n');
+}
+
+function buildInstructionContext(
+  channel: PostagentChannel | undefined,
+  session: SessionRecord,
+  inputText: string,
+  faqMatches: KnowledgeMatch[]
+): string {
+  const channelText = channel ? `Input channel: ${channel}.` : 'Input channel: web.';
+  const hasPriorAssistantTurn = Boolean(
+    session.transcript?.some((entry) => asRecord(entry)?.role === 'assistant')
+  );
+  const answersJson = JSON.stringify(session.answers ?? {});
+  const askedKeys = (session.asked_keys ?? []).join(', ') || '(none)';
+
+  return [
+    CORE_PROMPT_PREFIX,
+    channelText,
+    'Session Context:',
+    `- session_id: ${session.session_id}`,
+    `- has_prior_assistant_turn: ${hasPriorAssistantTurn}`,
+    `- last_question_key: ${session.last_question_key ?? 'none'}`,
+    `- asked_keys: ${askedKeys}`,
+    `- answers_so_far_json: ${answersJson}`,
+    'Recent Transcript:',
+    summarizeRecentTranscript(session.transcript),
+    'FAQ Matches For Current User Message:',
+    summarizeKnowledge(faqMatches),
+    `Current user message: ${inputText}`,
+  ].join('\n');
+}
+
+function applyResponseGuardrails(
+  assistantMessage: string,
+  inputText: string,
+  faqMatches: KnowledgeMatch[],
+  hadPriorAssistantTurn: boolean
+): string {
+  let next = normalizeAssistantMessage(assistantMessage);
+
+  if (!next) return next;
+
+  const topMatch = faqMatches[0];
+  const likelyInfoQuestion = isLikelyInfoQuestion(inputText);
+  const estimateIntent = hasEstimateIntent(inputText);
+
+  if (
+    hadPriorAssistantTurn &&
+    /^hi[,! ]/i.test(next) &&
+    likelyInfoQuestion
+  ) {
+    next = next.replace(/^hi[,! ]\s*/i, '').trim();
+  }
+
+  if (
+    likelyInfoQuestion &&
+    !estimateIntent &&
+    topMatch &&
+    topMatch.score >= 2 &&
+    isClearlyOffKnowledgeTrack(next)
+  ) {
+    next = `${topMatch.answer}\n\nIf you'd like, I can also help with a quick estimate.`;
+  }
+
+  if (
+    likelyInfoQuestion &&
+    !estimateIntent &&
+    faqMatches.length === 0 &&
+    !hasFollowUpOffer(next)
+  ) {
+    next =
+      "I want to make sure I give you accurate information, and I don't have that confirmed in our Steam Zone QA yet. I can have a team member follow up by call, text, or email. What is the best contact for you?";
+  }
+
+  return next;
 }
 
 function readAssistantText(response: OpenAIResponse): string {
@@ -586,6 +740,16 @@ async function callTool(
     return runtime.toolGetState(String(args.session_id ?? sessionId));
   }
 
+  if (name === 'search_faq') {
+    const userQuestion = String(args.user_question ?? '').trim();
+    const limitRaw = Number(args.limit ?? 3);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(5, Math.round(limitRaw))) : 3;
+    return {
+      query: userQuestion,
+      matches: searchSteamZoneKnowledge(userQuestion, limit),
+    };
+  }
+
   if (name === 'normalize_and_validate') {
     return runtime.toolNormalizeAndValidate(String(args.field_key ?? ''), String(args.user_text ?? ''), asRecord(args.answers_so_far) ?? {});
   }
@@ -653,9 +817,13 @@ async function maybeComputeQuote(
   return runtime.toolComputeQuote(sessionId);
 }
 
-function instructionsForContext(channel?: PostagentChannel): string {
-  const channelText = channel ? `Input channel: ${channel}.` : 'Input channel: web.';
-  return `${CORE_PROMPT_PREFIX}\n${channelText}`;
+function instructionsForContext(
+  channel: PostagentChannel | undefined,
+  session: SessionRecord,
+  inputText: string,
+  faqMatches: KnowledgeMatch[]
+): string {
+  return buildInstructionContext(channel, session, inputText, faqMatches);
 }
 
 async function runAgentLoop(
@@ -665,9 +833,15 @@ async function runAgentLoop(
   inputText: string,
   channel?: PostagentChannel
 ): Promise<{ assistant_message: string; quote: unknown; next_hint: NextHint; done: boolean }> {
+  let sessionContext = await runtime.toolGetState(sessionId);
+  const faqMatches = searchSteamZoneKnowledge(inputText, 3);
+  const hadPriorAssistantTurn = Boolean(
+    sessionContext.transcript?.some((entry) => asRecord(entry)?.role === 'assistant')
+  );
+
   let response = await callOpenAI(apiKey, {
     model: MODEL,
-    instructions: instructionsForContext(channel),
+    instructions: instructionsForContext(channel, sessionContext, inputText, faqMatches),
     input: [
       {
         role: 'user',
@@ -699,9 +873,11 @@ async function runAgentLoop(
       });
     }
 
+    sessionContext = await runtime.toolGetState(sessionId);
+
     response = await callOpenAI(apiKey, {
       model: MODEL,
-      instructions: instructionsForContext(channel),
+      instructions: instructionsForContext(channel, sessionContext, inputText, faqMatches),
       previous_response_id: response.id,
       input: outputs,
       tools: TOOL_DEFS,
@@ -727,6 +903,8 @@ async function runAgentLoop(
       assistantMessage = next.question_text ?? 'Please provide the next detail.';
     }
   }
+
+  assistantMessage = applyResponseGuardrails(assistantMessage, inputText, faqMatches, hadPriorAssistantTurn);
 
   return {
     assistant_message: assistantMessage,

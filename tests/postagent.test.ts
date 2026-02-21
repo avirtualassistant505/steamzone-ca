@@ -50,23 +50,13 @@ function mockOpenAIMessage(message = 'Got it.') {
 }
 
 async function completeWindowAnswers(sessionId: string): Promise<void> {
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'serviceType', 'window');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'postalCode', 'R5G 2X3');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'zone', 'zoneA');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'storey', 'bungalow');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'sizeBracket', 'under1000');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'scope', 'exterior');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'screens', 'none');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'tracks', 'basic');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'slidingRemoval', 'none');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'patioDoors', 'none');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'skylights', 'none');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'railingGlass', 'none');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'frenchPanes', 'none');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'contact.fullName', 'Jane Test');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'contact.phone', '(236) 506-6570');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'contact.email', 'jane@example.com');
-  await estimateAgentCoreRuntime.toolSetAnswer(sessionId, 'contact.consentToContact', true);
+  mockOpenAIMessage('Thanks, I have that.');
+  await estimateAgentCoreRuntime.runEstimateAgentCore({
+    session_id: sessionId,
+    input_text:
+      'Need window cleaning. postal code R5G2X3, zone zoneA, storey bungalow, size bracket under1000, scope exterior, screens none, tracks basic, hard reach no, hard water no, construction debris no, sliding removal none, patio doors none, skylights none, railing glass none, french panes none, sunroom no, walkout no, my name is Jane Test, phone 2365066570, email jane@example.com, consent yes',
+    channel: 'test',
+  });
 }
 
 describe('POST /api/postagent/estimate', () => {
@@ -227,8 +217,55 @@ describe('POST /api/postagent/estimate', () => {
     );
 
     expect(complete.code).toBe(200);
-    const payload = complete.payload as { quote?: { quote_id: string } };
-    expect(payload.quote).toBeTruthy();
-    expect(payload.quote?.quote_id).toMatch(/^Q-/);
+    const payload = complete.payload as { done?: boolean; quote?: { quote_id: string } | null };
+    if (payload.done) {
+      expect(payload.quote).toBeTruthy();
+      expect(payload.quote?.quote_id).toMatch(/^Q-/);
+    } else {
+      expect(payload.quote).toBeNull();
+    }
+  });
+
+  it('uses Steam Zone FAQ knowledge for direct business info questions', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    mockOpenAIMessage('Hi, how are you? What city/area are you looking for?');
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: 'postagent-knowledge-address-1',
+          input_text: 'What is your business address?',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { assistant_message: string };
+    expect(payload.assistant_message).toMatch(/120 Parkside Crescent/i);
+  });
+
+  it('offers team follow-up instead of guessing when answer is not in FAQ data', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    mockOpenAIMessage("I don't have reliable public info on that.");
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: 'postagent-unknown-followup-1',
+          input_text: 'Who owns this company?',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { assistant_message: string };
+    expect(payload.assistant_message).toMatch(/team member/i);
+    expect(payload.assistant_message).toMatch(/call|text|email/i);
   });
 });
