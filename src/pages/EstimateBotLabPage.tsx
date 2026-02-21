@@ -107,6 +107,37 @@ function formatCurrency(amount: number, currency: string): string {
   }).format(amount);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function getPreThinkingDelayMs(inputText: string): number {
+  const normalizedLength = inputText.trim().length;
+  if (!normalizedLength) {
+    return 400;
+  }
+
+  const baseDelay = 300;
+  const sizeDelay = Math.min(normalizedLength * 12, 550);
+  const jitter = Math.floor(Math.random() * 200);
+  return baseDelay + sizeDelay + jitter;
+}
+
+function getResponseDelayMs(replyText: string): number {
+  const length = replyText.trim().length;
+  if (length <= 120) {
+    return 5000;
+  }
+
+  if (length <= 240) {
+    return 7000;
+  }
+
+  return 10000;
+}
+
 export default function EstimateBotLabPage() {
   const [sessionId, setSessionId] = useState<string>(() => readSessionId());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -121,11 +152,28 @@ export default function EstimateBotLabPage() {
   const [copyStatus, setCopyStatus] = useState('');
   const [hasUserTurn, setHasUserTurn] = useState(false);
   const [estimateEngaged, setEstimateEngaged] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
+  const [typingTick, setTypingTick] = useState(0);
   const endRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages, isBusy]);
+  }, [messages, isBusy, typingTick]);
+
+  useEffect(() => {
+    if (!isThinking) {
+      setTypingTick(0);
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setTypingTick((prev) => (prev + 1) % 4);
+    }, 450);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [isThinking]);
 
   async function sendMessage(userText: string, options?: { silentUserBubble?: boolean }): Promise<void> {
     const trimmed = userText.trim();
@@ -135,6 +183,8 @@ export default function EstimateBotLabPage() {
 
     setErrorMessage('');
     setIsBusy(true);
+    const startedAt = Date.now();
+    const preThinkingMs = getPreThinkingDelayMs(trimmed);
 
     if (!options?.silentUserBubble && trimmed) {
       setMessages((prev) => [...prev, { id: newMessageId(), role: 'user', content: trimmed }]);
@@ -145,7 +195,7 @@ export default function EstimateBotLabPage() {
     }
 
     try {
-      const response = await fetch('/api/postagent/estimate', {
+      const responsePromise = fetch('/api/postagent/estimate', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -156,12 +206,20 @@ export default function EstimateBotLabPage() {
         }),
       });
 
+      await sleep(preThinkingMs);
+      setIsThinking(true);
+
+      const response = await responsePromise;
       const payload = (await response.json()) as AgentResponse & { message?: string };
       if (!response.ok) {
         throw new Error(payload.message ?? 'Unable to reach estimate agent.');
       }
 
-      setMessages((prev) => [...prev, { id: newMessageId(), role: 'assistant', content: sanitizeMessageText(payload.assistant_message) }]);
+      const assistantText = sanitizeMessageText(payload.assistant_message);
+      const thinkingDelay = Math.max(0, getResponseDelayMs(assistantText) - (Date.now() - startedAt));
+      await sleep(thinkingDelay);
+
+      setMessages((prev) => [...prev, { id: newMessageId(), role: 'assistant', content: assistantText }]);
       setState(payload.state);
       setQuote(payload.quote ?? null);
       setDone(Boolean(payload.done));
@@ -173,6 +231,7 @@ export default function EstimateBotLabPage() {
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unable to reach estimate agent.');
     } finally {
+      setIsThinking(false);
       setIsBusy(false);
     }
   }
@@ -315,7 +374,13 @@ export default function EstimateBotLabPage() {
                 ))}
               </div>
 
-              {isBusy && <p className="mt-3 text-xs text-gray-500">Assistant is thinking...</p>}
+              {isBusy && !isThinking && <p className="mt-3 text-xs text-gray-500">Preparing reply...</p>}
+              {isThinking && (
+                <p className="mt-2 text-xs text-gray-500" aria-live="polite" aria-atomic="true">
+                  Assistant is typing
+                  {Array.from({ length: typingTick + 1 }, () => '.').join('')}
+                </p>
+              )}
               <div ref={endRef} />
             </div>
 
