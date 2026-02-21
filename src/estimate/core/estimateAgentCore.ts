@@ -302,7 +302,8 @@ const CORE_PROMPT_PREFIX = [
   '- Sound like a real Steam Zone rep: concise, friendly, direct.',
   '- Never invent quote values or pricing. Only use compute_quote output.',
   '- Never invent business facts that are not in FAQ/training data.',
-  '- Ask one question per message unless user asks for multiple things.',
+  '- Ask exactly one question per message. Never ask two questions in the same turn.',
+  '- If a response will take a few seconds, first send a short hold line like "One moment while I check that for you."',
   '- Respect user intent: answer their question first, then offer estimate help if relevant.',
   '- If input contains multiple independent answers, call normalize_and_validate for each one.',
   '- If a user correction is made (e.g., "actually 12"), update the previously answered field.',
@@ -479,6 +480,17 @@ function normalizeAssistantMessage(text: string): string {
     .trim();
 }
 
+function enforceSingleQuestion(text: string): string {
+  let foundQuestion = false;
+  return text.replace(/\?/g, () => {
+    if (!foundQuestion) {
+      foundQuestion = true;
+      return '?';
+    }
+    return '.';
+  });
+}
+
 function hasFollowUpOffer(text: string): boolean {
   return /\b(follow up|get back|team member|callback|call you|text you|email you|best number|best email)\b/i.test(text);
 }
@@ -527,6 +539,10 @@ function buildInstructionContext(
   faqMatches: KnowledgeMatch[]
 ): string {
   const channelText = channel ? `Input channel: ${channel}.` : 'Input channel: web.';
+  const channelGuidance =
+    channel === 'voice' || channel === 'test'
+      ? 'Voice behavior: ask exactly one question at a time, and if processing is slow, first say "One moment while I check that for you."'
+      : 'Message behavior: ask exactly one question at a time.';
   const hasPriorAssistantTurn = Boolean(
     session.transcript?.some((entry) => asRecord(entry)?.role === 'assistant')
   );
@@ -536,6 +552,7 @@ function buildInstructionContext(
   return [
     CORE_PROMPT_PREFIX,
     channelText,
+    channelGuidance,
     'Session Context:',
     `- session_id: ${session.session_id}`,
     `- has_prior_assistant_turn: ${hasPriorAssistantTurn}`,
@@ -591,6 +608,8 @@ function applyResponseGuardrails(
     next =
       "I want to make sure I give you accurate information, and I don't have that confirmed in our Steam Zone QA yet. I can have a team member follow up by call, text, or email. What is the best contact for you?";
   }
+
+  next = enforceSingleQuestion(next);
 
   return next;
 }

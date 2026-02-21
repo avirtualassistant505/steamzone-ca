@@ -113,31 +113,6 @@ async function waitForIceGatheringComplete(peer: RTCPeerConnection, timeoutMs = 
   });
 }
 
-function extractAssistantText(event: Record<string, unknown>): string {
-  const response = asRecord(event.response);
-  if (!response) return '';
-
-  const output = Array.isArray(response.output) ? response.output : [];
-  for (const item of output) {
-    const rec = asRecord(item);
-    if (!rec || asString(rec.type) !== 'message') continue;
-    const content = Array.isArray(rec.content) ? rec.content : [];
-    const chunks: string[] = [];
-    for (const chunk of content) {
-      const chunkRecord = asRecord(chunk);
-      if (!chunkRecord) continue;
-      const chunkType = asString(chunkRecord.type);
-      if (chunkType === 'output_text' || chunkType === 'text') {
-        const text = asString(chunkRecord.text).trim();
-        if (text) chunks.push(text);
-      }
-    }
-    if (chunks.length > 0) return chunks.join(' ').trim();
-  }
-
-  return '';
-}
-
 function extractFunctionCall(event: Record<string, unknown>): { callId: string; name: string; argumentsText: string } | null {
   const type = asString(event.type);
 
@@ -198,6 +173,8 @@ export default function EstimateVoiceLabPage() {
   }, [isListening, status]);
 
   function appendTranscript(role: TranscriptRole, content: string): void {
+    // Keep voice mode disconnected from chat transcript rendering.
+    if (role !== 'system') return;
     const trimmed = content.trim();
     if (!trimmed) return;
     setTranscript((prev) => [...prev, { id: randomId(), role, content: trimmed }]);
@@ -228,12 +205,6 @@ export default function EstimateVoiceLabPage() {
       throw new Error(parsed.textError ?? payload?.message ?? 'Voice tool call failed.');
     }
 
-    if (payload.session_id && payload.session_id !== sessionIdRef.current) {
-      sessionIdRef.current = payload.session_id;
-      saveVoiceSessionId(payload.session_id);
-      setSessionId(payload.session_id);
-    }
-
     return payload;
   }
 
@@ -245,12 +216,6 @@ export default function EstimateVoiceLabPage() {
 
     try {
       const args = parseJsonObject(argumentsText);
-      const requestedSessionId = asString(args.session_id).trim();
-      if (requestedSessionId && requestedSessionId !== sessionIdRef.current) {
-        sessionIdRef.current = requestedSessionId;
-        saveVoiceSessionId(requestedSessionId);
-        setSessionId(requestedSessionId);
-      }
 
       if (name !== 'postagent_estimate_turn') {
         sendRealtimeEvent({
@@ -480,10 +445,6 @@ export default function EstimateVoiceLabPage() {
         }
 
         if (type === 'conversation.item.input_audio_transcription.completed') {
-          const transcriptText = asString(payload.transcript).trim();
-          if (transcriptText) {
-            appendTranscript('user', transcriptText);
-          }
           return;
         }
 
@@ -494,10 +455,6 @@ export default function EstimateVoiceLabPage() {
         }
 
         if (type === 'response.done') {
-          const assistantText = extractAssistantText(payload);
-          if (assistantText) {
-            appendTranscript('assistant', assistantText);
-          }
           return;
         }
 
@@ -619,7 +576,9 @@ export default function EstimateVoiceLabPage() {
           <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm md:p-5">
             <div className="h-[56vh] overflow-y-auto rounded-xl border border-gray-100 bg-slate-50 p-3">
               {transcript.length === 0 && (
-                <p className="text-sm text-gray-500">Start the call to begin realtime voice conversation.</p>
+                <p className="text-sm text-gray-500">
+                  Voice mode is active-only. Call transcript bubbles are hidden to keep it separate from text chat.
+                </p>
               )}
 
               <div className="space-y-3">
