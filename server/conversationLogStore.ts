@@ -50,6 +50,15 @@ function isMissingTableError(message: string): boolean {
   );
 }
 
+function isReviewColumnMissingError(message: string): boolean {
+  const text = message.toLowerCase();
+  return (
+    text.includes('column') &&
+    (text.includes('review_status') || text.includes('review_notes')) &&
+    (text.includes('does not exist') || text.includes('could not find'))
+  );
+}
+
 function isConnectivityError(message: string): boolean {
   const text = message.toLowerCase();
   return (
@@ -72,6 +81,68 @@ function mapSupabaseErrorMessage(message: string): string {
 function shouldFallbackToMemory(message: string): boolean {
   return isConnectivityError(message) || isMissingTableError(message);
 }
+
+function baseSessionSelect(includeReviewFields: boolean): string {
+  return includeReviewFields
+    ? 'session_id, answers, asked_keys, transcript, last_question_key, review_notes, review_status, created_at, updated_at'
+    : 'session_id, answers, asked_keys, transcript, last_question_key, created_at, updated_at';
+}
+
+async function maybeFetchWithMissingReviewColumnsFallback<T>(
+  queryWithReviewFields: () => Promise<{ data: T | null; error: { message: string } | null }>,
+  queryWithoutReviewFields: () => Promise<{ data: T | null; error: { message: string } | null }>
+): Promise<{ data: T | null; usedFallbackProjection: boolean; error: { message: string } | null }> {
+  const withReview = await queryWithReviewFields();
+  if (!withReview.error) {
+    return { data: withReview.data, usedFallbackProjection: false, error: null };
+  }
+
+  if (isReviewColumnMissingError(withReview.error.message)) {
+    const without = await queryWithoutReviewFields();
+    return {
+      data: without.data,
+      usedFallbackProjection: true,
+      error: without.error,
+    };
+  }
+
+  return { data: withReview.data, usedFallbackProjection: false, error: withReview.error };
+}
+
+function asQueryResult<T>(response: unknown): { data: T | null; error: { message: string } | null } {
+  const cast = response as { data: T | null; error?: { message?: unknown } | null };
+
+  if (!cast || cast.error == null) {
+    return { data: cast?.data ?? null, error: null };
+  }
+
+  if (typeof cast.error.message === 'string' && cast.error.message.trim()) {
+    return { data: cast.data, error: { message: cast.error.message } };
+  }
+
+  const fallback = JSON.stringify(cast.error);
+  return {
+    data: cast.data,
+    error: {
+      message:
+        typeof fallback === 'string' && fallback.length > 0
+          ? fallback
+          : 'Supabase request failed.',
+    },
+  };
+}
+
+type SessionRow = {
+  session_id?: string;
+  answers?: unknown;
+  asked_keys?: unknown;
+  transcript?: unknown;
+  last_question_key?: string | null;
+  review_notes?: unknown;
+  review_status?: unknown;
+  created_at?: string;
+  updated_at?: string;
+};
 
 function normalizeContent(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
@@ -147,13 +218,20 @@ export async function loadConversationSession(sessionId: string): Promise<Conver
   }
 
   try {
-    const { data, error } = await supabase
-      .from(TABLE_NAME)
-      .select(
-        'session_id, answers, asked_keys, transcript, last_question_key, review_notes, review_status, created_at, updated_at'
-      )
-      .eq('session_id', normalizedSessionId)
-      .maybeSingle();
+    const { data, usedFallbackProjection, error } = await maybeFetchWithMissingReviewColumnsFallback<SessionRow | null>(
+      async () =>
+        supabase
+          .from(TABLE_NAME)
+          .select(baseSessionSelect(true))
+          .eq('session_id', normalizedSessionId)
+          .maybeSingle(),
+      async () =>
+        supabase
+          .from(TABLE_NAME)
+          .select(baseSessionSelect(false))
+          .eq('session_id', normalizedSessionId)
+          .maybeSingle()
+    );
 
     if (error) {
       if (shouldFallbackToMemory(error.message)) {
@@ -166,6 +244,11 @@ export async function loadConversationSession(sessionId: string): Promise<Conver
     const normalized = normalizeRow(normalizedSessionId, (data as Partial<ConversationSessionRecord> | null) ?? null);
     writeMemorySession(normalized);
     setStorageMode('database');
+
+    if (usedFallbackProjection) {
+      writeMemorySession(normalized);
+    }
+
     return normalized;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Supabase request failed.';
@@ -194,19 +277,26 @@ export async function listConversationSessions(
   }
 
   try {
-    let query = supabase
-      .from(TABLE_NAME)
-      .select(
-        'session_id, answers, asked_keys, transcript, last_question_key, review_notes, review_status, created_at, updated_at'
-      )
-      .order('updated_at', { ascending: false })
-      .limit(normalizedLimit);
-
-    if (normalizedStatus) {
-      query = query.eq('review_status', normalizedStatus);
-    }
-
-    const { data, error } = await query;
+    const { data: rawData, usedFallbackProjection, error } =
+      await maybeFetchWithMissingReviewColumnsFallback<Array<Record<string, unknown>> | null>(
+        async () => {
+          const base = supabase
+            .from(TABLE_NAME)
+            .select(baseSessionSelect(true))
+            .order('updated_at', { ascending: false })
+            .limit(normalizedLimit);
+          const response = normalizedStatus ? await base.eq('review_status', normalizedStatus) : await base;
+          return asQueryResult<Array<Record<string, unknown>>>(response);
+        },
+        async () =>
+          asQueryResult<Array<Record<string, unknown>>>(
+            await supabase
+              .from(TABLE_NAME)
+              .select(baseSessionSelect(false))
+              .order('updated_at', { ascending: false })
+              .limit(normalizedLimit)
+          )
+      );
 
     if (error) {
       if (shouldFallbackToMemory(error.message)) {
@@ -216,19 +306,24 @@ export async function listConversationSessions(
       throw new Error(mapSupabaseErrorMessage(error.message));
     }
 
-    if (!Array.isArray(data)) {
+    const data = Array.isArray(rawData) ? rawData : [];
+    let normalizedRows = data.map((row) =>
+      normalizeRow(String((row as { session_id?: string }).session_id ?? ''), row as Partial<ConversationSessionRecord>)
+    );
+    if (usedFallbackProjection && normalizedStatus) {
+      normalizedRows = normalizedRows.filter((row) => row.review_status === normalizedStatus);
+    }
+
+    if (!Array.isArray(rawData)) {
       setStorageMode('database');
       return [];
     }
 
-    const rows = data.map((row) =>
-      normalizeRow(String((row as { session_id?: string }).session_id ?? ''), row as Partial<ConversationSessionRecord>)
-    );
-    rows.forEach((row) => {
+    normalizedRows.forEach((row) => {
       writeMemorySession(row);
     });
     setStorageMode('database');
-    return rows;
+    return normalizedRows;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Supabase request failed.';
     if (shouldFallbackToMemory(message)) {
@@ -283,31 +378,40 @@ export async function appendConversationTurn(
   }
 
   try {
-    const { error } = await supabase.from(TABLE_NAME).upsert(
-      {
-        session_id: next.session_id,
-        answers: next.answers,
-        asked_keys: next.asked_keys,
-        transcript: next.transcript,
-        last_question_key: next.last_question_key,
-        review_notes: next.review_notes,
-        review_status: next.review_status,
-        created_at: next.created_at,
-        updated_at: next.updated_at,
-      },
-      { onConflict: 'session_id' }
-    );
+    const payload = {
+      session_id: next.session_id,
+      answers: next.answers,
+      asked_keys: next.asked_keys,
+      transcript: next.transcript,
+      last_question_key: next.last_question_key,
+      review_notes: next.review_notes,
+      review_status: next.review_status,
+      created_at: next.created_at,
+      updated_at: next.updated_at,
+    };
+    const minimalPayload = {
+      session_id: next.session_id,
+      answers: next.answers,
+      asked_keys: next.asked_keys,
+      transcript: next.transcript,
+      last_question_key: next.last_question_key,
+      created_at: next.created_at,
+      updated_at: next.updated_at,
+    };
 
-    if (error) {
-      if (shouldFallbackToMemory(error.message)) {
-        setStorageMode('memory_fallback');
-        return writeMemorySession(next);
+    const { error } = await supabase.from(TABLE_NAME).upsert(payload, { onConflict: 'session_id' });
+    if (error && isReviewColumnMissingError(error.message)) {
+      const retry = await supabase.from(TABLE_NAME).upsert(minimalPayload, { onConflict: 'session_id' });
+      if (retry.error) {
+        throw retry.error;
       }
-      throw new Error(mapSupabaseErrorMessage(error.message));
+    } else if (error) {
+      throw error;
     }
 
     writeMemorySession(next);
     setStorageMode('database');
+    return next;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Supabase request failed.';
     if (shouldFallbackToMemory(message)) {
@@ -316,8 +420,6 @@ export async function appendConversationTurn(
     }
     throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
   }
-
-  return next;
 }
 
 export async function setConversationReviewState(
@@ -350,31 +452,40 @@ export async function setConversationReviewState(
   }
 
   try {
-    const { error } = await supabase.from(TABLE_NAME).upsert(
-      {
-        session_id: next.session_id,
-        answers: next.answers,
-        asked_keys: next.asked_keys,
-        transcript: next.transcript,
-        last_question_key: next.last_question_key,
-        review_notes: next.review_notes,
-        review_status: next.review_status,
-        created_at: next.created_at,
-        updated_at: next.updated_at,
-      },
-      { onConflict: 'session_id' }
-    );
+    const payload = {
+      session_id: next.session_id,
+      answers: next.answers,
+      asked_keys: next.asked_keys,
+      transcript: next.transcript,
+      last_question_key: next.last_question_key,
+      review_notes: next.review_notes,
+      review_status: next.review_status,
+      created_at: next.created_at,
+      updated_at: next.updated_at,
+    };
+    const minimalPayload = {
+      session_id: next.session_id,
+      answers: next.answers,
+      asked_keys: next.asked_keys,
+      transcript: next.transcript,
+      last_question_key: next.last_question_key,
+      created_at: next.created_at,
+      updated_at: next.updated_at,
+    };
 
-    if (error) {
-      if (shouldFallbackToMemory(error.message)) {
-        setStorageMode('memory_fallback');
-        return writeMemorySession(next);
+    const { error } = await supabase.from(TABLE_NAME).upsert(payload, { onConflict: 'session_id' });
+    if (error && isReviewColumnMissingError(error.message)) {
+      const retry = await supabase.from(TABLE_NAME).upsert(minimalPayload, { onConflict: 'session_id' });
+      if (retry.error) {
+        throw retry.error;
       }
-      throw new Error(mapSupabaseErrorMessage(error.message));
+    } else if (error) {
+      throw error;
     }
 
     writeMemorySession(next);
     setStorageMode('database');
+    return next;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Supabase request failed.';
     if (shouldFallbackToMemory(message)) {
@@ -383,6 +494,4 @@ export async function setConversationReviewState(
     }
     throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
   }
-
-  return next;
 }
