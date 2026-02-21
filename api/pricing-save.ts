@@ -1,31 +1,9 @@
 type ApiRequest = { method?: string; body?: unknown; headers?: Record<string, string | string[] | undefined> };
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
 
-function getBearerToken(req: ApiRequest): string | null {
-  const raw = req.headers?.authorization ?? req.headers?.Authorization ?? '';
-  const header = typeof raw === 'string' ? raw : '';
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  return match?.[1]?.trim() ?? null;
-}
-
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (req.method !== 'POST') {
     res.status(405).json({ message: 'Method not allowed' });
-    return;
-  }
-
-  const expected = process.env.ADMIN_PRICING_TOKEN;
-  const provided =
-    getBearerToken(req) ??
-    (typeof req.headers?.['x-admin-pricing-token'] === 'string' ? req.headers?.['x-admin-pricing-token'].trim() : null);
-
-  if (!expected) {
-    res.status(500).json({ message: 'ADMIN_PRICING_TOKEN is not configured on the server.' });
-    return;
-  }
-
-  if (!provided || provided !== expected) {
-    res.status(401).json({ message: 'Unauthorized' });
     return;
   }
 

@@ -10,7 +10,13 @@ import {
   type PricingConfig,
   type WindowZone,
 } from '../lib/estimateEngine';
-import { AGENT_DEFAULT_MODEL, AGENT_MODEL_OPTIONS, type AgentModelOption } from '../estimate/core/agentModelConfig';
+import {
+  AGENT_DEFAULT_MODEL,
+  AGENT_DEFAULT_VOICE_MODEL,
+  AGENT_MODEL_OPTIONS,
+  AGENT_VOICE_MODEL_OPTIONS,
+  type AgentModelOption,
+} from '../estimate/core/agentModelConfig';
 import { parseJsonResponse, type SafeJsonResult } from '../lib/responseParsing';
 
 interface AdminPricingPageProps {
@@ -29,10 +35,12 @@ interface TrainingItem {
 
 interface AgentModelResponse {
   model: string;
+  voice_model?: string;
   source: 'db' | 'fallback';
   updatedAt?: string;
   message?: string;
   available_models?: AgentModelOption[];
+  available_voice_models?: AgentModelOption[];
 }
 
 type TrainingGetPayload = {
@@ -111,10 +119,11 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [activeTab, setActiveTab] = useState<'pricing' | 'training'>('pricing');
   const [draftConfig, setDraftConfig] = useState<PricingConfig>(pricingConfig);
   const [saveMessage, setSaveMessage] = useState('');
-  const [saveToken, setSaveToken] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [agentModel, setAgentModel] = useState(AGENT_DEFAULT_MODEL);
+  const [agentVoiceModel, setAgentVoiceModel] = useState(AGENT_DEFAULT_VOICE_MODEL);
   const [agentModelOptions, setAgentModelOptions] = useState<AgentModelOption[]>(AGENT_MODEL_OPTIONS);
+  const [agentVoiceModelOptions, setAgentVoiceModelOptions] = useState<AgentModelOption[]>(AGENT_VOICE_MODEL_OPTIONS);
   const [agentModelSource, setAgentModelSource] = useState<'db' | 'fallback'>('fallback');
   const [agentModelUpdatedAt, setAgentModelUpdatedAt] = useState('');
   const [agentModelLoading, setAgentModelLoading] = useState(false);
@@ -160,8 +169,14 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
         }
 
         setAgentModel(payload.model);
+        setAgentVoiceModel(payload.voice_model ?? AGENT_DEFAULT_VOICE_MODEL);
         setAgentModelOptions(
           Array.isArray(payload.available_models) && payload.available_models.length > 0 ? payload.available_models : AGENT_MODEL_OPTIONS
+        );
+        setAgentVoiceModelOptions(
+          Array.isArray(payload.available_voice_models) && payload.available_voice_models.length > 0
+            ? payload.available_voice_models
+            : AGENT_VOICE_MODEL_OPTIONS
         );
         setAgentModelSource(payload.source ?? 'fallback');
         setAgentModelUpdatedAt(payload.updatedAt ?? '');
@@ -184,6 +199,15 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       }
     }
   }, [agentModel, agentModelOptions]);
+
+  useEffect(() => {
+    if (agentVoiceModelOptions.length > 0) {
+      const optionExists = agentVoiceModelOptions.some((option) => option.value === agentVoiceModel);
+      if (!optionExists) {
+        setAgentVoiceModel(agentVoiceModelOptions[0].value);
+      }
+    }
+  }, [agentVoiceModel, agentVoiceModelOptions]);
 
   async function loadTrainingData(): Promise<void> {
     setTrainingLoading(true);
@@ -303,11 +327,6 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   }
 
   async function saveTrainingData(): Promise<void> {
-    if (!saveToken.trim()) {
-      setTrainingMessage('Enter the admin token to save training data.');
-      return;
-    }
-
     const sanitized = trainingItems
       .map((item) => ({
         question: item.question.trim(),
@@ -323,14 +342,12 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     setTrainingError('');
     setTrainingMessage('Saving training data...');
 
-    try {
+      try {
       const response = await parseJsonResponse<TrainingSavePayload>(
         await fetch('/api/training-save', {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            authorization: `Bearer ${saveToken.trim()}`,
-            'x-admin-training-token': saveToken.trim(),
           },
           body: JSON.stringify({ items: sanitized }),
         })
@@ -363,13 +380,13 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   }
 
   async function saveAgentModel(): Promise<void> {
-    if (!saveToken.trim()) {
-      setAgentModelMessage('Enter the admin token to save model settings.');
+    if (!agentModel.trim()) {
+      setAgentModelMessage('Select a model before saving.');
       return;
     }
 
-    if (!agentModel.trim()) {
-      setAgentModelMessage('Select a model before saving.');
+    if (!agentVoiceModel.trim()) {
+      setAgentModelMessage('Select a voice model before saving.');
       return;
     }
 
@@ -382,10 +399,8 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            authorization: `Bearer ${saveToken.trim()}`,
-            'x-admin-training-token': saveToken.trim(),
           },
-          body: JSON.stringify({ model: agentModel.trim() }),
+          body: JSON.stringify({ model: agentModel.trim(), voice_model: agentVoiceModel.trim() }),
         })
       );
       const payload = response.payload;
@@ -396,9 +411,10 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       }
 
       setAgentModel(payload.model);
+      setAgentVoiceModel(payload.voice_model ?? AGENT_DEFAULT_VOICE_MODEL);
       setAgentModelSource(payload.source ?? 'fallback');
       setAgentModelUpdatedAt(payload.updatedAt ?? '');
-      setAgentModelMessage(payload.message ?? 'Model setting saved. Active for next chat turns.');
+      setAgentModelMessage(payload.message ?? 'Model settings saved. Active for next chat turns.');
     } catch {
       setAgentModelMessage('Unable to reach /api/agent-model.');
     } finally {
@@ -415,11 +431,6 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const latestRecords = useMemo(() => records.slice(0, 15), [records]);
 
   async function handleSave(): Promise<void> {
-    if (!saveToken.trim()) {
-      setSaveMessage('Enter the admin token to save pricing rules.');
-      return;
-    }
-
     setIsSaving(true);
     setSaveMessage('Saving pricing rules to Supabase...');
 
@@ -428,7 +439,6 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          authorization: `Bearer ${saveToken.trim()}`,
         },
         body: JSON.stringify({ config: draftConfig }),
       });
@@ -483,29 +493,9 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
           </div>
         </div>
 
-        <section className={cardClass}>
-          <h2 className="text-xl font-bold text-gray-900">Admin Credentials</h2>
-          <p className="mt-2 text-sm text-gray-600">
-            The same token is used to edit both pricing and training data.
-          </p>
-
-          <label className="mt-4 block max-w-xl">
-            <span className="mb-1 block text-sm font-medium text-gray-700">
-              Admin token (server env: ADMIN_TRAINING_TOKEN or ADMIN_PRICING_TOKEN)
-            </span>
-            <input
-              type="password"
-              value={saveToken}
-              onChange={(event) => setSaveToken(event.target.value)}
-              placeholder="Paste token to enable saving"
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
-            />
-          </label>
-        </section>
-
         <section className={`${cardClass} mt-6`}>
-          <h2 className="text-xl font-bold text-gray-900">Estimate Agent Model</h2>
-          <p className="mt-2 text-sm text-gray-600">Choose the model used by both web and voice agents for estimate conversations.</p>
+          <h2 className="text-xl font-bold text-gray-900">Estimate Agent Model Settings</h2>
+          <p className="mt-2 text-sm text-gray-600">Configure separate models for text and voice modes.</p>
           <p className="mt-2 text-sm text-gray-500">
             Source: {agentModelSource} {agentModelUpdatedAt ? `• Updated ${new Date(agentModelUpdatedAt).toLocaleString()}` : '• Not saved yet'}
           </p>
@@ -523,6 +513,26 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
               )}
               {!agentModelLoading &&
                 agentModelOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="mt-4 block max-w-2xl">
+            <span className="mb-1 block text-sm font-medium text-gray-700">Voice model</span>
+            <select
+              value={agentVoiceModel}
+              onChange={(event) => setAgentVoiceModel(event.target.value)}
+              disabled={agentModelLoading || agentVoiceModelOptions.length === 0}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+            >
+              {agentModelLoading && (
+                <option value={agentVoiceModel}>{agentVoiceModel}</option>
+              )}
+              {!agentModelLoading &&
+                agentVoiceModelOptions.map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label}
                   </option>
@@ -572,9 +582,8 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
             {saveMessage && <p className="mt-6 mb-6 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">{saveMessage}</p>}
             <section className={`${cardClass} mt-6`}>
               <h2 className="text-xl font-bold text-gray-900">Supabase Pricing Storage</h2>
-              <p className="mt-2 text-sm text-gray-600">
-                Pricing rules are loaded from <code className="rounded bg-slate-100 px-1 py-0.5">/api/pricing-get</code>. To publish changes, enter your admin
-                token and click Save.
+            <p className="mt-2 text-sm text-gray-600">
+                Pricing rules are loaded from <code className="rounded bg-slate-100 px-1 py-0.5">/api/pricing-get</code>. Click Save to publish your updates.
               </p>
               <p className="mt-2 text-sm text-gray-500">Pricing load status: {pricingStatus}</p>
 

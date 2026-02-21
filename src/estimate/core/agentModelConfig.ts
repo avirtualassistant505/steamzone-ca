@@ -32,3 +32,18 @@ export const AGENT_MODEL_OPTIONS: AgentModelOption[] = [
 export const AGENT_DEFAULT_MODEL = 'z-ai/glm-5';
 
 export const AGENT_DEFAULT_MODEL_LABEL = 'GLM5';
+
+export const AGENT_VOICE_MODEL_OPTIONS: AgentModelOption[] = [
+  {
+    value: 'openai/gpt-4o-mini-realtime-preview',
+    label: 'GPT-4o Mini Realtime (OpenRouter)',
+    provider: 'openrouter',
+  },
+  {
+    value: 'openai/gpt-4o-realtime-preview',
+    label: 'GPT-4o Realtime (OpenRouter)',
+    provider: 'openrouter',
+  },
+];
+
+export const AGENT_DEFAULT_VOICE_MODEL = 'openai/gpt-4o-mini-realtime-preview';

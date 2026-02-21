@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import { Copy, RotateCcw, SendHorizonal } from 'lucide-react';
 import { formatCurrency } from '../lib/estimateEngine';
 import { parseJsonResponse } from '../lib/responseParsing';
@@ -52,6 +52,62 @@ interface AgentResponse {
   };
 }
 
+type SupportedChannel = 'web' | 'voice' | 'sms' | 'test';
+type SendMessageOptions = {
+  silentUserBubble?: boolean;
+  channel?: SupportedChannel;
+};
+
+interface SpeechRecognitionLike {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  continuous: boolean;
+  onstart: (() => void) | null;
+  onend: (() => void) | null;
+  onerror: (() => void) | null;
+  onresult: ((event: SpeechRecognitionLikeEvent) => void) | null;
+  stop: () => void;
+  abort: () => void;
+  start: () => void;
+}
+
+interface SpeechRecognitionLikeEvent {
+  results: {
+    length: number;
+    [index: number]: {
+      [index: number]: {
+        transcript: string;
+      };
+    };
+  };
+}
+
+interface WindowWithSpeechApi extends Window {
+  SpeechRecognition?: {
+    prototype: SpeechRecognitionLike;
+    new (): SpeechRecognitionLike;
+  };
+  webkitSpeechRecognition?: {
+    prototype: SpeechRecognitionLike;
+    new (): SpeechRecognitionLike;
+  };
+}
+
+function getSpeechRecognitionCtor(): {
+  prototype: SpeechRecognitionLike;
+  new (): SpeechRecognitionLike;
+} | null {
+  const win = window as unknown as WindowWithSpeechApi;
+  if (win.SpeechRecognition) {
+    return win.SpeechRecognition;
+  }
+  if (win.webkitSpeechRecognition) {
+    return win.webkitSpeechRecognition;
+  }
+  return null;
+}
+
 const SESSION_STORAGE_KEY = 'steamzone_estimate_bot_lab_session_id';
 const WARM_OPENER = 'Hello';
 
@@ -61,10 +117,11 @@ function sanitizeMessageText(text: string): string {
   return text
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
-    .replace(/(\d{3,4})to(\d{3,4})/gi, '$1 to $2')
+    .replace(/(\d+)to(\d+)/gi, '$1 to $2')
     .replace(/\bunder(\d{3,5})/gi, 'under $1')
     .replace(/\bover(\d{3,5})/gi, 'over $1')
     .replace(/`([^`]+)`/g, '$1')
+    .replace(/_(.+?)_/g, '$1')
     .replace(/[ \t]{2,}/g, ' ')
     .trim();
 }
@@ -148,7 +205,40 @@ export default function EstimateBotLabPage() {
   const [estimateEngaged, setEstimateEngaged] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
   const [typingTick, setTypingTick] = useState(0);
+  const [isVoiceCallActive, setIsVoiceCallActive] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const isBusyRef = useRef(false);
+  const isVoiceCallActiveRef = useRef(false);
+  const isSpeechRecognitionSupported =
+    typeof window !== 'undefined' && getSpeechRecognitionCtor() !== null;
+  const isSpeechSynthesisSupported =
+    typeof window !== 'undefined' &&
+    typeof window.speechSynthesis === 'object' &&
+    typeof window.speechSynthesis.speak === 'function';
+
+  const voiceStatus = useMemo(() => {
+    if (!isVoiceCallActive) {
+      return isSpeechRecognitionSupported ? 'Text mode active' : 'Speech recognition unavailable';
+    }
+
+    if (isSpeaking) {
+      return 'Agent speaking...';
+    }
+
+    if (isListening) {
+      return 'Listening...';
+    }
+
+    if (isBusy) {
+      return 'Processing...';
+    }
+
+    return 'Connected, waiting';
+  }, [isBusy, isListening, isSpeaking, isVoiceCallActive, isSpeechRecognitionSupported]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -169,7 +259,144 @@ export default function EstimateBotLabPage() {
     };
   }, [isThinking]);
 
-  async function sendMessage(userText: string, options?: { silentUserBubble?: boolean }): Promise<void> {
+  useEffect(() => {
+    isBusyRef.current = isBusy;
+    isVoiceCallActiveRef.current = isVoiceCallActive;
+  }, [isBusy, isVoiceCallActive]);
+
+  useEffect(() => {
+    if (!isVoiceCallActive && isListening) {
+      stopListening();
+    }
+  }, [isListening, isVoiceCallActive]);
+
+  function stopListening(): void {
+    const recognition = speechRecognitionRef.current;
+    if (!recognition) return;
+    recognition.onresult = null;
+    recognition.onend = null;
+    recognition.onerror = null;
+    try {
+      recognition.stop();
+    } catch {
+      try {
+        recognition.abort();
+      } catch {
+        // Ignore.
+      }
+    }
+    speechRecognitionRef.current = null;
+    setIsListening(false);
+  }
+
+  function startListening(): void {
+    if (!isSpeechRecognitionSupported || !isVoiceCallActiveRef.current || isBusyRef.current) {
+      return;
+    }
+
+    const Ctor = getSpeechRecognitionCtor();
+    if (!Ctor) return;
+
+    try {
+      const recognition = new Ctor();
+      recognition.lang = 'en-US';
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 3;
+      recognition.continuous = false;
+      recognition.onstart = () => {
+        setIsListening(true);
+      };
+      recognition.onerror = () => {
+        setIsListening(false);
+      };
+      recognition.onresult = (event: SpeechRecognitionLikeEvent) => {
+        const lastResult = event.results[event.results.length - 1];
+        const transcript = (lastResult?.[0]?.transcript ?? '').trim();
+        if (!transcript) return;
+        setInput(transcript);
+        setIsListening(false);
+        stopListening();
+        void sendMessage(transcript, { channel: 'test' });
+      };
+      recognition.onend = () => {
+        setIsListening(false);
+        if (isVoiceCallActiveRef.current && !isBusyRef.current) {
+          window.setTimeout(() => {
+            startListening();
+          }, 250);
+        }
+      };
+      speechRecognitionRef.current = recognition;
+      recognition.start();
+    } catch {
+      setIsListening(false);
+    }
+  }
+
+  async function startVoiceCall(): Promise<void> {
+    if (!isSpeechRecognitionSupported) {
+      setErrorMessage('Speech recognition is not available in this browser. Please use the text input instead.');
+      return;
+    }
+
+    if (isVoiceCallActive) {
+      return;
+    }
+
+    setIsVoiceCallActive(true);
+    setErrorMessage('');
+    startListening();
+    if (messages.length === 0 && !isBusy) {
+      await sendMessage(WARM_OPENER, { silentUserBubble: true, channel: 'test' });
+    }
+  }
+
+  function stopVoiceCall(): void {
+    setIsVoiceCallActive(false);
+    stopListening();
+    stopSpeaking();
+  }
+
+  async function speakText(text: string): Promise<void> {
+    if (!isSpeechSynthesisSupported) return;
+    const synth = window.speechSynthesis;
+    synth.cancel();
+    setIsSpeaking(true);
+
+    await new Promise<void>((resolve) => {
+      const utterance = new window.SpeechSynthesisUtterance(text);
+      utterance.rate = 1.03;
+      utterance.pitch = 1;
+      utterance.volume = 1;
+      utterance.lang = 'en-US';
+      utterance.onend = () => {
+        setIsSpeaking(false);
+        resolve();
+      };
+      utterance.onerror = () => {
+        setIsSpeaking(false);
+        resolve();
+      };
+      utteranceRef.current = utterance;
+      synth.speak(utterance);
+      window.setTimeout(() => {
+        setIsSpeaking(false);
+        resolve();
+      }, Math.max(700, Math.min(12000, text.length * 80)));
+    });
+  }
+
+  function stopSpeaking(): void {
+    if (isSpeechSynthesisSupported) {
+      window.speechSynthesis.cancel();
+    }
+    setIsSpeaking(false);
+  }
+
+  async function sendMessage(
+    userText: string,
+    options?: SendMessageOptions
+  ): Promise<void> {
     const trimmed = userText.trim();
     if (!trimmed && !options?.silentUserBubble) {
       return;
@@ -177,6 +404,8 @@ export default function EstimateBotLabPage() {
 
     setErrorMessage('');
     setIsBusy(true);
+    stopSpeaking();
+    stopListening();
     const startedAt = Date.now();
     const preThinkingMs = getPreThinkingDelayMs(trimmed);
 
@@ -197,6 +426,7 @@ export default function EstimateBotLabPage() {
         body: JSON.stringify({
           session_id: sessionId,
           input_text: trimmed || WARM_OPENER,
+          channel: options?.channel === 'voice' || options?.channel === 'test' || options?.channel === 'sms' ? options.channel : 'web',
         }),
       });
 
@@ -223,6 +453,15 @@ export default function EstimateBotLabPage() {
       if (payload.state?.answers?.serviceType || payload.done || payload.quote) {
         setEstimateEngaged(true);
       }
+
+      if (isVoiceCallActiveRef.current && (options?.channel === 'test' || options?.channel === 'voice')) {
+        await speakText(assistantText);
+        if (isVoiceCallActiveRef.current && !payload.done) {
+          window.setTimeout(() => {
+            startListening();
+          }, 350);
+        }
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unable to reach estimate agent.');
     } finally {
@@ -233,17 +472,17 @@ export default function EstimateBotLabPage() {
 
   useEffect(() => {
     if (messages.length === 0 && !isBusy) {
-      void sendMessage(WARM_OPENER, { silentUserBubble: true });
+      void sendMessage(WARM_OPENER, { silentUserBubble: true, channel: 'web' });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  function onSubmit(event: React.FormEvent<HTMLFormElement>): void {
+  function onSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
     if (isBusy) return;
     const value = input;
     setInput('');
-    void sendMessage(value);
+    void sendMessage(value, { channel: isVoiceCallActive ? 'test' : 'web' });
   }
 
   function startOver(): void {
@@ -261,6 +500,9 @@ export default function EstimateBotLabPage() {
     setCopyStatus('');
     setHasUserTurn(false);
     setEstimateEngaged(false);
+    setIsVoiceCallActive(false);
+    stopListening();
+    stopSpeaking();
   }
 
   async function copyQuoteSummary(): Promise<void> {
@@ -391,7 +633,7 @@ export default function EstimateBotLabPage() {
                     type="button"
                     disabled={isBusy}
                     onClick={() => {
-                      void sendMessage(action.value);
+                      void sendMessage(action.value, { channel: isVoiceCallActive ? 'test' : 'web' });
                     }}
                     className="rounded-full border border-cyan-300 bg-white px-3 py-1.5 text-xs font-semibold text-cyan-700 hover:bg-cyan-50 disabled:opacity-60"
                   >
@@ -404,7 +646,7 @@ export default function EstimateBotLabPage() {
             <form onSubmit={onSubmit} className="mt-4 flex gap-2">
               <input
                 value={input}
-                onChange={(event) => setInput(event.target.value)}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setInput(event.target.value)}
                 placeholder={inputPlaceholder}
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-cyan-600 focus:outline-none focus:ring-2 focus:ring-cyan-200"
                 disabled={isBusy}
@@ -421,17 +663,38 @@ export default function EstimateBotLabPage() {
             {errorMessage && <p className="mt-2 text-sm text-rose-700">{errorMessage}</p>}
           </div>
 
-          <aside className="space-y-4">
-            <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-              <h2 className="text-base font-semibold text-gray-900">Session</h2>
-              <p className="mt-1 break-all text-xs text-gray-600">{sessionId}</p>
-            </div>
+            <aside className="space-y-4">
+              <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+                <h2 className="text-base font-semibold text-gray-900">Session</h2>
+                <p className="mt-1 break-all text-xs text-gray-600">{sessionId}</p>
+              </div>
 
-            <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-              <h2 className="text-base font-semibold text-gray-900">Status</h2>
-              <p className="mt-2 text-sm text-gray-700">{statusLabel}</p>
-              {copyStatus && <p className="mt-2 text-xs text-cyan-700">{copyStatus}</p>}
-            </div>
+              <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+                <h2 className="text-base font-semibold text-gray-900">Mode</h2>
+                <p className="mt-2 text-sm text-gray-700">
+                  {isVoiceCallActive ? 'Test voice call mode' : 'Text chat mode'}
+                </p>
+                <p className="mt-1 text-xs text-gray-600">{voiceStatus}</p>
+
+                {isSpeechRecognitionSupported ? (
+                  <button
+                    type="button"
+                    onClick={isVoiceCallActive ? stopVoiceCall : startVoiceCall}
+                    disabled={isBusy}
+                    className="mt-3 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                  >
+                    {isVoiceCallActive ? 'Stop Voice Test Call' : 'Start Voice Test Call'}
+                  </button>
+                ) : (
+                  <p className="mt-2 text-xs text-rose-700">Speech recognition unavailable in this browser.</p>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+                <h2 className="text-base font-semibold text-gray-900">Status</h2>
+                <p className="mt-2 text-sm text-gray-700">{statusLabel}</p>
+                {copyStatus && <p className="mt-2 text-xs text-cyan-700">{copyStatus}</p>}
+              </div>
 
             {quote && (
               <div className="rounded-2xl border border-cyan-200 bg-white p-4 shadow-sm">

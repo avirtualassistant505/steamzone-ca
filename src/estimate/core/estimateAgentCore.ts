@@ -9,7 +9,13 @@ import {
 } from '../../quote/schema';
 import { searchSteamZoneKnowledgeAsync, type KnowledgeMatch } from './steamzoneKnowledge';
 import * as estimateAgentRuntime from '../../../server/estimateAgentRuntime.mjs';
-import { AGENT_DEFAULT_MODEL, AGENT_MODEL_OPTIONS, type AgentModelOption } from './agentModelConfig';
+import {
+  AGENT_DEFAULT_MODEL,
+  AGENT_DEFAULT_VOICE_MODEL,
+  AGENT_MODEL_OPTIONS,
+  AGENT_VOICE_MODEL_OPTIONS,
+  type AgentModelOption,
+} from './agentModelConfig';
 import { getAgentModelConfig as getStoredAgentModelConfig } from '../../../server/agentModelStore';
 
 export type PostagentChannel = 'web' | 'voice' | 'sms' | 'test';
@@ -344,7 +350,21 @@ function normalizeProviderModelLabel(rawModel: string): string {
 
 function getModelOptionByValue(model: string): AgentModelOption | undefined {
   const normalized = model.toLowerCase();
-  return AGENT_MODEL_OPTIONS.find((option) => option.value.toLowerCase() === normalized);
+  const allOptions = [...AGENT_MODEL_OPTIONS, ...AGENT_VOICE_MODEL_OPTIONS];
+  return allOptions.find((option) => option.value.toLowerCase() === normalized);
+}
+
+function getModelProviderHint(model: string): 'openrouter' | 'openai' {
+  const option = getModelOptionByValue(model);
+  if (option?.provider === 'openai' || option?.provider === 'openrouter') {
+    return option.provider;
+  }
+
+  if (model.startsWith('gpt-') || model.toLowerCase().startsWith('openai/')) {
+    return 'openai';
+  }
+
+  return 'openrouter';
 }
 
 function openAIFallbackModel(model: string): string {
@@ -382,19 +402,22 @@ function createProviderHeaders(apiKey: string, provider: 'openrouter' | 'openai'
   return headers;
 }
 
-async function resolveModelProviderConfig(): Promise<AgentProviderConfig> {
+async function resolveModelProviderConfig(channel?: PostagentChannel): Promise<AgentProviderConfig> {
+  const stored = await getStoredAgentModelConfig();
+  const isVoiceChannel = channel === 'voice' || channel === 'test';
   const envModel =
     normalizeProviderModelLabel(
-      process.env.AGENT_MODEL_OVERRIDE?.trim() ||
-        process.env.ESTIMATE_AGENT_MODEL?.trim() ||
-        (await getStoredAgentModelConfig()).model.trim()
-    ) || AGENT_DEFAULT_MODEL;
+      process.env[`AGENT_${isVoiceChannel ? 'VOICE_' : ''}MODEL_OVERRIDE`]?.trim() ||
+        process.env[`ESTIMATE_${isVoiceChannel ? 'VOICE_' : ''}MODEL`]?.trim() ||
+        (isVoiceChannel ? stored.voiceModel : stored.model).trim()
+    ) || (isVoiceChannel ? AGENT_DEFAULT_VOICE_MODEL : AGENT_DEFAULT_MODEL);
 
+  const requestedModel = normalizeProviderModelLabel(envModel);
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
   if (openRouterKey) {
     return {
-      provider: 'openrouter',
-      model: envModel,
+      provider: getModelProviderHint(requestedModel),
+      model: requestedModel,
       apiKey: openRouterKey,
       responsesUrl: OPENROUTER_RESPONSES_URL,
       headers: createProviderHeaders(openRouterKey, 'openrouter'),
@@ -410,7 +433,7 @@ async function resolveModelProviderConfig(): Promise<AgentProviderConfig> {
 
   return {
     provider: 'openai',
-    model: openAIFallbackModel(envModel),
+    model: openAIFallbackModel(requestedModel),
     apiKey: openAiKey,
     responsesUrl: OPENAI_RESPONSES_URL,
     headers: createProviderHeaders(openAiKey, 'openai'),
@@ -434,7 +457,8 @@ function normalizeAssistantMessage(text: string): string {
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
-    .replace(/(\d{3,4})to(\d{3,4})/gi, '$1 to $2')
+    .replace(/(\d+)\s*to\s*(\d+)/gi, '$1 to $2')
+    .replace(/(\d+)to(\d+)/g, '$1 to $2')
     .replace(/\bunder(\d{3,5})/gi, 'under $1')
     .replace(/\bover(\d{3,5})/gi, 'over $1')
     .replace(/\*/g, '')
@@ -1026,7 +1050,7 @@ async function runAgentLoop(
 export async function decideNextAssistantTurn(
   request: { session_id: string; input_text: string; channel?: PostagentChannel }
 ): Promise<PostagentEstimateResponse> {
-  const modelConfig = await resolveModelProviderConfig();
+  const modelConfig = await resolveModelProviderConfig(request.channel);
 
   const runtime = await getRuntime();
   const sessionId = request.session_id.trim();
@@ -1065,7 +1089,7 @@ export async function decideNextAssistantTurn(
 export async function runEstimateAgentCore(
   request: PostagentEstimateRequest
 ): Promise<PostagentEstimateResponse> {
-  const modelConfig = await resolveModelProviderConfig();
+  const modelConfig = await resolveModelProviderConfig(request.channel);
 
   const runtime = await getRuntime();
   const sessionId = request.session_id?.trim() || newSessionId();

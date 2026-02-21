@@ -11,22 +11,9 @@ type ApiResponse = {
   json: (body: unknown) => void;
 };
 
-function getBearerToken(req: ApiRequest): string | null {
-  const raw = req.headers?.authorization ?? req.headers?.Authorization ?? '';
-  const header = typeof raw === 'string' ? raw : '';
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  return match?.[1]?.trim() ?? null;
-}
-
 export default async function handler(req: ApiRequest, res: ApiResponse): Promise<void> {
   if (req.method !== 'POST') {
     res.status(405).json({ message: 'Method not allowed' });
-    return;
-  }
-
-  const expectedToken = process.env.ADMIN_TRAINING_TOKEN || process.env.ADMIN_PRICING_TOKEN;
-  if (!expectedToken) {
-    res.status(500).json({ message: 'ADMIN_TRAINING_TOKEN is not configured on the server.' });
     return;
   }
 
@@ -41,16 +28,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
 
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     res.status(400).json({ message: 'Expected an object body.' });
-    return;
-  }
-
-  const rawToken = getBearerToken(req);
-  const provided =
-    rawToken ??
-    (typeof req.headers?.['x-admin-training-token'] === 'string' ? req.headers?.['x-admin-training-token'].trim() : null);
-
-  if (provided !== expectedToken) {
-    res.status(401).json({ message: 'Unauthorized' });
     return;
   }
 

@@ -68,6 +68,7 @@ const numberWordAliases: Record<string, string> = {
   o: 'one',
   e: 'one',
   oh: 'one',
+  touchdown: 'two',
 };
 
 const numberWordFillers = new Set(['a', 'an', 'the', 'about', 'around', 'approximately', 'approx', 'roughly', 'rough', 'exactly', 'maybe']);

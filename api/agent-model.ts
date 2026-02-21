@@ -1,10 +1,19 @@
-import { getAgentModelConfig, getAgentModelOptions, setAgentModelConfig } from '../server/agentModelStore';
-import { AGENT_DEFAULT_MODEL, AGENT_DEFAULT_MODEL_LABEL } from '../src/estimate/core/agentModelConfig';
+import {
+  getAgentModelConfig,
+  getAgentModelOptions,
+  getAgentVoiceModelOptions,
+  setAgentModelConfig,
+} from '../server/agentModelStore';
+import {
+  AGENT_DEFAULT_MODEL,
+  AGENT_DEFAULT_MODEL_LABEL,
+  AGENT_DEFAULT_VOICE_MODEL,
+  AGENT_VOICE_MODEL_OPTIONS,
+} from '../src/estimate/core/agentModelConfig';
 
 type ApiRequest = {
   method?: string;
   body?: unknown;
-  headers?: Record<string, string | string[] | undefined>;
 };
 
 type ApiResponse = {
@@ -12,26 +21,30 @@ type ApiResponse = {
   json: (body: unknown) => void;
 };
 
-function getBearerToken(req: ApiRequest): string | null {
-  const raw = req.headers?.authorization ?? req.headers?.Authorization ?? '';
-  const header = typeof raw === 'string' ? raw : '';
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  return match?.[1]?.trim() ?? null;
-}
-
-function getToken(req: ApiRequest): string | null {
-  return (
-    getBearerToken(req) ??
-    (typeof req.headers?.['x-admin-training-token'] === 'string' ? req.headers?.['x-admin-training-token'].trim() : null)
-  );
-}
-
 function buildConfigPayload() {
   return {
     available_models: getAgentModelOptions(),
+    available_voice_models: AGENT_VOICE_MODEL_OPTIONS.length > 0 ? AGENT_VOICE_MODEL_OPTIONS : getAgentVoiceModelOptions(),
     default_model: AGENT_DEFAULT_MODEL,
     default_model_label: AGENT_DEFAULT_MODEL_LABEL,
+    default_voice_model: AGENT_DEFAULT_VOICE_MODEL,
   };
+}
+
+function normalizeModelPayload(raw: unknown): string | null {
+  const value = typeof raw === 'string' ? raw.trim() : '';
+  if (!value) return null;
+
+  const isAllowed = getAgentModelOptions().some((option) => option.value === value);
+  return isAllowed ? value : null;
+}
+
+function normalizeVoiceModelPayload(raw: unknown): string | null {
+  const value = typeof raw === 'string' ? raw.trim() : '';
+  if (!value) return null;
+
+  const isAllowed = getAgentVoiceModelOptions().some((option) => option.value === value);
+  return isAllowed ? value : null;
 }
 
 export default async function handler(req: ApiRequest, res: ApiResponse): Promise<void> {
@@ -40,7 +53,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     res.status(200).json({
       ...config,
       ...buildConfigPayload(),
-      message: `Loaded model "${config.model}" from ${config.source === 'db' ? 'database' : 'fallback'}.`,
+      message: `Loaded model "${config.model}" and voice model "${config.voiceModel}" from ${config.source === 'db' ? 'database' : 'fallback'}.`,
     });
     return;
   }
@@ -50,57 +63,43 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
-  const expectedToken = process.env.ADMIN_TRAINING_TOKEN || process.env.ADMIN_PRICING_TOKEN;
-  if (!expectedToken) {
-    res.status(500).json({ message: 'ADMIN_TRAINING_TOKEN is not configured on the server.' });
-    return;
-  }
-
-  const provided = getToken(req);
-  if (provided !== expectedToken) {
-    res.status(401).json({ message: 'Unauthorized' });
-    return;
-  }
-
-  const body = typeof req.body === 'string'
-    ? (() => {
-        try {
-          return JSON.parse(req.body);
-        } catch {
-          return null;
-        }
-      })()
-    : req.body;
+  const body =
+    typeof req.body === 'string'
+      ? (() => {
+          try {
+            return JSON.parse(req.body);
+          } catch {
+            return null;
+          }
+        })()
+      : req.body;
 
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     res.status(400).json({ message: 'Invalid request body.' });
     return;
   }
 
-  const model = normalizeModelPayload(body?.model);
-  if (!model) {
-    res.status(400).json({ message: 'Missing model value.' });
+  const textModel = normalizeModelPayload((body as { model?: unknown }).model);
+  const voiceModel = normalizeVoiceModelPayload((body as { voice_model?: unknown }).voice_model);
+
+  if (!textModel && !voiceModel) {
+    res.status(400).json({ message: 'Missing model and/or voice_model value.' });
     return;
   }
 
+  const payload = {
+    model: textModel ?? undefined,
+    voice_model: voiceModel ?? undefined,
+  };
+
   try {
-    const saved = await setAgentModelConfig(model);
+    const saved = await setAgentModelConfig(payload);
     res.status(200).json({
       ...saved,
       ...buildConfigPayload(),
-      message: 'Model updated.',
+      message: 'Model settings updated.',
     });
   } catch (error) {
-    res.status(400).json({ message: error instanceof Error ? error.message : 'Unable to save model.' });
+    res.status(400).json({ message: error instanceof Error ? error.message : 'Unable to save model settings.' });
   }
-}
-
-function normalizeModelPayload(raw: unknown): string | null {
-  const value = typeof raw === 'string' ? raw.trim() : '';
-  if (!value) {
-    return null;
-  }
-
-  const allowed = getAgentModelOptions().some((option) => option.value === value);
-  return allowed ? value : null;
 }
