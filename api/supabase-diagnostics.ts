@@ -58,6 +58,9 @@ function isMissingTableError(message: string): boolean {
   return (
     text.includes('relation') &&
     (text.includes('does not exist') || text.includes('was not found'))
+  ) || (
+    text.includes('could not find the table') &&
+    text.includes('schema cache')
   );
 }
 
