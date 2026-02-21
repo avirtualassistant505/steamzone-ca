@@ -841,13 +841,60 @@ async function callOpenAI(
     body: JSON.stringify(payload),
   });
 
-  const data = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  const rawBody = await response.text();
+  let data: Record<string, unknown> | null = null;
+  try {
+    if (rawBody) {
+      data = JSON.parse(rawBody) as Record<string, unknown>;
+    }
+  } catch {
+    data = null;
+  }
+
   if (!response.ok) {
-    const detail = data ? JSON.stringify(data) : `${response.status} ${response.statusText}`;
+    const detail =
+      data !== null ? JSON.stringify(data) : rawBody ? rawBody.slice(0, 600) : `${response.status} ${response.statusText}`;
     throw new Error(`Estimate agent model request failed: ${detail}`);
   }
 
+  if (!data) {
+    throw new Error('Estimate agent model request returned an empty response.');
+  }
+
   return data as unknown as OpenAIResponse;
+}
+
+async function callOpenAIWithFallback(
+  modelConfig: AgentProviderConfig,
+  payload: Record<string, unknown>
+): Promise<OpenAIResponse> {
+  try {
+    return await callOpenAI(modelConfig, payload);
+  } catch (error) {
+    if (
+      modelConfig.provider !== 'openrouter' ||
+      !process.env.OPENAI_API_KEY?.trim()
+    ) {
+      throw error;
+    }
+
+    const fallbackConfig: AgentProviderConfig = {
+      provider: 'openai',
+      model: openAIFallbackModel(modelConfig.model),
+      apiKey: process.env.OPENAI_API_KEY.trim(),
+      responsesUrl: OPENAI_RESPONSES_URL,
+      headers: createProviderHeaders(process.env.OPENAI_API_KEY.trim(), 'openai'),
+    };
+
+    try {
+      return await callOpenAI(fallbackConfig, payload);
+    } catch (fallbackError) {
+      const baseMessage = error instanceof Error ? error.message : 'Model API request failed.';
+      const fallbackMessage =
+        fallbackError instanceof Error ? fallbackError.message : 'Fallback model request failed.';
+      throw new Error(`${baseMessage} | fallback to OpenAI failed: ${fallbackMessage}`);
+    }
+  }
 }
 
 function transcriptLine(inputText: string, channel?: PostagentChannel, metadata?: Record<string, unknown>): string {
@@ -973,7 +1020,7 @@ async function runAgentLoop(
     sessionContext.transcript?.some((entry) => asRecord(entry)?.role === 'assistant')
   );
 
-  let response = await callOpenAI(modelConfig, {
+  let response = await callOpenAIWithFallback(modelConfig, {
     model: modelConfig.model,
     instructions: instructionsForContext(channel, sessionContext, inputText, faqMatches),
     input: [
@@ -1009,14 +1056,14 @@ async function runAgentLoop(
 
     sessionContext = await runtime.toolGetState(sessionId);
 
-      response = await callOpenAI(modelConfig, {
+      response = await callOpenAIWithFallback(modelConfig, {
         model: modelConfig.model,
-      instructions: instructionsForContext(channel, sessionContext, inputText, faqMatches),
-      previous_response_id: response.id,
-      input: outputs,
-      tools: TOOL_DEFS,
-      tool_choice: 'auto',
-    });
+        instructions: instructionsForContext(channel, sessionContext, inputText, faqMatches),
+        previous_response_id: response.id,
+        input: outputs,
+        tools: TOOL_DEFS,
+        tool_choice: 'auto',
+      });
 
     const textOut = readAssistantText(response);
     if (textOut) {

@@ -30,12 +30,17 @@ export async function parseJsonResponse<T>(response: Response): Promise<SafeJson
   } catch {
     const trimmed = rawText.trim().slice(0, 120);
     const isHtml = /^<!doctype html/i.test(trimmed) || /^<html/i.test(trimmed);
+    const isDeploymentTextError =
+      /^a server error has occurred/i.test(trimmed) ||
+      /^authentication required/i.test(trimmed) ||
+      /^unauthorized/i.test(trimmed);
+
     return {
       ok: false,
       status: response.status,
       payload: null,
       rawText,
-      textError: isHtml
+      textError: isHtml || isDeploymentTextError
         ? 'Server returned HTML instead of JSON. This usually indicates a deployment/auth issue.'
         : 'Server response is not valid JSON.',
     };

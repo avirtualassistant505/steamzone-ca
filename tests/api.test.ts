@@ -98,22 +98,25 @@ describe('API routes', () => {
   it('POST /api/estimate-agent/chat returns assistant message on basic happy path', async () => {
     process.env.OPENAI_API_KEY = 'test-key';
 
+    const modelPayload = {
+      id: 'resp_1',
+      output: [
+        {
+          type: 'message',
+          content: [{ type: 'output_text', text: 'Sure, what service do you need an estimate for?' }],
+        },
+      ],
+      output_text: 'Sure, what service do you need an estimate for?',
+    };
+
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => ({
         ok: true,
         status: 200,
         statusText: 'OK',
-        json: async () => ({
-          id: 'resp_1',
-          output: [
-            {
-              type: 'message',
-              content: [{ type: 'output_text', text: 'Sure, what service do you need an estimate for?' }],
-            },
-          ],
-          output_text: 'Sure, what service do you need an estimate for?',
-        }),
+        text: async () => JSON.stringify(modelPayload),
+        json: async () => modelPayload,
       }))
     );
 

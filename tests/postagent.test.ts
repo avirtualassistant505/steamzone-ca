@@ -29,22 +29,25 @@ function makeRes(): MockRes {
 }
 
 function mockOpenAIMessage(message = 'Got it.') {
+  const payload = {
+    id: 'resp-postagent-1',
+    output: [
+      {
+        type: 'message',
+        content: [{ type: 'output_text', text: message }],
+      },
+    ],
+    output_text: message,
+  };
+
   vi.stubGlobal(
     'fetch',
     vi.fn(async () => ({
       ok: true,
       status: 200,
       statusText: 'OK',
-      json: async () => ({
-        id: 'resp-postagent-1',
-        output: [
-          {
-            type: 'message',
-            content: [{ type: 'output_text', text: message }],
-          },
-        ],
-        output_text: message,
-      }),
+      text: async () => JSON.stringify(payload),
+      json: async () => payload,
     }))
   );
 }
