@@ -172,6 +172,7 @@ function extractFunctionCall(event: Record<string, unknown>): { callId: string; 
 export default function EstimateVoiceLabPage() {
   const [status, setStatus] = useState<RealtimeStatus>('idle');
   const [errorMessage, setErrorMessage] = useState('');
+  const [connectionStage, setConnectionStage] = useState('Idle');
   const [isListening, setIsListening] = useState(false);
   const [sessionId, setSessionId] = useState<string>(() => readVoiceSessionId());
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
@@ -377,6 +378,7 @@ export default function EstimateVoiceLabPage() {
 
     setErrorMessage('');
     setStatus('connecting');
+    setConnectionStage('Requesting microphone access');
     setTranscript([]);
     setTurnCount(0);
 
@@ -388,8 +390,11 @@ export default function EstimateVoiceLabPage() {
     try {
       const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       localStreamRef.current = localStream;
+      setConnectionStage('Microphone ready');
 
-      const peer = new RTCPeerConnection();
+      const peer = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      });
       peerRef.current = peer;
 
       peer.oniceconnectionstatechange = () => {
@@ -430,6 +435,7 @@ export default function EstimateVoiceLabPage() {
 
       dataChannel.onopen = () => {
         setStatus('connected');
+        setConnectionStage('Data channel open');
         appendTranscript('system', 'Voice call connected.');
         sendRealtimeEvent({
           type: 'response.create',
@@ -440,6 +446,7 @@ export default function EstimateVoiceLabPage() {
       };
 
       dataChannel.onclose = () => {
+        setConnectionStage('Data channel closed');
         if (status !== 'error') {
           setStatus('idle');
         }
@@ -447,6 +454,7 @@ export default function EstimateVoiceLabPage() {
       };
 
       dataChannel.onerror = () => {
+        setConnectionStage('Data channel error');
         setStatus('error');
         setErrorMessage('Realtime data channel error.');
       };
@@ -506,7 +514,9 @@ export default function EstimateVoiceLabPage() {
         offerToReceiveAudio: true,
       });
       await peer.setLocalDescription(offer);
+      setConnectionStage('Gathering ICE candidates');
       await waitForIceGatheringComplete(peer);
+      setConnectionStage('Sending offer to voice endpoint');
 
       const sdpBody = peer.localDescription?.sdp ?? offer.sdp ?? '';
       if (!sdpBody) {
@@ -528,13 +538,26 @@ export default function EstimateVoiceLabPage() {
       }
 
       const answerSdp = await answerResponse.text();
+      setConnectionStage('Applying remote answer');
       await peer.setRemoteDescription({
         type: 'answer',
         sdp: answerSdp,
       });
+
+      // If WebRTC never opens the data channel, fail explicitly instead of silently idling.
+      window.setTimeout(() => {
+        const channel = dataChannelRef.current;
+        if (!channel || channel.readyState !== 'open') {
+          setStatus('error');
+          setConnectionStage('Timed out waiting for realtime channel');
+          setErrorMessage('Voice connection timed out before channel opened. Please retry.');
+          stopCall({ preserveStatus: true });
+        }
+      }, 12000);
     } catch (error) {
       stopCall({ preserveStatus: true });
       setStatus('error');
+      setConnectionStage('Connection failed');
       setErrorMessage(error instanceof Error ? error.message : 'Failed to start voice call.');
     }
   }
@@ -548,6 +571,7 @@ export default function EstimateVoiceLabPage() {
     setTranscript([]);
     setTurnCount(0);
     setErrorMessage('');
+    setConnectionStage('Idle');
     setStatus('idle');
   }
 
@@ -639,6 +663,7 @@ export default function EstimateVoiceLabPage() {
             <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
               <h2 className="text-base font-semibold text-gray-900">Voice Status</h2>
               <p className="mt-2 text-sm text-gray-700">{connectionLabel}</p>
+              <p className="mt-1 text-xs text-gray-500">Stage: {connectionStage}</p>
               <p className="mt-1 inline-flex items-center text-xs text-gray-600">
                 <Mic className="mr-1 h-3.5 w-3.5" />
                 {isListening ? 'Caller speech detected' : 'Waiting for speech'}
