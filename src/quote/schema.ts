@@ -1,4 +1,4 @@
-import estimateFormSchemaJson from './estimateFormSchema.json';
+import estimateFormSchemaJson from './estimateFormSchema.json' with { type: 'json' };
 
 export type ServiceType = 'window' | 'commercialWindow' | 'carpet' | 'postConstruction';
 
