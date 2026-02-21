@@ -937,6 +937,20 @@ function transcriptLine(inputText: string, channel?: PostagentChannel, metadata?
   return `${prefix}${inputText} ${JSON.stringify(metadata)}`;
 }
 
+async function appendDurableConversationTurn(
+  sessionId: string,
+  role: TranscriptRole,
+  content: string,
+  at: string
+): Promise<void> {
+  try {
+    const logs = await import('../../../server/conversationLogStore.js');
+    await logs.appendConversationTurn(sessionId, { role, content, at });
+  } catch {
+    // Keep primary chat flow working even if log persistence is unavailable.
+  }
+}
+
 async function callTool(
   runtime: EstimateAgentRuntimeModule,
   name: string,
@@ -1180,11 +1194,14 @@ export async function runEstimateAgentCore(
   const inputText = String(request.input_text || '').trim() || DEFAULT_USER_START;
   const channel = request.channel;
 
+  const userTranscriptAt = nowIso();
+  const userTranscript = transcriptLine(inputText, channel, request.metadata);
   await runtime.appendTranscript(sessionId, {
     role: 'user',
-    content: transcriptLine(inputText, channel, request.metadata),
-    at: nowIso(),
+    content: userTranscript,
+    at: userTranscriptAt,
   });
+  await appendDurableConversationTurn(sessionId, 'user', userTranscript, userTranscriptAt);
 
   const schema = await runtime.toolGetSchema();
   const state = await runtime.toolGetState(sessionId);
@@ -1207,11 +1224,13 @@ export async function runEstimateAgentCore(
     done,
   };
 
+  const assistantTranscriptAt = nowIso();
   await runtime.appendTranscript(sessionId, {
     role: 'assistant',
     content: loopResult.assistant_message,
-    at: nowIso(),
+    at: assistantTranscriptAt,
   });
+  await appendDurableConversationTurn(sessionId, 'assistant', loopResult.assistant_message, assistantTranscriptAt);
 
   const response: PostagentEstimateResponse = {
     session_id: sessionId,

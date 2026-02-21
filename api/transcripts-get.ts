@@ -1,5 +1,4 @@
-import { getSession, listSessions } from '../server/estimateAgentSessionStore.js';
-import { getSupabaseAdminClient } from '../server/supabaseAdmin.js';
+import { listConversationSessions, loadConversationSession } from '../server/conversationLogStore.js';
 
 type ApiRequest = {
   method?: string;
@@ -99,17 +98,15 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   }
 
   try {
-    const supabase = await getSupabaseAdminClient();
-    const storage_mode = supabase ? 'database' : 'memory_fallback';
     const sessionId = asText(req.query?.session_id);
     const limitRaw = Number(asText(req.query?.limit) || '100');
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.round(limitRaw))) : 100;
 
     if (sessionId) {
-      const session = await getSession(sessionId);
+      const session = await loadConversationSession(sessionId);
       const turns = toConversationTurns(session.transcript);
       res.status(200).json({
-        storage_mode,
+        storage_mode: 'database',
         session: {
           session_id: session.session_id,
           created_at: session.created_at,
@@ -123,7 +120,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       return;
     }
 
-    const sessions = await listSessions(limit);
+    const sessions = await listConversationSessions(limit);
     const summaries = sessions
       .filter((session) => session.session_id)
       .map((session) =>
@@ -136,7 +133,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
         })
       );
 
-    res.status(200).json({ sessions: summaries, storage_mode });
+    res.status(200).json({ sessions: summaries, storage_mode: 'database' });
   } catch (error) {
     res.status(500).json({
       message: error instanceof Error ? error.message : 'Unable to load conversation transcripts.',

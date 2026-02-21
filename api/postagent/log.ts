@@ -82,14 +82,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   const line = withChannelAndMetadata(content, channel, payload.metadata);
 
   try {
-    const { getSupabaseAdminClient } = await import('../../server/supabaseAdmin.js');
-    const { appendTranscript } = await import('../../server/estimateAgentSessionStore.js');
-    const storage_mode = (await getSupabaseAdminClient()) ? 'database' : 'memory_fallback';
-    await appendTranscript(sessionId, { role, content: line, at: new Date().toISOString() });
+    const { appendConversationTurn } = await import('../../server/conversationLogStore.js');
+    await appendConversationTurn(sessionId, { role, content: line, at: new Date().toISOString() });
 
     res.status(200).json({
       ok: true,
-      storage_mode,
+      storage_mode: 'database',
     });
   } catch (error) {
     res.status(500).json({
