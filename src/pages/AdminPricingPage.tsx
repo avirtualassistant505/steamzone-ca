@@ -92,6 +92,7 @@ type ConversationDetail = {
 type TranscriptGetPayload = {
   sessions?: ConversationSummary[];
   session?: ConversationDetail;
+  storage_mode?: 'database' | 'memory_fallback';
   message?: string;
 };
 
@@ -149,7 +150,7 @@ function ToggleField({
 }
 
 export default function AdminPricingPage({ pricingConfig, onPricingConfigChange, pricingStatus }: AdminPricingPageProps) {
-  const [activeTab, setActiveTab] = useState<'pricing' | 'training'>('pricing');
+  const [activeTab, setActiveTab] = useState<'pricing' | 'training' | 'logs'>('pricing');
   const [draftConfig, setDraftConfig] = useState<PricingConfig>(pricingConfig);
   const [saveMessage, setSaveMessage] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -174,6 +175,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [conversationLoading, setConversationLoading] = useState(false);
   const [conversationError, setConversationError] = useState('');
   const [conversationLoaded, setConversationLoaded] = useState(false);
+  const [conversationStorageMode, setConversationStorageMode] = useState<'database' | 'memory_fallback' | ''>('');
   const [selectedConversationId, setSelectedConversationId] = useState('');
   const [selectedConversation, setSelectedConversation] = useState<ConversationDetail | null>(null);
   const [conversationDetailLoading, setConversationDetailLoading] = useState(false);
@@ -189,7 +191,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
   useEffect(() => {
     const tab = localStorage.getItem(STORAGE_KEY);
-    if (tab === 'training' || tab === 'pricing') {
+    if (tab === 'training' || tab === 'pricing' || tab === 'logs') {
       setActiveTab(tab);
     }
   }, []);
@@ -315,6 +317,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
       const summaries = Array.isArray(payload.sessions) ? payload.sessions : [];
       setConversationSummaries(summaries);
+      setConversationStorageMode(payload.storage_mode ?? '');
       setConversationLoaded(true);
 
       if (summaries.length > 0 && !selectedConversationId) {
@@ -356,14 +359,14 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     }
   }
 
-  function setTab(nextTab: 'pricing' | 'training'): void {
+  function setTab(nextTab: 'pricing' | 'training' | 'logs'): void {
     setActiveTab(nextTab);
     localStorage.setItem(STORAGE_KEY, nextTab);
 
     if (nextTab === 'training' && !trainingLoaded && !trainingLoading) {
       void loadTrainingData();
     }
-    if (nextTab === 'training' && !conversationLoaded && !conversationLoading) {
+    if (nextTab === 'logs' && !conversationLoaded && !conversationLoading) {
       void loadConversationData();
     }
   }
@@ -525,7 +528,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     if (activeTab === 'training' && !trainingLoaded && !trainingLoading) {
       void loadTrainingData();
     }
-    if (activeTab === 'training' && !conversationLoaded && !conversationLoading) {
+    if (activeTab === 'logs' && !conversationLoaded && !conversationLoading) {
       void loadConversationData();
     }
   }, [activeTab]);
@@ -589,7 +592,9 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
             <p className="mt-3 max-w-3xl text-gray-600">
               {activeTab === 'pricing'
                 ? 'Full pricing control for Steinbach routes: travel zones, per-service base rates, multipliers, add-ons, red flags, and estimate range behavior.'
-                : 'Update shared training questions/answers used by both web and voice agents.'}
+                : activeTab === 'training'
+                  ? 'Update shared training questions/answers used by both web and voice agents.'
+                  : 'Browse saved conversation sessions and full voice/text transcripts.'}
             </p>
             <p className="mt-2 text-sm text-gray-500">Last updated: {new Date(draftConfig.updatedAt).toLocaleString()}</p>
           </div>
@@ -676,6 +681,15 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
             }`}
           >
             Training Data
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('logs')}
+            className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
+              activeTab === 'logs' ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            Conversation Logs
           </button>
         </div>
 
@@ -1524,8 +1538,10 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
           </>
         )}
 
-        {activeTab === 'training' && (
+        {(activeTab === 'training' || activeTab === 'logs') && (
           <>
+            {activeTab === 'training' && (
+              <>
             {trainingMessage && <p className="mt-6 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{trainingMessage}</p>}
             {trainingError && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{trainingError}</p>}
 
@@ -1704,7 +1720,10 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                 )}
               </div>
             </section>
+              </>
+            )}
 
+            {activeTab === 'logs' && (
             <section className={`${cardClass} mt-6`}>
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -1726,6 +1745,12 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
               {conversationError && (
                 <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{conversationError}</p>
+              )}
+              {conversationStorageMode === 'memory_fallback' && (
+                <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  Logs are currently using memory fallback, not database persistence. Configure `SUPABASE_URL` and
+                  `SUPABASE_SERVICE_ROLE_KEY` in Vercel to keep logs across deployments/invocations.
+                </p>
               )}
 
               <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
@@ -1805,6 +1830,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                 </div>
               </div>
             </section>
+            )}
           </>
         )}
       </div>

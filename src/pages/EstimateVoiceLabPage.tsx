@@ -302,9 +302,16 @@ export default function EstimateVoiceLabPage() {
         return;
       }
 
+      void persistConversationTurn('user', userText, {
+        source: 'tool_call_arguments',
+      });
+
       const turn = await runPostagentTurn(userText);
       const assistantText = asString(turn.assistant_message).trim();
       if (assistantText) {
+        void persistConversationTurn('assistant', assistantText, {
+          source: 'postagent_turn',
+        });
         appendTranscript('assistant', assistantText);
         setTurnCount((prev) => prev + 1);
       }
