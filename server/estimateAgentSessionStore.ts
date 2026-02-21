@@ -120,6 +120,60 @@ export async function getSession(sessionId: string): Promise<EstimateSessionReco
   }
 }
 
+export async function listSessions(limit = 100): Promise<EstimateSessionRecord[]> {
+  const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.round(limit))) : 100;
+  const supabase = await getSupabaseAdminClient();
+  if (!supabase) {
+    return Array.from(memoryStore.values())
+      .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
+      .slice(0, normalizedLimit)
+      .map((session) => cloneSession(session));
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('estimate_sessions')
+      .select('session_id, answers, asked_keys, transcript, last_question_key, created_at, updated_at')
+      .order('updated_at', { ascending: false })
+      .limit(normalizedLimit);
+
+    if (error) {
+      if (isMissingTableError(error.message)) {
+        return Array.from(memoryStore.values())
+          .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
+          .slice(0, normalizedLimit)
+          .map((session) => cloneSession(session));
+      }
+      return Array.from(memoryStore.values())
+        .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
+        .slice(0, normalizedLimit)
+        .map((session) => cloneSession(session));
+    }
+
+    if (!Array.isArray(data)) {
+      return [];
+    }
+
+    return data.map((row) => {
+      const typed = row as Partial<EstimateSessionRecord>;
+      return {
+        session_id: typed.session_id ?? '',
+        answers: (typed.answers ?? {}) as Record<string, unknown>,
+        asked_keys: (typed.asked_keys ?? []) as string[],
+        transcript: (typed.transcript ?? []) as TranscriptEntry[],
+        last_question_key: (typed.last_question_key ?? null) as string | null,
+        created_at: (typed.created_at as string) ?? nowIso(),
+        updated_at: (typed.updated_at as string) ?? nowIso(),
+      } satisfies EstimateSessionRecord;
+    });
+  } catch {
+    return Array.from(memoryStore.values())
+      .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
+      .slice(0, normalizedLimit)
+      .map((session) => cloneSession(session));
+  }
+}
+
 export async function saveSession(session: EstimateSessionRecord): Promise<EstimateSessionRecord> {
   const normalized = {
     ...cloneSession(session),

@@ -62,6 +62,39 @@ type PricingSavePayload = {
   message?: string;
 };
 
+type ConversationSummary = {
+  session_id: string;
+  created_at: string;
+  updated_at: string;
+  turn_count: number;
+  channels: string[];
+  preview: string;
+  last_question_key: string | null;
+};
+
+type ConversationTurn = {
+  role: 'user' | 'assistant' | 'tool';
+  content: string;
+  at: string;
+  channel: string;
+};
+
+type ConversationDetail = {
+  session_id: string;
+  created_at: string;
+  updated_at: string;
+  answers: Record<string, unknown>;
+  asked_keys: string[];
+  last_question_key: string | null;
+  transcript: ConversationTurn[];
+};
+
+type TranscriptGetPayload = {
+  sessions?: ConversationSummary[];
+  session?: ConversationDetail;
+  message?: string;
+};
+
 function parsePayloadError<T>(result: SafeJsonResult<T>): string {
   return result.textError ?? `Unable to parse response (HTTP ${result.status}).`;
 }
@@ -137,6 +170,13 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [trainingError, setTrainingError] = useState('');
   const [trainingLoaded, setTrainingLoaded] = useState(false);
+  const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
+  const [conversationLoading, setConversationLoading] = useState(false);
+  const [conversationError, setConversationError] = useState('');
+  const [conversationLoaded, setConversationLoaded] = useState(false);
+  const [selectedConversationId, setSelectedConversationId] = useState('');
+  const [selectedConversation, setSelectedConversation] = useState<ConversationDetail | null>(null);
+  const [conversationDetailLoading, setConversationDetailLoading] = useState(false);
   const [newQuestion, setNewQuestion] = useState('');
   const [newAnswer, setNewAnswer] = useState('');
   const [newTopic, setNewTopic] = useState('');
@@ -260,12 +300,71 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     }
   }
 
+  async function loadConversationData(): Promise<void> {
+    setConversationLoading(true);
+    setConversationError('');
+
+    try {
+      const response = await parseJsonResponse<TranscriptGetPayload>(await fetch('/api/transcripts-get?limit=100'));
+      const payload = response.payload;
+
+      if (!response.ok || !payload) {
+        setConversationError(payload?.message ?? parsePayloadError(response));
+        return;
+      }
+
+      const summaries = Array.isArray(payload.sessions) ? payload.sessions : [];
+      setConversationSummaries(summaries);
+      setConversationLoaded(true);
+
+      if (summaries.length > 0 && !selectedConversationId) {
+        const first = summaries[0].session_id;
+        if (first) {
+          setSelectedConversationId(first);
+          void loadConversationDetail(first);
+        }
+      }
+    } catch {
+      setConversationError('Unable to load conversation logs. Ensure /api/transcripts-get is deployed.');
+    } finally {
+      setConversationLoading(false);
+    }
+  }
+
+  async function loadConversationDetail(sessionId: string): Promise<void> {
+    const normalized = sessionId.trim();
+    if (!normalized) return;
+
+    setConversationDetailLoading(true);
+    setConversationError('');
+    try {
+      const encoded = encodeURIComponent(normalized);
+      const response = await parseJsonResponse<TranscriptGetPayload>(await fetch(`/api/transcripts-get?session_id=${encoded}`));
+      const payload = response.payload;
+
+      if (!response.ok || !payload?.session) {
+        setConversationError(payload?.message ?? parsePayloadError(response));
+        return;
+      }
+
+      setSelectedConversation(payload.session);
+      setSelectedConversationId(normalized);
+    } catch {
+      setConversationError('Unable to load conversation detail.');
+    } finally {
+      setConversationDetailLoading(false);
+    }
+  }
+
   function setTab(nextTab: 'pricing' | 'training'): void {
     setActiveTab(nextTab);
     localStorage.setItem(STORAGE_KEY, nextTab);
 
     if (nextTab === 'training' && !trainingLoaded && !trainingLoading) {
       void loadTrainingData();
+    }
+    if (nextTab === 'training' && !conversationLoaded && !conversationLoading) {
+      void loadConversationData();
     }
   }
 
@@ -425,6 +524,9 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   useEffect(() => {
     if (activeTab === 'training' && !trainingLoaded && !trainingLoading) {
       void loadTrainingData();
+    }
+    if (activeTab === 'training' && !conversationLoaded && !conversationLoading) {
+      void loadConversationData();
     }
   }, [activeTab]);
 
@@ -1600,6 +1702,107 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                     ))}
                   </div>
                 )}
+              </div>
+            </section>
+
+            <section className={`${cardClass} mt-6`}>
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-bold text-gray-900">Conversation Logs</h2>
+                  <p className="mt-2 text-sm text-gray-600">
+                    Saved text and voice turns from the estimate agent session store.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => void loadConversationData()}
+                  disabled={conversationLoading}
+                  className="inline-flex items-center rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {conversationLoading ? 'Loading...' : 'Reload Logs'}
+                </button>
+              </div>
+
+              {conversationError && (
+                <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{conversationError}</p>
+              )}
+
+              <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
+                <div className="max-h-[600px] overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-2">
+                  {conversationSummaries.length === 0 && !conversationLoading && (
+                    <p className="px-2 py-3 text-sm text-gray-600">No saved conversation sessions found.</p>
+                  )}
+
+                  <div className="space-y-2">
+                    {conversationSummaries.map((item) => (
+                      <button
+                        key={item.session_id}
+                        type="button"
+                        onClick={() => void loadConversationDetail(item.session_id)}
+                        className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                          selectedConversationId === item.session_id
+                            ? 'border-blue-300 bg-blue-50'
+                            : 'border-gray-200 bg-white hover:bg-gray-100'
+                        }`}
+                      >
+                        <p className="truncate text-sm font-semibold text-gray-900">{item.session_id}</p>
+                        <p className="mt-1 text-xs text-gray-600">
+                          {item.turn_count} turns · {item.channels.join(', ') || 'unknown channel'}
+                        </p>
+                        <p className="mt-1 text-xs text-gray-500">
+                          Updated {new Date(item.updated_at).toLocaleString()}
+                        </p>
+                        {item.preview && <p className="mt-2 line-clamp-2 text-xs text-gray-700">{item.preview}</p>}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-gray-200 bg-white p-4">
+                  {!selectedConversation && !conversationDetailLoading && (
+                    <p className="text-sm text-gray-600">Select a session to view full transcript details.</p>
+                  )}
+
+                  {conversationDetailLoading && (
+                    <p className="text-sm text-gray-600">Loading conversation detail...</p>
+                  )}
+
+                  {selectedConversation && !conversationDetailLoading && (
+                    <>
+                      <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+                        <p><span className="font-semibold">Session:</span> {selectedConversation.session_id}</p>
+                        <p><span className="font-semibold">Created:</span> {new Date(selectedConversation.created_at).toLocaleString()}</p>
+                        <p><span className="font-semibold">Updated:</span> {new Date(selectedConversation.updated_at).toLocaleString()}</p>
+                        <p><span className="font-semibold">Last Question Key:</span> {selectedConversation.last_question_key || 'none'}</p>
+                      </div>
+
+                      <div className="max-h-[500px] space-y-2 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
+                        {selectedConversation.transcript.length === 0 && (
+                          <p className="text-sm text-gray-600">No transcript turns in this session.</p>
+                        )}
+
+                        {selectedConversation.transcript.map((turn, index) => (
+                          <div
+                            key={`${turn.at}-${index}`}
+                            className={`rounded-lg border px-3 py-2 text-sm ${
+                              turn.role === 'user'
+                                ? 'border-cyan-200 bg-cyan-50'
+                                : turn.role === 'assistant'
+                                  ? 'border-emerald-200 bg-emerald-50'
+                                  : 'border-amber-200 bg-amber-50'
+                            }`}
+                          >
+                            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-600">
+                              {turn.role} · {turn.channel} · {new Date(turn.at).toLocaleString()}
+                            </p>
+                            <p className="whitespace-pre-wrap text-gray-800">{turn.content}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </section>
           </>
