@@ -7,7 +7,7 @@ import {
   type SchemaOption,
   type ServiceType,
 } from '../../quote/schema';
-import { searchSteamZoneKnowledge, type KnowledgeMatch } from './steamzoneKnowledge';
+import { searchSteamZoneKnowledgeAsync, type KnowledgeMatch } from './steamzoneKnowledge';
 import * as estimateAgentRuntime from '../../../server/estimateAgentRuntime.mjs';
 
 export type PostagentChannel = 'web' | 'voice' | 'sms' | 'test';
@@ -744,9 +744,10 @@ async function callTool(
     const userQuestion = String(args.user_question ?? '').trim();
     const limitRaw = Number(args.limit ?? 3);
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(5, Math.round(limitRaw))) : 3;
+    const matches = await searchSteamZoneKnowledgeAsync(userQuestion, limit);
     return {
       query: userQuestion,
-      matches: searchSteamZoneKnowledge(userQuestion, limit),
+      matches,
     };
   }
 
@@ -834,7 +835,7 @@ async function runAgentLoop(
   channel?: PostagentChannel
 ): Promise<{ assistant_message: string; quote: unknown; next_hint: NextHint; done: boolean }> {
   let sessionContext = await runtime.toolGetState(sessionId);
-  const faqMatches = searchSteamZoneKnowledge(inputText, 3);
+  const faqMatches = await searchSteamZoneKnowledgeAsync(inputText, 3);
   const hadPriorAssistantTurn = Boolean(
     sessionContext.transcript?.some((entry) => asRecord(entry)?.role === 'assistant')
   );

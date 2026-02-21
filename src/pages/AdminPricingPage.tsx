@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Clock3, Database, Save } from 'lucide-react';
+import { Clock3, Database, Plus, Save, Trash2 } from 'lucide-react';
 import {
   createDefaultPricingConfig,
   formatBookingMode,
@@ -16,6 +16,16 @@ interface AdminPricingPageProps {
   onPricingConfigChange: (nextConfig: PricingConfig) => void;
   pricingStatus: 'loading' | 'ready' | 'error';
 }
+
+interface TrainingItem {
+  question: string;
+  answer: string;
+  topic?: string;
+  subtopic?: string;
+  status?: string;
+}
+
+const STORAGE_KEY = 'steamzone_training_admin_tab';
 
 const cardClass = 'rounded-2xl border border-gray-200 bg-white p-6 shadow-sm';
 
@@ -65,15 +75,222 @@ function ToggleField({
 }
 
 export default function AdminPricingPage({ pricingConfig, onPricingConfigChange, pricingStatus }: AdminPricingPageProps) {
+  const [activeTab, setActiveTab] = useState<'pricing' | 'training'>('pricing');
   const [draftConfig, setDraftConfig] = useState<PricingConfig>(pricingConfig);
   const [saveMessage, setSaveMessage] = useState('');
   const [saveToken, setSaveToken] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [records] = useState<EstimateRecord[]>([]);
+  const [trainingItems, setTrainingItems] = useState<TrainingItem[]>([]);
+  const [trainingSource, setTrainingSource] = useState('fallback');
+  const [trainingUpdatedAt, setTrainingUpdatedAt] = useState('');
+  const [trainingMessage, setTrainingMessage] = useState('');
+  const [trainingLoading, setTrainingLoading] = useState(false);
+  const [trainingError, setTrainingError] = useState('');
+  const [trainingLoaded, setTrainingLoaded] = useState(false);
+  const [newQuestion, setNewQuestion] = useState('');
+  const [newAnswer, setNewAnswer] = useState('');
+  const [newTopic, setNewTopic] = useState('');
+  const [newSubtopic, setNewSubtopic] = useState('');
+  const [newStatus, setNewStatus] = useState('READY');
 
   useEffect(() => {
     setDraftConfig(pricingConfig);
   }, [pricingConfig]);
+
+  useEffect(() => {
+    const tab = localStorage.getItem(STORAGE_KEY);
+    if (tab === 'training' || tab === 'pricing') {
+      setActiveTab(tab);
+    }
+  }, []);
+
+  async function loadTrainingData(): Promise<void> {
+    setTrainingLoading(true);
+    setTrainingError('');
+    setTrainingMessage('');
+
+    try {
+      const response = await fetch('/api/training-get');
+      const payload = (await response.json()) as {
+        items?: Array<unknown>;
+        source?: 'db' | 'fallback';
+        updatedAt?: string;
+        message?: string;
+      };
+
+      if (!response.ok) {
+        setTrainingError(payload.message ?? 'Unable to load training data.');
+        return;
+      }
+
+      const rawItems = Array.isArray(payload.items) ? payload.items : [];
+      const nextItems: TrainingItem[] = rawItems
+        .map((item) => {
+          if (!item || typeof item !== 'object') {
+            return null;
+          }
+
+          const typed = item as Record<string, unknown>;
+          const question = String(typed.question ?? '').trim();
+          const answer = String(typed.answer ?? '').trim();
+
+          if (!question || !answer) {
+            return null;
+          }
+
+          return {
+            question,
+            answer,
+            topic: typeof typed.topic === 'string' ? typed.topic.trim() : undefined,
+            subtopic: typeof typed.subtopic === 'string' ? typed.subtopic.trim() : undefined,
+            status: typeof typed.status === 'string' ? typed.status.trim() : 'READY',
+          } as TrainingItem;
+        })
+        .filter((item): item is TrainingItem => item !== null);
+
+      setTrainingItems(nextItems);
+      setTrainingSource(payload.source ?? 'fallback');
+      setTrainingUpdatedAt(payload.updatedAt ?? '');
+      setTrainingLoaded(true);
+      setTrainingMessage(`Loaded ${nextItems.length} FAQ entries from ${payload.source === 'db' ? 'database' : 'fallback'}.`);
+    } catch {
+      setTrainingError('Unable to load training data. Ensure /api/training-get is deployed.');
+    } finally {
+      setTrainingLoading(false);
+    }
+  }
+
+  function setTab(nextTab: 'pricing' | 'training'): void {
+    setActiveTab(nextTab);
+    localStorage.setItem(STORAGE_KEY, nextTab);
+
+    if (nextTab === 'training' && !trainingLoaded && !trainingLoading) {
+      void loadTrainingData();
+    }
+  }
+
+  function updateTrainingItem(index: number, patch: Partial<TrainingItem>): void {
+    setTrainingItems((previous) => {
+      const next = [...previous];
+      const existing = next[index];
+      if (!existing) {
+        return previous;
+      }
+
+      const normalizedQuestion = patch.question !== undefined ? String(patch.question).trimStart() : existing.question;
+      const normalizedAnswer = patch.answer !== undefined ? String(patch.answer).trimStart() : existing.answer;
+
+      next[index] = {
+        ...existing,
+        ...patch,
+        question: normalizedQuestion,
+        answer: normalizedAnswer,
+      };
+      return next;
+    });
+  }
+
+  function removeTrainingItem(index: number): void {
+    setTrainingItems((previous) => previous.filter((_, itemIndex) => itemIndex !== index));
+  }
+
+  function resetNewTrainingForm(): void {
+    setNewQuestion('');
+    setNewAnswer('');
+    setNewTopic('');
+    setNewSubtopic('');
+    setNewStatus('READY');
+  }
+
+  function addTrainingItem(): void {
+    const question = newQuestion.trim();
+    const answer = newAnswer.trim();
+
+    if (!question || !answer) {
+      setTrainingMessage('Question and answer are both required to add a new training entry.');
+      return;
+    }
+
+    setTrainingItems((previous) => [
+      ...previous,
+      {
+        question,
+        answer,
+        topic: newTopic.trim() || undefined,
+        subtopic: newSubtopic.trim() || undefined,
+        status: newStatus.trim() || 'READY',
+      },
+    ]);
+
+    resetNewTrainingForm();
+    setTrainingMessage('Training question added. Click Save Training Data to persist.');
+  }
+
+  async function saveTrainingData(): Promise<void> {
+    if (!saveToken.trim()) {
+      setTrainingMessage('Enter the admin token to save training data.');
+      return;
+    }
+
+    const sanitized = trainingItems
+      .map((item) => ({
+        question: item.question.trim(),
+        answer: item.answer.trim(),
+        topic: item.topic?.trim() || undefined,
+        subtopic: item.subtopic?.trim() || undefined,
+        status: item.status?.trim() || 'READY',
+      }))
+      .filter((item) => item.question && item.answer);
+
+    setTrainingItems(sanitized);
+    setTrainingLoading(true);
+    setTrainingError('');
+    setTrainingMessage('Saving training data...');
+
+    try {
+      const response = await fetch('/api/training-save', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${saveToken.trim()}`,
+          'x-admin-training-token': saveToken.trim(),
+        },
+        body: JSON.stringify({ items: sanitized }),
+      });
+
+      const payload = (await response.json()) as {
+        items?: Array<TrainingItem>;
+        source?: 'db' | 'fallback';
+        updatedAt?: string;
+        message?: string;
+      };
+
+      if (!response.ok) {
+        setTrainingError(payload.message ?? 'Unable to save training data.');
+        return;
+      }
+
+      if (Array.isArray(payload.items)) {
+        setTrainingItems(payload.items);
+      }
+
+      setTrainingSource(payload.source ?? 'db');
+      setTrainingUpdatedAt(payload.updatedAt ?? '');
+      setTrainingMessage(payload.message ?? 'Training data saved. Both web and voice agents now use this content.');
+      setTrainingLoaded(true);
+    } catch {
+      setTrainingError('Unable to reach training-save endpoint. Deploy serverless routes and set env variables in Vercel.');
+    } finally {
+      setTrainingLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === 'training' && !trainingLoaded && !trainingLoading) {
+      void loadTrainingData();
+    }
+  }, [activeTab]);
 
   const latestRecords = useMemo(() => records.slice(0, 15), [records]);
 
@@ -131,48 +348,28 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   return (
     <main className="bg-slate-50 pb-20 pt-28">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-        <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
+        <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
           <div>
             <h1 className="text-4xl font-bold text-gray-900">Estimate Admin</h1>
             <p className="mt-3 max-w-3xl text-gray-600">
-              Full pricing control for Steinbach routes: travel zones, per-service base rates, multipliers, add-ons,
-              red flags, and estimate range behavior.
+              {activeTab === 'pricing'
+                ? 'Full pricing control for Steinbach routes: travel zones, per-service base rates, multipliers, add-ons, red flags, and estimate range behavior.'
+                : 'Update shared training questions/answers used by both web and voice agents.'}
             </p>
             <p className="mt-2 text-sm text-gray-500">Last updated: {new Date(draftConfig.updatedAt).toLocaleString()}</p>
           </div>
-
-          <div className="flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={isSaving}
-              className="inline-flex items-center rounded-lg bg-blue-600 px-5 py-2.5 font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <Save className="mr-2 h-4 w-4" />
-              {isSaving ? 'Saving...' : 'Save Pricing Rules'}
-            </button>
-            <button
-              type="button"
-              onClick={handleReset}
-              className="rounded-lg border border-gray-300 px-5 py-2.5 font-semibold text-gray-700 transition hover:bg-gray-100"
-            >
-              Reset Defaults
-            </button>
-          </div>
         </div>
 
-        {saveMessage && <p className="mb-6 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">{saveMessage}</p>}
-
         <section className={cardClass}>
-          <h2 className="text-xl font-bold text-gray-900">Supabase Pricing Storage</h2>
+          <h2 className="text-xl font-bold text-gray-900">Admin Credentials</h2>
           <p className="mt-2 text-sm text-gray-600">
-            Pricing rules are loaded from <code className="rounded bg-slate-100 px-1 py-0.5">/api/pricing-get</code>. To publish changes, enter your admin
-            token and click Save.
+            The same token is used to edit both pricing and training data.
           </p>
-          <p className="mt-2 text-sm text-gray-500">Pricing load status: {pricingStatus}</p>
 
           <label className="mt-4 block max-w-xl">
-            <span className="mb-1 block text-sm font-medium text-gray-700">Admin token (server env: ADMIN_PRICING_TOKEN)</span>
+            <span className="mb-1 block text-sm font-medium text-gray-700">
+              Admin token (server env: ADMIN_TRAINING_TOKEN or ADMIN_PRICING_TOKEN)
+            </span>
             <input
               type="password"
               value={saveToken}
@@ -183,7 +380,59 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
           </label>
         </section>
 
-        <section className={`${cardClass} mt-6`}>
+        <div className="mt-6 flex flex-wrap gap-3">
+          <button
+            type="button"
+            onClick={() => setTab('pricing')}
+            className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
+              activeTab === 'pricing' ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            Pricing Configuration
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('training')}
+            className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
+              activeTab === 'training' ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            Training Data
+          </button>
+        </div>
+
+        {activeTab === 'pricing' && (
+          <>
+            {saveMessage && <p className="mt-6 mb-6 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">{saveMessage}</p>}
+            <section className={`${cardClass} mt-6`}>
+              <h2 className="text-xl font-bold text-gray-900">Supabase Pricing Storage</h2>
+              <p className="mt-2 text-sm text-gray-600">
+                Pricing rules are loaded from <code className="rounded bg-slate-100 px-1 py-0.5">/api/pricing-get</code>. To publish changes, enter your admin
+                token and click Save.
+              </p>
+              <p className="mt-2 text-sm text-gray-500">Pricing load status: {pricingStatus}</p>
+
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={isSaving}
+                  className="inline-flex items-center rounded-lg bg-blue-600 px-5 py-2.5 font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <Save className="mr-2 h-4 w-4" />
+                  {isSaving ? 'Saving...' : 'Save Pricing Rules'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleReset}
+                  className="rounded-lg border border-gray-300 px-5 py-2.5 font-semibold text-gray-700 transition hover:bg-gray-100"
+                >
+                  Reset Defaults
+                </button>
+              </div>
+            </section>
+
+            <section className={`${cardClass} mt-6`}>
           <h2 className="text-xl font-bold text-gray-900">Global Estimate Range + Travel Zones</h2>
 
           <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -995,6 +1244,191 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
             </p>
           </div>
         </section>
+          </>
+        )}
+
+        {activeTab === 'training' && (
+          <>
+            {trainingMessage && <p className="mt-6 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{trainingMessage}</p>}
+            {trainingError && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{trainingError}</p>}
+
+            <section className={cardClass}>
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-bold text-gray-900">Training Data</h2>
+                  <p className="mt-2 text-sm text-gray-600">
+                    Source: {trainingSource}. Updated: {trainingUpdatedAt || 'never'} · Loaded: {trainingItems.length} entries.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    onClick={() => void loadTrainingData()}
+                    disabled={trainingLoading}
+                    className="inline-flex items-center rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Reload Training Data
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void saveTrainingData()}
+                    disabled={trainingLoading}
+                    className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <Save className="mr-2 h-4 w-4" />
+                    {trainingLoading ? 'Saving...' : 'Save Training Data'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-gray-200 p-3">
+                <h3 className="font-semibold text-gray-900">Add new FAQ entry</h3>
+                <div className="mt-3 grid gap-3">
+                  <label className="block">
+                    <span className="mb-1 block text-sm font-medium text-gray-700">Question</span>
+                    <input
+                      type="text"
+                      value={newQuestion}
+                      onChange={(event) => setNewQuestion(event.target.value)}
+                      placeholder="What is your question?"
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="mb-1 block text-sm font-medium text-gray-700">Answer</span>
+                    <textarea
+                      value={newAnswer}
+                      onChange={(event) => setNewAnswer(event.target.value)}
+                      rows={4}
+                      placeholder="Paste the response text..."
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                    />
+                  </label>
+
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <label className="block">
+                      <span className="mb-1 block text-sm font-medium text-gray-700">Topic</span>
+                      <input
+                        type="text"
+                        value={newTopic}
+                        onChange={(event) => setNewTopic(event.target.value)}
+                        placeholder="Residential Carpet Cleaning"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-sm font-medium text-gray-700">Subtopic</span>
+                      <input
+                        type="text"
+                        value={newSubtopic}
+                        onChange={(event) => setNewSubtopic(event.target.value)}
+                        placeholder="Process"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-sm font-medium text-gray-700">Status</span>
+                      <input
+                        type="text"
+                        value={newStatus}
+                        onChange={(event) => setNewStatus(event.target.value)}
+                        placeholder="READY"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                      />
+                    </label>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={addTrainingItem}
+                    className="inline-flex w-fit items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"
+                  >
+                    <Plus className="mr-2 h-4 w-4" />
+                    Add Entry
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-6">
+                {trainingLoading ? (
+                  <p className="text-sm text-gray-500">Loading training entries...</p>
+                ) : (
+                  <div className="space-y-3">
+                    {trainingItems.length === 0 && (
+                      <p className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-4 text-sm text-gray-600">No training items loaded yet.</p>
+                    )}
+
+                    {trainingItems.map((item, index) => (
+                      <div key={`${item.question}-${index}`} className="rounded-lg border border-gray-200 p-4">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                          <p className="text-sm font-semibold text-gray-800">#{index + 1}</p>
+                          <button
+                            type="button"
+                            onClick={() => removeTrainingItem(index)}
+                            className="inline-flex items-center rounded border border-red-200 px-3 py-1.5 text-sm text-red-700 transition hover:bg-red-50"
+                          >
+                            <Trash2 className="mr-1 h-4 w-4" />
+                            Remove
+                          </button>
+                        </div>
+
+                        <label className="block">
+                          <span className="mb-1 block text-sm font-medium text-gray-700">Question</span>
+                          <input
+                            type="text"
+                            value={item.question}
+                            onChange={(event) => updateTrainingItem(index, { question: event.target.value })}
+                            className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                          />
+                        </label>
+                        <label className="mt-3 block">
+                          <span className="mb-1 block text-sm font-medium text-gray-700">Answer</span>
+                          <textarea
+                            value={item.answer}
+                            onChange={(event) => updateTrainingItem(index, { answer: event.target.value })}
+                            rows={4}
+                            className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                          />
+                        </label>
+
+                        <div className="mt-3 grid gap-3 md:grid-cols-3">
+                          <label className="block">
+                            <span className="mb-1 block text-sm font-medium text-gray-700">Topic</span>
+                            <input
+                              type="text"
+                              value={item.topic ?? ''}
+                              onChange={(event) => updateTrainingItem(index, { topic: event.target.value })}
+                              className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="mb-1 block text-sm font-medium text-gray-700">Subtopic</span>
+                            <input
+                              type="text"
+                              value={item.subtopic ?? ''}
+                              onChange={(event) => updateTrainingItem(index, { subtopic: event.target.value })}
+                              className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="mb-1 block text-sm font-medium text-gray-700">Status</span>
+                            <input
+                              type="text"
+                              value={item.status ?? 'READY'}
+                              onChange={(event) => updateTrainingItem(index, { status: event.target.value })}
+                              className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+          </>
+        )}
       </div>
     </main>
   );
