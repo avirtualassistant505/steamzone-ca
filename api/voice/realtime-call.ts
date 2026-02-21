@@ -35,13 +35,13 @@ function normalizeErrorBody(rawBody: string): string {
 
 function readSdpBody(body: unknown): string {
   if (typeof body === 'string') {
-    return body.trim();
+    return body;
   }
 
   if (body && typeof body === 'object' && !Array.isArray(body)) {
     const maybe = (body as Record<string, unknown>).sdp;
     if (typeof maybe === 'string') {
-      return maybe.trim();
+      return maybe;
     }
   }
 
@@ -72,7 +72,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   }
 
   const sdp = readSdpBody(req.body);
-  if (!sdp) {
+  if (!sdp || !sdp.trim()) {
     res.status(400).json({ message: 'Missing SDP body.' });
     return;
   }
@@ -116,15 +116,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
 
   try {
     const form = new FormData();
-    const sessionBlob = new Blob([JSON.stringify(sessionConfig)], {
-      type: 'application/json',
-    });
-    const sdpBlob = new Blob([sdp], {
-      type: 'application/sdp',
-    });
-
-    form.set('sdp', sdpBlob);
-    form.set('session', sessionBlob);
+    form.set('sdp', sdp);
+    form.set('session', JSON.stringify(sessionConfig));
 
     const openAiResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
       method: 'POST',
