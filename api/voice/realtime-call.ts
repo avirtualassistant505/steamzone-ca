@@ -10,6 +10,29 @@ type ApiResponse = {
   send?: (body: unknown) => void;
 };
 
+function normalizeErrorBody(rawBody: string): string {
+  if (!rawBody) {
+    return 'OpenAI returned an empty response.';
+  }
+
+  const trimmed = rawBody.trim();
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    const error = parsed?.error;
+    if (error && typeof error === 'object') {
+      const maybeMessage = (error as Record<string, unknown>).message;
+      if (typeof maybeMessage === 'string' && maybeMessage.trim()) {
+        const code = typeof (error as Record<string, unknown>).code === 'string' ? (error as Record<string, unknown>).code : '';
+        return `OpenAI realtime call failed: ${maybeMessage}${code ? ` (${code})` : ''}`;
+      }
+    }
+  } catch {
+    // Keep the raw text.
+  }
+
+  return trimmed;
+}
+
 function readSdpBody(body: unknown): string {
   if (typeof body === 'string') {
     return body.trim();
@@ -93,13 +116,21 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
 
   try {
     const form = new FormData();
-    form.set('sdp', sdp);
-    form.set('session', JSON.stringify(sessionConfig));
+    const sessionBlob = new Blob([JSON.stringify(sessionConfig)], {
+      type: 'application/json',
+    });
+    const sdpBlob = new Blob([sdp], {
+      type: 'application/sdp',
+    });
+
+    form.set('sdp', sdpBlob);
+    form.set('session', sessionBlob);
 
     const openAiResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
+        'OpenAI-Beta': 'realtime=v1',
       },
       body: form,
     });
@@ -107,7 +138,15 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     const raw = await openAiResponse.text();
     if (!openAiResponse.ok) {
       res.status(502).json({
-        message: raw || `OpenAI realtime call failed (${openAiResponse.status}).`,
+        message: `${normalizeErrorBody(raw) || `OpenAI realtime call failed (${openAiResponse.status}).`}`,
+      });
+      return;
+    }
+
+    if (typeof raw !== 'string' || !raw.trim().startsWith('v=')) {
+      res.status(502).json({
+        message:
+          'OpenAI realtime call did not return a valid SDP answer. Check the realtime model and payload format.',
       });
       return;
     }
