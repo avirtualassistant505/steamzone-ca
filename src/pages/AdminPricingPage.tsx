@@ -96,6 +96,23 @@ type TranscriptGetPayload = {
   message?: string;
 };
 
+type SupabaseDiagnosticPayload = {
+  ok: boolean;
+  message: string;
+  config: {
+    hasUrl: boolean;
+    hasServiceRoleKey: boolean;
+    urlHost: string | null;
+    projectRef: string | null;
+    keyHint: string | null;
+  };
+  probe: {
+    reachable: boolean;
+    estimateSessionsTableExists?: boolean;
+    sampleError?: string;
+  };
+};
+
 function parsePayloadError<T>(result: SafeJsonResult<T>): string {
   return result.textError ?? `Unable to parse response (HTTP ${result.status}).`;
 }
@@ -179,6 +196,9 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [selectedConversationId, setSelectedConversationId] = useState('');
   const [selectedConversation, setSelectedConversation] = useState<ConversationDetail | null>(null);
   const [conversationDetailLoading, setConversationDetailLoading] = useState(false);
+  const [supabaseDiagLoading, setSupabaseDiagLoading] = useState(false);
+  const [supabaseDiagError, setSupabaseDiagError] = useState('');
+  const [supabaseDiagResult, setSupabaseDiagResult] = useState<SupabaseDiagnosticPayload | null>(null);
   const [newQuestion, setNewQuestion] = useState('');
   const [newAnswer, setNewAnswer] = useState('');
   const [newTopic, setNewTopic] = useState('');
@@ -356,6 +376,28 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       setConversationError('Unable to load conversation detail.');
     } finally {
       setConversationDetailLoading(false);
+    }
+  }
+
+  async function runSupabaseDiagnostics(): Promise<void> {
+    setSupabaseDiagLoading(true);
+    setSupabaseDiagError('');
+    try {
+      const response = await parseJsonResponse<SupabaseDiagnosticPayload>(
+        await fetch('/api/supabase-diagnostics')
+      );
+      const payload = response.payload;
+
+      if (!response.ok || !payload) {
+        setSupabaseDiagError(payload?.message ?? parsePayloadError(response));
+        return;
+      }
+
+      setSupabaseDiagResult(payload);
+    } catch {
+      setSupabaseDiagError('Unable to run Supabase diagnostics. Ensure /api/supabase-diagnostics is deployed.');
+    } finally {
+      setSupabaseDiagLoading(false);
     }
   }
 
@@ -1741,15 +1783,74 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => void loadConversationData()}
-                  disabled={conversationLoading}
-                  className="inline-flex items-center rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {conversationLoading ? 'Loading...' : 'Reload Logs'}
-                </button>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void loadConversationData()}
+                    disabled={conversationLoading}
+                    className="inline-flex items-center rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {conversationLoading ? 'Loading...' : 'Reload Logs'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void runSupabaseDiagnostics()}
+                    disabled={supabaseDiagLoading}
+                    className="inline-flex items-center rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {supabaseDiagLoading ? 'Checking...' : 'Run Supabase Diagnostics'}
+                  </button>
+                </div>
               </div>
+
+              {supabaseDiagError && (
+                <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+                  {supabaseDiagError}
+                </p>
+              )}
+              {supabaseDiagResult && (
+                <div
+                  className={`mb-4 rounded-lg border px-4 py-3 text-sm ${
+                    supabaseDiagResult.ok
+                      ? 'border-green-200 bg-green-50 text-green-800'
+                      : 'border-amber-200 bg-amber-50 text-amber-800'
+                  }`}
+                >
+                  <p className="font-semibold">{supabaseDiagResult.ok ? 'Diagnostics Passed' : 'Diagnostics Failed'}</p>
+                  <p>{supabaseDiagResult.message}</p>
+                  <p className="mt-1">
+                    <span className="font-semibold">SUPABASE_URL set:</span> {supabaseDiagResult.config.hasUrl ? 'Yes' : 'No'}
+                    {' · '}
+                    <span className="font-semibold">SUPABASE_SERVICE_ROLE_KEY set:</span>{' '}
+                    {supabaseDiagResult.config.hasServiceRoleKey ? 'Yes' : 'No'}
+                  </p>
+                  <p className="mt-1">
+                    <span className="font-semibold">Host:</span>{' '}
+                    {supabaseDiagResult.config.urlHost || 'Missing'}
+                    {' · '}
+                    <span className="font-semibold">Project:</span>{' '}
+                    {supabaseDiagResult.config.projectRef || 'Missing'}
+                    {' · '}
+                    <span className="font-semibold">Key:</span> {supabaseDiagResult.config.keyHint || 'Missing'}
+                  </p>
+                  <p className="mt-1">
+                    <span className="font-semibold">DB reachability:</span>{' '}
+                    {supabaseDiagResult.probe.reachable ? 'Reachable' : 'Not reachable'}
+                    {' · '}
+                    <span className="font-semibold">estimate_sessions table:</span>{' '}
+                    {supabaseDiagResult.probe.estimateSessionsTableExists === undefined
+                      ? 'Unknown'
+                      : supabaseDiagResult.probe.estimateSessionsTableExists
+                        ? 'Present'
+                        : 'Missing'}
+                  </p>
+                  {supabaseDiagResult.probe.sampleError && (
+                    <p className="mt-1">
+                      <span className="font-semibold">Sample error:</span> {supabaseDiagResult.probe.sampleError}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {conversationError && (
                 <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{conversationError}</p>
