@@ -9,6 +9,8 @@ import {
 } from '../../quote/schema';
 import { searchSteamZoneKnowledgeAsync, type KnowledgeMatch } from './steamzoneKnowledge';
 import * as estimateAgentRuntime from '../../../server/estimateAgentRuntime.mjs';
+import { AGENT_DEFAULT_MODEL, AGENT_MODEL_OPTIONS, type AgentModelOption } from './agentModelConfig';
+import { getAgentModelConfig as getStoredAgentModelConfig } from '../../../server/agentModelStore';
 
 export type PostagentChannel = 'web' | 'voice' | 'sms' | 'test';
 
@@ -159,6 +161,14 @@ type ResponseMessage = {
   content?: Array<{ type: string; text?: string }>;
 };
 
+type AgentProviderConfig = {
+  model: string;
+  responsesUrl: string;
+  apiKey: string;
+  provider: 'openrouter' | 'openai';
+  headers: Record<string, string>;
+};
+
 type OpenAIResponse = {
   id: string;
   output?: Array<ResponseFunctionCall | ResponseMessage | { type: string; [k: string]: unknown }>;
@@ -173,9 +183,9 @@ type ToolExecutionResult =
   | { [key: string]: unknown }
   | unknown;
 
-const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses';
-const MODEL = 'gpt-5.2';
 const MAX_TURNS = 8;
+const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses';
+const OPENROUTER_RESPONSES_URL = 'https://openrouter.ai/api/v1/responses';
 
 const TOOL_DEFS = [
   {
@@ -317,6 +327,94 @@ function parseArgs(raw: string | undefined): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function normalizeProviderModelLabel(rawModel: string): string {
+  const value = rawModel.trim();
+  if (!value) {
+    return AGENT_DEFAULT_MODEL;
+  }
+
+  if (value.toLowerCase() === 'glm5') {
+    return 'z-ai/glm-5';
+  }
+
+  return value;
+}
+
+function getModelOptionByValue(model: string): AgentModelOption | undefined {
+  const normalized = model.toLowerCase();
+  return AGENT_MODEL_OPTIONS.find((option) => option.value.toLowerCase() === normalized);
+}
+
+function openAIFallbackModel(model: string): string {
+  const fallback = getModelOptionByValue(model)?.value ?? model;
+  if (fallback.startsWith('openai/')) {
+    return fallback.replace('openai/', '');
+  }
+
+  if (/^[a-z0-9._-]+$/i.test(fallback) && !fallback.includes('/')) {
+    return fallback;
+  }
+
+  return 'gpt-5.2';
+}
+
+function createProviderHeaders(apiKey: string, provider: 'openrouter' | 'openai'): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  };
+
+  if (provider === 'openrouter') {
+    const referer =
+      process.env.SITE_URL?.trim() ||
+      process.env.VERCEL_URL?.trim() ||
+      process.env.NEXT_PUBLIC_SITE_URL?.trim();
+
+    if (referer) {
+      headers.Referer = referer.startsWith('http') ? referer : `https://${referer}`;
+      headers['HTTP-Referer'] = headers.Referer;
+    }
+    headers['X-Title'] = 'Steam Zone Estimate Agent';
+  }
+
+  return headers;
+}
+
+async function resolveModelProviderConfig(): Promise<AgentProviderConfig> {
+  const envModel =
+    normalizeProviderModelLabel(
+      process.env.AGENT_MODEL_OVERRIDE?.trim() ||
+        process.env.ESTIMATE_AGENT_MODEL?.trim() ||
+        (await getStoredAgentModelConfig()).model.trim()
+    ) || AGENT_DEFAULT_MODEL;
+
+  const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
+  if (openRouterKey) {
+    return {
+      provider: 'openrouter',
+      model: envModel,
+      apiKey: openRouterKey,
+      responsesUrl: OPENROUTER_RESPONSES_URL,
+      headers: createProviderHeaders(openRouterKey, 'openrouter'),
+    };
+  }
+
+  const openAiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!openAiKey) {
+    throw new Error(
+      'No model API key configured. Set OPENROUTER_API_KEY in env (preferred) or OPENAI_API_KEY for fallback before using this endpoint.'
+    );
+  }
+
+  return {
+    provider: 'openai',
+    model: openAIFallbackModel(envModel),
+    apiKey: openAiKey,
+    responsesUrl: OPENAI_RESPONSES_URL,
+    headers: createProviderHeaders(openAiKey, 'openai'),
+  };
 }
 
 const ESTIMATE_INTENT_CUES = /\b(estimate|quote|pricing|price|cost|book|booking|schedule|appointment)\b/i;
@@ -706,12 +804,14 @@ export async function appendTranscript(
   return appendSessionTranscript(sessionId, role, content, at);
 }
 
-async function callOpenAI(apiKey: string, payload: Record<string, unknown>): Promise<OpenAIResponse> {
-  const response = await fetch(OPENAI_RESPONSES_URL, {
+async function callOpenAI(
+  modelConfig: AgentProviderConfig,
+  payload: Record<string, unknown>
+): Promise<OpenAIResponse> {
+  const response = await fetch(modelConfig.responsesUrl, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
+      ...modelConfig.headers,
     },
     body: JSON.stringify(payload),
   });
@@ -719,7 +819,7 @@ async function callOpenAI(apiKey: string, payload: Record<string, unknown>): Pro
   const data = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   if (!response.ok) {
     const detail = data ? JSON.stringify(data) : `${response.status} ${response.statusText}`;
-    throw new Error(`OpenAI Responses API request failed: ${detail}`);
+    throw new Error(`Estimate agent model request failed: ${detail}`);
   }
 
   return data as unknown as OpenAIResponse;
@@ -837,7 +937,7 @@ function instructionsForContext(
 
 async function runAgentLoop(
   runtime: EstimateAgentRuntimeModule,
-  apiKey: string,
+  modelConfig: AgentProviderConfig,
   sessionId: string,
   inputText: string,
   channel?: PostagentChannel
@@ -848,8 +948,8 @@ async function runAgentLoop(
     sessionContext.transcript?.some((entry) => asRecord(entry)?.role === 'assistant')
   );
 
-  let response = await callOpenAI(apiKey, {
-    model: MODEL,
+  let response = await callOpenAI(modelConfig, {
+    model: modelConfig.model,
     instructions: instructionsForContext(channel, sessionContext, inputText, faqMatches),
     input: [
       {
@@ -884,8 +984,8 @@ async function runAgentLoop(
 
     sessionContext = await runtime.toolGetState(sessionId);
 
-    response = await callOpenAI(apiKey, {
-      model: MODEL,
+      response = await callOpenAI(modelConfig, {
+        model: modelConfig.model,
       instructions: instructionsForContext(channel, sessionContext, inputText, faqMatches),
       previous_response_id: response.id,
       input: outputs,
@@ -926,16 +1026,13 @@ async function runAgentLoop(
 export async function decideNextAssistantTurn(
   request: { session_id: string; input_text: string; channel?: PostagentChannel }
 ): Promise<PostagentEstimateResponse> {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error('OPENAI_API_KEY is missing on the server. Set process.env.OPENAI_API_KEY before using this endpoint.');
-  }
+  const modelConfig = await resolveModelProviderConfig();
 
   const runtime = await getRuntime();
   const sessionId = request.session_id.trim();
   const inputText = String(request.input_text || '').trim() || DEFAULT_USER_START;
 
-  const loopResult = await runAgentLoop(runtime, apiKey, sessionId, inputText, request.channel);
+  const loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, request.channel);
   const finalState = await runtime.getSession(sessionId);
   const done = loopResult.done;
 
@@ -968,10 +1065,7 @@ export async function decideNextAssistantTurn(
 export async function runEstimateAgentCore(
   request: PostagentEstimateRequest
 ): Promise<PostagentEstimateResponse> {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error('OPENAI_API_KEY is missing on the server. Set process.env.OPENAI_API_KEY before using this endpoint.');
-  }
+  const modelConfig = await resolveModelProviderConfig();
 
   const runtime = await getRuntime();
   const sessionId = request.session_id?.trim() || newSessionId();
@@ -989,7 +1083,7 @@ export async function runEstimateAgentCore(
   const nextHint = await runtime.peekNextQuestion(sessionId);
   await normalizeAndSetAnswersFromInput(runtime, sessionId, inputText, schema, state, nextHint);
 
-  const loopResult = await runAgentLoop(runtime, apiKey, sessionId, inputText, channel);
+  const loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, channel);
   const finalState = await runtime.getSession(sessionId);
   const done = loopResult.done;
 

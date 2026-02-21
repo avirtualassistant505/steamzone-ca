@@ -10,6 +10,7 @@ import {
   type PricingConfig,
   type WindowZone,
 } from '../lib/estimateEngine';
+import { AGENT_DEFAULT_MODEL, AGENT_MODEL_OPTIONS, type AgentModelOption } from '../estimate/core/agentModelConfig';
 
 interface AdminPricingPageProps {
   pricingConfig: PricingConfig;
@@ -23,6 +24,14 @@ interface TrainingItem {
   topic?: string;
   subtopic?: string;
   status?: string;
+}
+
+interface AgentModelResponse {
+  model: string;
+  source: 'db' | 'fallback';
+  updatedAt?: string;
+  message?: string;
+  available_models?: AgentModelOption[];
 }
 
 const STORAGE_KEY = 'steamzone_training_admin_tab';
@@ -80,6 +89,13 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [saveMessage, setSaveMessage] = useState('');
   const [saveToken, setSaveToken] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [agentModel, setAgentModel] = useState(AGENT_DEFAULT_MODEL);
+  const [agentModelOptions, setAgentModelOptions] = useState<AgentModelOption[]>(AGENT_MODEL_OPTIONS);
+  const [agentModelSource, setAgentModelSource] = useState<'db' | 'fallback'>('fallback');
+  const [agentModelUpdatedAt, setAgentModelUpdatedAt] = useState('');
+  const [agentModelLoading, setAgentModelLoading] = useState(false);
+  const [agentModelSaving, setAgentModelSaving] = useState(false);
+  const [agentModelMessage, setAgentModelMessage] = useState('');
   const [records] = useState<EstimateRecord[]>([]);
   const [trainingItems, setTrainingItems] = useState<TrainingItem[]>([]);
   const [trainingSource, setTrainingSource] = useState('fallback');
@@ -104,6 +120,46 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       setActiveTab(tab);
     }
   }, []);
+
+  useEffect(() => {
+    async function loadModelConfig(): Promise<void> {
+      setAgentModelLoading(true);
+      setAgentModelMessage('');
+
+      try {
+        const response = await fetch('/api/agent-model');
+        const payload = (await response.json()) as AgentModelResponse;
+
+        if (!response.ok || !payload?.model) {
+          setAgentModelMessage(payload.message ?? 'Unable to load model settings.');
+          return;
+        }
+
+        setAgentModel(payload.model);
+        setAgentModelOptions(
+          Array.isArray(payload.available_models) && payload.available_models.length > 0 ? payload.available_models : AGENT_MODEL_OPTIONS
+        );
+        setAgentModelSource(payload.source ?? 'fallback');
+        setAgentModelUpdatedAt(payload.updatedAt ?? '');
+        setAgentModelMessage(payload.message ?? `Loaded model ${payload.model}.`);
+      } catch {
+        setAgentModelMessage('Unable to reach /api/agent-model. Ensure endpoint is deployed.');
+      } finally {
+        setAgentModelLoading(false);
+      }
+    }
+
+    void loadModelConfig();
+  }, []);
+
+  useEffect(() => {
+    if (agentModelOptions.length > 0) {
+      const optionExists = agentModelOptions.some((option) => option.value === agentModel);
+      if (!optionExists) {
+        setAgentModel(agentModelOptions[0].value);
+      }
+    }
+  }, [agentModel, agentModelOptions]);
 
   async function loadTrainingData(): Promise<void> {
     setTrainingLoading(true);
@@ -286,6 +342,48 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     }
   }
 
+  async function saveAgentModel(): Promise<void> {
+    if (!saveToken.trim()) {
+      setAgentModelMessage('Enter the admin token to save model settings.');
+      return;
+    }
+
+    if (!agentModel.trim()) {
+      setAgentModelMessage('Select a model before saving.');
+      return;
+    }
+
+    setAgentModelSaving(true);
+    setAgentModelMessage('Saving model settings...');
+
+    try {
+      const response = await fetch('/api/agent-model', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${saveToken.trim()}`,
+          'x-admin-training-token': saveToken.trim(),
+        },
+        body: JSON.stringify({ model: agentModel.trim() }),
+      });
+
+      const payload = (await response.json()) as AgentModelResponse;
+      if (!response.ok || !payload?.model) {
+        setAgentModelMessage(payload.message ?? 'Unable to save model setting.');
+        return;
+      }
+
+      setAgentModel(payload.model);
+      setAgentModelSource(payload.source ?? 'fallback');
+      setAgentModelUpdatedAt(payload.updatedAt ?? '');
+      setAgentModelMessage(payload.message ?? 'Model setting saved. Active for next chat turns.');
+    } catch {
+      setAgentModelMessage('Unable to reach /api/agent-model.');
+    } finally {
+      setAgentModelSaving(false);
+    }
+  }
+
   useEffect(() => {
     if (activeTab === 'training' && !trainingLoaded && !trainingLoading) {
       void loadTrainingData();
@@ -378,6 +476,49 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
               className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
             />
           </label>
+        </section>
+
+        <section className={`${cardClass} mt-6`}>
+          <h2 className="text-xl font-bold text-gray-900">Estimate Agent Model</h2>
+          <p className="mt-2 text-sm text-gray-600">Choose the model used by both web and voice agents for estimate conversations.</p>
+          <p className="mt-2 text-sm text-gray-500">
+            Source: {agentModelSource} {agentModelUpdatedAt ? `• Updated ${new Date(agentModelUpdatedAt).toLocaleString()}` : '• Not saved yet'}
+          </p>
+
+          <label className="mt-4 block max-w-2xl">
+            <span className="mb-1 block text-sm font-medium text-gray-700">Active model</span>
+            <select
+              value={agentModel}
+              onChange={(event) => setAgentModel(event.target.value)}
+              disabled={agentModelLoading || agentModelOptions.length === 0}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+            >
+              {agentModelLoading && (
+                <option value={agentModel}>{agentModel}</option>
+              )}
+              {!agentModelLoading &&
+                agentModelOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+            </select>
+          </label>
+
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={saveAgentModel}
+              disabled={agentModelSaving}
+              className="inline-flex items-center rounded-lg bg-blue-600 px-5 py-2.5 font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {agentModelSaving ? 'Saving...' : 'Save Model'}
+            </button>
+          </div>
+
+          {agentModelMessage && (
+            <p className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">{agentModelMessage}</p>
+          )}
         </section>
 
         <div className="mt-6 flex flex-wrap gap-3">
