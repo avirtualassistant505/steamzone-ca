@@ -35,6 +35,11 @@ export const AGENT_DEFAULT_MODEL_LABEL = 'GLM5';
 
 export const AGENT_VOICE_MODEL_OPTIONS: AgentModelOption[] = [
   {
+    value: 'openai/gpt-audio-mini',
+    label: 'GPT Audio Mini (OpenRouter)',
+    provider: 'openrouter',
+  },
+  {
     value: 'z-ai/glm-5',
     label: 'GLM5 (OpenRouter)',
     provider: 'openrouter',
@@ -56,4 +61,4 @@ export const AGENT_VOICE_MODEL_OPTIONS: AgentModelOption[] = [
   },
 ];
 
-export const AGENT_DEFAULT_VOICE_MODEL = 'z-ai/glm-5';
+export const AGENT_DEFAULT_VOICE_MODEL = 'openai/gpt-audio-mini';
