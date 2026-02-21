@@ -271,8 +271,150 @@ export function pruneInvisibleAnswers(answers: Record<string, unknown>): Record<
 
 export function buildQuestionText(field: SchemaField, answers: Record<string, unknown>): string {
   const options = getFieldOptions(field, (answers.serviceType as ServiceType | undefined) ?? undefined);
+  const formatOptions = () => options.map((opt) => opt.label).join(', ');
+
+  if (field.key === 'serviceType') {
+    return `What service are you looking to estimate? ${formatOptions()}.`;
+  }
+
+  if (field.key === 'postalCode') {
+    return 'What is the postal code for the property? (Example: R5G 2X3)';
+  }
+
+  if (field.key === 'zone') {
+    return `Which travel zone applies? ${formatOptions()}`;
+  }
+
+  if (field.key === 'storey') {
+    return `What is the house type/storey? ${formatOptions()}`;
+  }
+
+  if (field.key === 'sizeBracket') {
+    return `What is the square footage bracket for this home? ${formatOptions()}`;
+  }
+
+  if (field.key === 'scope') {
+    return `What cleaning scope do you need? ${formatOptions()}`;
+  }
+
+  if (field.key === 'screens') {
+    return `How many screens are you including? ${formatOptions()}`;
+  }
+
+  if (field.key === 'tracks') {
+    return `For tracks and sills, how would you like it handled? ${formatOptions()}`;
+  }
+
+  if (field.key === 'slidingRemoval') {
+    return `Do you need sliding windows removed for cleaning? ${formatOptions()}`;
+  }
+
+  if (field.key === 'patioDoors') {
+    return `How do you want patio doors handled? ${formatOptions()}`;
+  }
+
+  if (field.key === 'skylights') {
+    return `How many skylights are there and what scope do you need? ${formatOptions()}`;
+  }
+
+  if (field.key === 'railingGlass') {
+    return `Will railing glass be included? ${formatOptions()}`;
+  }
+
+  if (field.key === 'frenchPanes') {
+    return `How many french panes are there? ${formatOptions()}`;
+  }
+
+  if (field.key === 'buildingType') {
+    return `What type of building is this? ${formatOptions()}`;
+  }
+
+  if (field.key === 'storeys') {
+    return `How many storeys is this building? ${formatOptions()}`;
+  }
+
+  if (field.key === 'sizeMode') {
+    return `How should we measure size: ${formatOptions()}`;
+  }
+
+  if (field.key === 'paneCount') {
+    return `How many panes are we cleaning?`;
+  }
+
+  if (field.key === 'frontageFeet') {
+    return `What is the frontage length in feet?`;
+  }
+
+  if (field.key === 'estimateMode') {
+    return `How would you like to measure carpet estimate (${formatOptions()})?`;
+  }
+
+  if (field.key === 'rooms') {
+    return `How many bedrooms/rooms are you estimating?`;
+  }
+
+  if (field.key === 'sqftBracket') {
+    return `What square-footage bracket fits this project? ${formatOptions()}`;
+  }
+
+  if (field.key === 'condition') {
+    return `What is the soil/condition level? ${formatOptions()}`;
+  }
+
+  if (field.key === 'furnitureMoving') {
+    return `How heavy is furniture moving expected to be? ${formatOptions()}`;
+  }
+
+  if (field.key === 'projectType') {
+    return `Is this a residential or commercial post-construction project? ${formatOptions()}`;
+  }
+
+  if (field.key === 'buildType') {
+    return `Is this renovation or new build?`;
+  }
+
+  if (field.key === 'floors') {
+    return 'How many floors/levels are involved?';
+  }
+
+  if (field.key === 'stage') {
+    return `Which cleanup stage is this project in? ${formatOptions()}`;
+  }
+
+  if (field.key === 'dustLoad') {
+    return `How heavy is the dust/debris load? ${formatOptions()}`;
+  }
+
+  if (field.key === 'contact.fullName') {
+    return `Could I have your full name?`;
+  }
+
+  if (field.key === 'contact.phone') {
+    return `What is the best callback phone number?`;
+  }
+
+  if (field.key === 'contact.email') {
+    return `What is your email address so we can send your estimate?`;
+  }
+
+  if (field.key === 'contact.address') {
+    return `What is the service address? (optional)`;
+  }
+
+  if (field.key === 'contact.consentToContact') {
+    return `Do I have your permission to contact you about this estimate?`;
+  }
+
+  if (field.key === 'contact.marketingOptIn') {
+    return `Would you like to receive occasional offers and updates?`;
+  }
+
+  if (field.key === 'schedule') {
+    return `When is the best time for us to work with you?`;
+  }
+
   if (field.type === 'select' && options.length > 0) {
-    return `${field.label}: ${options.map((opt) => opt.label).join(', ')}`;
+    return `${field.label}: ${formatOptions()}`;
   }
 
   if (field.type === 'boolean') {

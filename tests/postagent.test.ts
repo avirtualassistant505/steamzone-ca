@@ -133,6 +133,66 @@ describe('POST /api/postagent/estimate', () => {
     });
   });
 
+  it('does not start estimate questions from a general service inquiry', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    mockOpenAIMessage('We can clean commercial jobs. Can I help with something else?');
+    const sessionId = 'postagent-no-estimate-start-1';
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'Do you clean windows for big businesses?',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { state: { answers: Record<string, unknown> } };
+    expect(payload.state.answers.serviceType).toBeUndefined();
+  });
+
+  it('starts estimate collection only after the user requests a quote', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    mockOpenAIMessage('Great. I can do this estimate. What is the postal code?');
+    const sessionId = 'postagent-estimate-start-2';
+
+    const pre = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'I do clean windows for big businesses.',
+        },
+      },
+      pre
+    );
+    expect(pre.code).toBe(200);
+
+    const next = makeRes();
+    mockOpenAIMessage('Great. I can do this estimate. What is the postal code?');
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'I would like to do a quote for windows.',
+        },
+      },
+      next
+    );
+
+    expect(next.code).toBe(200);
+    const nextPayload = next.payload as { state: { answers: Record<string, unknown> }; done: boolean };
+    expect(nextPayload.state.answers.serviceType).toBe('window');
+    expect(nextPayload.done).toBe(false);
+    expect(nextPayload.assistant_message).toMatch(/postal|address|estimate/i);
+  });
+
   it('returns ambiguity for range-like numeric input', async () => {
     const sessionId = 'postagent-range-1';
     const schema = await loadSchema();

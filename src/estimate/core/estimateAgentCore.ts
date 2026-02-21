@@ -1,7 +1,9 @@
 import {
   getFieldOptions,
   getRequiredVisibleFieldsInOrder,
+  getEstimateSchema,
   isAnswered,
+  getAnswerValue,
   type EstimateFormSchema,
   type SchemaField,
   type SchemaOption,
@@ -291,9 +293,100 @@ const TOOL_DEFS = [
   },
 ] as const;
 
+const TOOL_DEFS_INFO_ONLY = [
+  {
+    type: 'function',
+    name: 'search_faq',
+    description: 'Search Steam Zone FAQ/training data for relevant answers.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        user_question: { type: 'string' },
+        limit: { type: 'number' },
+      },
+      required: ['user_question'],
+    },
+  },
+  {
+    type: 'function',
+    name: 'get_state',
+    description: 'Return current session state.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        session_id: { type: 'string' },
+      },
+      required: ['session_id'],
+    },
+  },
+] as const;
+
 const CORE_PROMPT_PREFIX = DEFAULT_AGENT_SYSTEM_PROMPT;
 
 const DEFAULT_USER_START = 'Hi, how are you? What can I help you with today?';
+const ESTIMATE_FLOW_FIELD_HINTS = new Set([
+  'serviceType',
+  'postalCode',
+  'zone',
+  'storey',
+  'sizeBracket',
+  'scope',
+  'screens',
+  'tracks',
+  'hardToReach',
+  'hardWaterRemoval',
+  'constructionDebris',
+  'slidingRemoval',
+  'slidingQuantity',
+  'patioDoors',
+  'patioQuantity',
+  'skylights',
+  'skylightQuantity',
+  'railingGlass',
+  'frenchPanes',
+  'sunroom',
+  'walkoutBasement',
+  'buildingType',
+  'storeys',
+  'sizeMode',
+  'paneCount',
+  'frontageFeet',
+  'rooms',
+  'sqftBracket',
+  'condition',
+  'estimateMode',
+  'stairsSteps',
+  'hallways',
+  'furnitureMoving',
+  'advancedStainRemoval',
+  'odorElimination',
+  'petTreatment',
+  'stainProtector',
+  'unusualCondition',
+  'projectType',
+  'buildType',
+  'floors',
+  'stage',
+  'dustLoad',
+  'interiorWindows',
+  'scraping',
+  'floorDetailing',
+  'insideCabinets',
+  'appliances',
+  'specialDetailing',
+  'multiTenantAccess',
+  'schedule',
+  'contact.fullName',
+  'contact.phone',
+  'contact.email',
+  'contact.address',
+  'contact.consentToContact',
+  'contact.marketingOptIn',
+]);
+
+const ESTIMATE_FLOW_CONTEXT_RE = /\b(estimate|quote|price|pricing|cost)\b/i;
 
 const CORRECTION_CUES = /\b(actually|instead|change|replace|correction|corrections|update|correct|correcting)\b/i;
 
@@ -545,7 +638,8 @@ function buildInstructionContext(
   session: SessionRecord,
   inputText: string,
   faqMatches: KnowledgeMatch[],
-  systemPrompt: string
+  systemPrompt: string,
+  estimateFlowActive: boolean
 ): string {
   const channelText = channel ? `Input channel: ${channel}.` : 'Input channel: web.';
   const channelGuidance =
@@ -560,6 +654,10 @@ function buildInstructionContext(
 
   return [
     systemPrompt || CORE_PROMPT_PREFIX,
+    `Estimate mode active: ${estimateFlowActive ? 'yes' : 'no'}.`,
+    estimateFlowActive
+      ? 'Estimate flow is active. Collect only estimate fields from schema and move through form order with one question at a time.'
+      : 'Do not collect estimate fields until user explicitly asks for a quote/estimate. Answer business questions from FAQ only first.',
     channelText,
     channelGuidance,
     'Session Context:',
@@ -685,6 +783,37 @@ function hasOptionTextMatch(raw: string, options: SchemaOption[]): string | null
   }
 
   return null;
+}
+
+function hasEstimateSignalInState(state: SessionRecord, inputText: string): boolean {
+  const schema = getEstimateSchema();
+  const hasEstimateAnswer = schema.fields.some((field) => {
+    if (!ESTIMATE_FLOW_FIELD_HINTS.has(field.key)) {
+      return false;
+    }
+
+    const value = getAnswerValue(state.answers, field.key);
+    return value !== undefined && value !== null && value !== '';
+  });
+  if (hasEstimateAnswer) {
+    return true;
+  }
+
+  if (state.asked_keys.some((key) => ESTIMATE_FLOW_FIELD_HINTS.has(key))) {
+    return true;
+  }
+
+  const hasEstimateContext = Boolean(
+    state.transcript?.some((entry) => {
+      const record = asRecord(entry);
+      return record?.role === 'assistant' && ESTIMATE_FLOW_CONTEXT_RE.test(String(record.content ?? ''));
+    })
+  );
+  if (hasEstimateContext) {
+    return true;
+  }
+
+  return hasEstimateIntent(inputText) || state.asked_keys.length > 0;
 }
 
 const INTEGER_HINTS: Record<string, string[]> = {
@@ -1060,13 +1189,14 @@ function buildAgentRequestPayload(
   modelConfig: AgentProviderConfig,
   input: Array<{ role: 'user'; content: string } | { type: 'function_call_output'; call_id: string; output: string }>,
   instructions: string,
+  useInfoOnlyTools: boolean,
   previousResponseId?: string
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     model: modelConfig.model,
     instructions,
     input,
-    tools: TOOL_DEFS,
+    tools: useInfoOnlyTools ? TOOL_DEFS_INFO_ONLY : TOOL_DEFS,
     tool_choice: 'auto',
     temperature: 0.2,
     max_output_tokens: 420,
@@ -1084,9 +1214,17 @@ async function instructionsForContext(
   session: SessionRecord,
   inputText: string,
   faqMatches: KnowledgeMatch[],
-  systemPrompt: string
+  systemPrompt: string,
+  estimateFlowActive: boolean
 ): Promise<string> {
-  return buildInstructionContext(channel, session, inputText, faqMatches, systemPrompt);
+  return buildInstructionContext(
+    channel,
+    session,
+    inputText,
+    faqMatches,
+    systemPrompt,
+    estimateFlowActive
+  );
 }
 
 async function runAgentLoop(
@@ -1094,7 +1232,8 @@ async function runAgentLoop(
   modelConfig: AgentProviderConfig,
   sessionId: string,
   inputText: string,
-  channel?: PostagentChannel
+  channel: PostagentChannel | undefined,
+  estimateFlowActive: boolean
 ): Promise<{ assistant_message: string; quote: unknown; next_hint: NextHint; done: boolean }> {
   let sessionContext = await runtime.toolGetState(sessionId);
   const promptConfig = await getAgentSystemPromptConfig();
@@ -1110,8 +1249,10 @@ async function runAgentLoop(
     sessionContext,
     inputText,
     faqMatches,
-    systemPrompt
+    systemPrompt,
+    estimateFlowActive
   );
+  const useInfoOnlyTools = !estimateFlowActive;
 
   let response = await callOpenAIWithFallback(
     modelConfig,
@@ -1123,7 +1264,8 @@ async function runAgentLoop(
           content: inputText,
         },
       ],
-      instructions
+      instructions,
+      useInfoOnlyTools
     )
   );
 
@@ -1150,10 +1292,10 @@ async function runAgentLoop(
 
     sessionContext = await runtime.toolGetState(sessionId);
 
-      response = await callOpenAIWithFallback(
-        modelConfig,
-        buildAgentRequestPayload(modelConfig, outputs, instructions, response.id)
-      );
+    response = await callOpenAIWithFallback(
+      modelConfig,
+      buildAgentRequestPayload(modelConfig, outputs, instructions, useInfoOnlyTools, response.id)
+    );
 
     const textOut = readAssistantText(response);
     if (textOut) {
@@ -1162,14 +1304,14 @@ async function runAgentLoop(
   }
 
   const session = await runtime.getSession(sessionId);
-  const done = runtime.validateRequiredAnswers(session.answers).length === 0;
-  const nextHint = done ? { done: true } : await runtime.peekNextQuestion(sessionId);
+  const done = estimateFlowActive && runtime.validateRequiredAnswers(session.answers).length === 0;
+  const nextHint = !estimateFlowActive || done ? { done: true } : await runtime.peekNextQuestion(sessionId);
   const computedQuote = quote === null ? await maybeComputeQuote(runtime, sessionId, done) : quote;
 
   if (!assistantMessage) {
     if (done && computedQuote) {
       assistantMessage = 'Your estimate is ready. I included the quote below.';
-    } else {
+    } else if (estimateFlowActive) {
       const next = await runtime.toolNextQuestion(sessionId);
       const questionText = next.question_text ?? 'Please provide the next detail.';
       if (!hadPriorAssistantTurn) {
@@ -1177,6 +1319,8 @@ async function runAgentLoop(
       } else {
         assistantMessage = questionText;
       }
+    } else {
+      assistantMessage = DEFAULT_USER_START;
     }
   }
 
@@ -1198,8 +1342,10 @@ export async function decideNextAssistantTurn(
   const runtime = await getRuntime();
   const sessionId = request.session_id.trim();
   const inputText = String(request.input_text || '').trim() || DEFAULT_USER_START;
+  const preState = await runtime.toolGetState(sessionId);
+  const estimateFlowActive = hasEstimateSignalInState(preState, inputText);
 
-  const loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, request.channel);
+  const loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, request.channel, estimateFlowActive);
   const finalState = await runtime.getSession(sessionId);
   const done = loopResult.done;
 
@@ -1250,10 +1396,13 @@ export async function runEstimateAgentCore(
 
   const schema = await runtime.toolGetSchema();
   const state = await runtime.toolGetState(sessionId);
+  const estimateFlowActive = hasEstimateSignalInState(state, inputText);
   const nextHint = await runtime.peekNextQuestion(sessionId);
-  await normalizeAndSetAnswersFromInput(runtime, sessionId, inputText, schema, state, nextHint);
+  if (estimateFlowActive) {
+    await normalizeAndSetAnswersFromInput(runtime, sessionId, inputText, schema, state, nextHint);
+  }
 
-  const loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, channel);
+  const loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, channel, estimateFlowActive);
   const finalState = await runtime.getSession(sessionId);
   const done = loopResult.done;
 
