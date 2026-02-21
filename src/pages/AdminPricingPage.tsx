@@ -596,6 +596,14 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                   ? 'Update shared training questions/answers used by both web and voice agents.'
                   : 'Browse saved conversation sessions and full voice/text transcripts.'}
             </p>
+            <p className="mt-3">
+              <a
+                href="/estimate-bot-lab"
+                className="inline-flex rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
+              >
+                Open Test Page
+              </a>
+            </p>
             <p className="mt-2 text-sm text-gray-500">Last updated: {new Date(draftConfig.updatedAt).toLocaleString()}</p>
           </div>
         </div>
