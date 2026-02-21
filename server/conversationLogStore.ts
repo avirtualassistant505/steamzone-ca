@@ -1,6 +1,7 @@
 import { getSupabaseAdminClient } from './supabaseAdmin.js';
 
 export type ConversationRole = 'user' | 'assistant' | 'tool';
+export type ConversationStorageMode = 'database' | 'memory_fallback';
 
 export interface ConversationTurn {
   role: ConversationRole;
@@ -19,6 +20,8 @@ export interface ConversationSessionRecord {
 }
 
 const TABLE_NAME = 'estimate_sessions';
+const memorySessions = new Map<string, ConversationSessionRecord>();
+let storageMode: ConversationStorageMode = 'memory_fallback';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -51,18 +54,43 @@ function mapSupabaseErrorMessage(message: string): string {
   return message;
 }
 
+function shouldFallbackToMemory(message: string): boolean {
+  return isConnectivityError(message) || isMissingTableError(message);
+}
+
 function normalizeContent(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
-async function getRequiredSupabase() {
-  const supabase = await getSupabaseAdminClient();
-  if (!supabase) {
-    throw new Error(
-      'Conversation logging requires database mode. Missing SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY in environment.'
-    );
+function setStorageMode(mode: ConversationStorageMode): void {
+  storageMode = mode;
+}
+
+export function getConversationStorageMode(): ConversationStorageMode {
+  return storageMode;
+}
+
+function readMemorySession(sessionId: string): ConversationSessionRecord {
+  const existing = memorySessions.get(sessionId);
+  if (existing) {
+    return existing;
   }
-  return supabase;
+
+  const created = normalizeRow(sessionId, null);
+  memorySessions.set(sessionId, created);
+  return created;
+}
+
+function writeMemorySession(session: ConversationSessionRecord): ConversationSessionRecord {
+  const normalized = normalizeRow(session.session_id, session);
+  memorySessions.set(normalized.session_id, normalized);
+  return normalized;
+}
+
+function listMemorySessions(limit: number): ConversationSessionRecord[] {
+  return Array.from(memorySessions.values())
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+    .slice(0, limit);
 }
 
 function normalizeRow(
@@ -87,7 +115,12 @@ export async function loadConversationSession(sessionId: string): Promise<Conver
     throw new Error('session_id is required.');
   }
 
-  const supabase = await getRequiredSupabase();
+  const supabase = await getSupabaseAdminClient();
+  if (!supabase) {
+    setStorageMode('memory_fallback');
+    return readMemorySession(normalizedSessionId);
+  }
+
   try {
     const { data, error } = await supabase
       .from(TABLE_NAME)
@@ -96,23 +129,35 @@ export async function loadConversationSession(sessionId: string): Promise<Conver
       .maybeSingle();
 
     if (error) {
-      if (isMissingTableError(error.message)) {
-        throw new Error(
-          'Conversation logging table is missing. Create `estimate_sessions` in Supabase before using logs.'
-        );
+      if (shouldFallbackToMemory(error.message)) {
+        setStorageMode('memory_fallback');
+        return readMemorySession(normalizedSessionId);
       }
       throw new Error(mapSupabaseErrorMessage(error.message));
     }
 
-    return normalizeRow(normalizedSessionId, (data as Partial<ConversationSessionRecord> | null) ?? null);
+    const normalized = normalizeRow(normalizedSessionId, (data as Partial<ConversationSessionRecord> | null) ?? null);
+    writeMemorySession(normalized);
+    setStorageMode('database');
+    return normalized;
   } catch (error) {
+    const message = error instanceof Error ? error.message : 'Supabase request failed.';
+    if (shouldFallbackToMemory(message)) {
+      setStorageMode('memory_fallback');
+      return readMemorySession(normalizedSessionId);
+    }
+
     throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
   }
 }
 
 export async function listConversationSessions(limit = 100): Promise<ConversationSessionRecord[]> {
   const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.round(limit))) : 100;
-  const supabase = await getRequiredSupabase();
+  const supabase = await getSupabaseAdminClient();
+  if (!supabase) {
+    setStorageMode('memory_fallback');
+    return listMemorySessions(normalizedLimit);
+  }
 
   try {
     const { data, error } = await supabase
@@ -122,22 +167,33 @@ export async function listConversationSessions(limit = 100): Promise<Conversatio
       .limit(normalizedLimit);
 
     if (error) {
-      if (isMissingTableError(error.message)) {
-        throw new Error(
-          'Conversation logging table is missing. Create `estimate_sessions` in Supabase before using logs.'
-        );
+      if (shouldFallbackToMemory(error.message)) {
+        setStorageMode('memory_fallback');
+        return listMemorySessions(normalizedLimit);
       }
       throw new Error(mapSupabaseErrorMessage(error.message));
     }
 
     if (!Array.isArray(data)) {
+      setStorageMode('database');
       return [];
     }
 
-    return data.map((row) =>
+    const rows = data.map((row) =>
       normalizeRow(String((row as { session_id?: string }).session_id ?? ''), row as Partial<ConversationSessionRecord>)
     );
+    rows.forEach((row) => {
+      writeMemorySession(row);
+    });
+    setStorageMode('database');
+    return rows;
   } catch (error) {
+    const message = error instanceof Error ? error.message : 'Supabase request failed.';
+    if (shouldFallbackToMemory(message)) {
+      setStorageMode('memory_fallback');
+      return listMemorySessions(normalizedLimit);
+    }
+
     throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
   }
 }
@@ -178,7 +234,12 @@ export async function appendConversationTurn(
     created_at: session.created_at || updatedAt,
   };
 
-  const supabase = await getRequiredSupabase();
+  const supabase = await getSupabaseAdminClient();
+  if (!supabase || getConversationStorageMode() === 'memory_fallback') {
+    setStorageMode('memory_fallback');
+    return writeMemorySession(next);
+  }
+
   try {
     const { error } = await supabase.from(TABLE_NAME).upsert(
       {
@@ -194,14 +255,21 @@ export async function appendConversationTurn(
     );
 
     if (error) {
-      if (isMissingTableError(error.message)) {
-        throw new Error(
-          'Conversation logging table is missing. Create `estimate_sessions` in Supabase before using logs.'
-        );
+      if (shouldFallbackToMemory(error.message)) {
+        setStorageMode('memory_fallback');
+        return writeMemorySession(next);
       }
       throw new Error(mapSupabaseErrorMessage(error.message));
     }
+
+    writeMemorySession(next);
+    setStorageMode('database');
   } catch (error) {
+    const message = error instanceof Error ? error.message : 'Supabase request failed.';
+    if (shouldFallbackToMemory(message)) {
+      setStorageMode('memory_fallback');
+      return writeMemorySession(next);
+    }
     throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
   }
 

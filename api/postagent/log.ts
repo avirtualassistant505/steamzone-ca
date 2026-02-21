@@ -82,12 +82,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   const line = withChannelAndMetadata(content, channel, payload.metadata);
 
   try {
-    const { appendConversationTurn } = await import('../../server/conversationLogStore.js');
+    const { appendConversationTurn, getConversationStorageMode } = await import('../../server/conversationLogStore.js');
     await appendConversationTurn(sessionId, { role, content: line, at: new Date().toISOString() });
 
     res.status(200).json({
       ok: true,
-      storage_mode: 'database',
+      storage_mode: getConversationStorageMode(),
     });
   } catch (error) {
     res.status(500).json({

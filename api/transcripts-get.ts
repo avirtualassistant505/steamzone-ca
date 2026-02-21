@@ -1,4 +1,4 @@
-import { listConversationSessions, loadConversationSession } from '../server/conversationLogStore.js';
+import { getConversationStorageMode, listConversationSessions, loadConversationSession } from '../server/conversationLogStore.js';
 
 type ApiRequest = {
   method?: string;
@@ -105,8 +105,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     if (sessionId) {
       const session = await loadConversationSession(sessionId);
       const turns = toConversationTurns(session.transcript);
+      const storageMode = getConversationStorageMode();
       res.status(200).json({
-        storage_mode: 'database',
+        storage_mode: storageMode,
         session: {
           session_id: session.session_id,
           created_at: session.created_at,
@@ -121,6 +122,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     }
 
     const sessions = await listConversationSessions(limit);
+    const storageMode = getConversationStorageMode();
     const summaries = sessions
       .filter((session) => session.session_id)
       .map((session) =>
@@ -133,7 +135,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
         })
       );
 
-    res.status(200).json({ sessions: summaries, storage_mode: 'database' });
+    res.status(200).json({ sessions: summaries, storage_mode: storageMode });
   } catch (error) {
     res.status(500).json({
       message: error instanceof Error ? error.message : 'Unable to load conversation transcripts.',
