@@ -51,7 +51,13 @@ interface AgentResponse {
 }
 
 const SESSION_STORAGE_KEY = 'steamzone_estimate_bot_lab_session_id';
-const WARM_OPENER = 'Hi, how are you? What can I help you with today?';
+const WARM_OPENER = 'Hello';
+
+const ESTIMATE_INTENT_REGEX = /\b(estimate|quote|pricing|price|cost|book|booking|schedule|appointment)\b/i;
+
+function hasEstimateIntent(input: string): boolean {
+  return ESTIMATE_INTENT_REGEX.test(input);
+}
 
 function newMessageId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -101,6 +107,8 @@ export default function EstimateBotLabPage() {
   const [hint, setHint] = useState<InputUiHint | null>(null);
   const [lastQuestionText, setLastQuestionText] = useState('');
   const [copyStatus, setCopyStatus] = useState('');
+  const [hasUserTurn, setHasUserTurn] = useState(false);
+  const [estimateEngaged, setEstimateEngaged] = useState(false);
   const endRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -118,6 +126,10 @@ export default function EstimateBotLabPage() {
 
     if (!options?.silentUserBubble && trimmed) {
       setMessages((prev) => [...prev, { id: newMessageId(), role: 'user', content: trimmed }]);
+      setHasUserTurn(true);
+      if (hasEstimateIntent(trimmed)) {
+        setEstimateEngaged(true);
+      }
     }
 
     try {
@@ -143,6 +155,9 @@ export default function EstimateBotLabPage() {
       setDone(Boolean(payload.done));
       setHint(payload.next_question?.input_ui_hint ?? null);
       setLastQuestionText(payload.next_question?.question_text ?? '');
+      if (payload.state?.answers?.serviceType || payload.done || payload.quote) {
+        setEstimateEngaged(true);
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unable to reach estimate agent.');
     } finally {
@@ -178,6 +193,8 @@ export default function EstimateBotLabPage() {
     setHint(null);
     setLastQuestionText('');
     setCopyStatus('');
+    setHasUserTurn(false);
+    setEstimateEngaged(false);
   }
 
   async function copyQuoteSummary(): Promise<void> {
@@ -214,7 +231,7 @@ export default function EstimateBotLabPage() {
   }
 
   const quickActions = useMemo(() => {
-    if (!hint || isBusy || done) return [] as Array<{ label: string; value: string }>;
+    if (!hint || isBusy || done || !estimateEngaged) return [] as Array<{ label: string; value: string }>;
 
     if (hint.type === 'boolean') {
       return [
@@ -228,7 +245,11 @@ export default function EstimateBotLabPage() {
     }
 
     return [] as Array<{ label: string; value: string }>;
-  }, [done, hint, isBusy]);
+  }, [done, estimateEngaged, hint, isBusy]);
+
+  const showPrompt = hasUserTurn && estimateEngaged && !done && Boolean(lastQuestionText);
+  const inputPlaceholder = estimateEngaged ? hint?.placeholder ?? 'Type your answer...' : 'Ask a question or request an estimate...';
+  const statusLabel = done ? 'Complete' : estimateEngaged ? 'Collecting estimate details' : 'Waiting for your question';
 
   return (
     <main className="bg-gradient-to-br from-slate-50 via-cyan-50 to-white pb-20 pt-28">
@@ -286,7 +307,7 @@ export default function EstimateBotLabPage() {
               <div ref={endRef} />
             </div>
 
-            {lastQuestionText && !done && (
+            {showPrompt && (
               <p className="mt-3 text-xs text-gray-600">Current prompt: {lastQuestionText}</p>
             )}
 
@@ -312,7 +333,7 @@ export default function EstimateBotLabPage() {
               <input
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
-                placeholder={hint?.placeholder ?? 'Type your answer...'}
+                placeholder={inputPlaceholder}
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-cyan-600 focus:outline-none focus:ring-2 focus:ring-cyan-200"
                 disabled={isBusy}
               />
@@ -336,7 +357,7 @@ export default function EstimateBotLabPage() {
 
             <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
               <h2 className="text-base font-semibold text-gray-900">Status</h2>
-              <p className="mt-2 text-sm text-gray-700">{done ? 'Complete' : 'Collecting details'}</p>
+              <p className="mt-2 text-sm text-gray-700">{statusLabel}</p>
               {copyStatus && <p className="mt-2 text-xs text-cyan-700">{copyStatus}</p>}
             </div>
 
