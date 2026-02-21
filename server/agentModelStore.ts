@@ -69,6 +69,19 @@ function isMissingColumnError(message: string, column: string): boolean {
   return text.includes(column) && (text.includes('does not exist') || text.includes('unknown column') || text.includes('could not find'));
 }
 
+function isTransientSupabaseError(message: string): boolean {
+  const text = message.toLowerCase();
+  return (
+    text.includes('fetch failed') ||
+    text.includes('networkerror') ||
+    text.includes('socket hang up') ||
+    text.includes('failed to fetch') ||
+    text.includes('econnreset') ||
+    text.includes('econnrefused') ||
+    text.includes('timeout')
+  );
+}
+
 function modelAllowed(raw: string): boolean {
   const normalized = normalizeModel(raw).toLowerCase();
   return AGENT_MODEL_OPTIONS.some((option) => option.value.toLowerCase() === normalized);
@@ -158,6 +171,9 @@ async function loadFromSupabase(selectColumns: string): Promise<ModelPayload | n
     if (error instanceof Error && (isMissingTableError(error.message) || isMissingColumnError(error.message, 'voice_model'))) {
       return null;
     }
+    if (error instanceof Error && isTransientSupabaseError(error.message)) {
+      return null;
+    }
 
     throw error;
   }
@@ -199,29 +215,44 @@ async function upsertModelPayload(payload: Pick<ModelPayload, 'model' | 'voiceMo
   }
 
   const { error } = await supabase.from(TABLE_NAME).upsert(base, { onConflict: 'id' });
-  if (error) {
-    if (isMissingTableError(error.message)) {
+  try {
+    if (error) {
+      if (isMissingTableError(error.message) || isTransientSupabaseError(error.message)) {
+        memory.source = 'fallback';
+        return;
+      }
+
+      throw new Error(error.message);
+    }
+
+    memory.source = 'db';
+  } catch (error) {
+    if (error instanceof Error && isTransientSupabaseError(error.message)) {
       memory.source = 'fallback';
       return;
     }
-
-    throw new Error(error.message);
+    throw error;
   }
-
-  memory.source = 'db';
 }
 
 async function loadAgentModelConfigFromDb(): Promise<ModelPayload | null> {
-  const withVoice = await loadFromSupabase('model, voice_model, updated_at');
-  if (withVoice) return withVoice;
+  try {
+    const withVoice = await loadFromSupabase('model, voice_model, updated_at');
+    if (withVoice) return withVoice;
 
-  const legacy = await loadFromSupabase('model, updated_at');
-  if (!legacy) return null;
+    const legacy = await loadFromSupabase('model, updated_at');
+    if (!legacy) return null;
 
-  return {
-    ...legacy,
-    voiceModel: AGENT_DEFAULT_VOICE_MODEL,
-  };
+    return {
+      ...legacy,
+      voiceModel: AGENT_DEFAULT_VOICE_MODEL,
+    };
+  } catch (error) {
+    if (error instanceof Error && isTransientSupabaseError(error.message)) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 export async function getAgentModelConfig(): Promise<ModelPayload> {
@@ -262,11 +293,22 @@ export async function setAgentModelConfig(modelOrPayload: string | AgentModelUpd
   memory.updatedAt = new Date().toISOString();
   memory.loadedAt = Date.now();
 
-  await upsertModelPayload({
-    model: memory.model,
-    voiceModel: safeVoiceModel,
-    updatedAt: memory.updatedAt,
-  }, true);
+  try {
+    await upsertModelPayload(
+      {
+        model: memory.model,
+        voiceModel: safeVoiceModel,
+        updatedAt: memory.updatedAt,
+      },
+      true
+    );
+  } catch (error) {
+    if (error instanceof Error && isTransientSupabaseError(error.message)) {
+      memory.source = 'fallback';
+      return payloadFromMemory();
+    }
+    throw error;
+  }
 
   return payloadFromMemory();
 }
