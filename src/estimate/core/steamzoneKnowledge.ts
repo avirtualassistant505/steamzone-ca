@@ -1,6 +1,6 @@
 import trainingData from '../../../GHL/steamzone.ca/data/training/steamzone_master_training_merged_2026-02-09T16-22-36-339Z.json' with { type: 'json' };
-import { loadActiveTrainingItems } from '../../../server/trainingDataStore';
-import type { TrainingItem } from '../../../server/trainingDataStore';
+import { loadActiveTrainingItems } from '../../../server/trainingDataStore.js';
+import type { TrainingItem } from '../../../server/trainingDataStore.js';
 
 type RawTrainingItem = {
   question?: string;
