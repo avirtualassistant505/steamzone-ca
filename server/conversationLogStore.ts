@@ -32,6 +32,25 @@ function isMissingTableError(message: string): boolean {
   );
 }
 
+function isConnectivityError(message: string): boolean {
+  const text = message.toLowerCase();
+  return (
+    text.includes('fetch failed') ||
+    text.includes('enotfound') ||
+    text.includes('econnrefused') ||
+    text.includes('network') ||
+    text.includes('failed to fetch')
+  );
+}
+
+function mapSupabaseErrorMessage(message: string): string {
+  if (isConnectivityError(message)) {
+    return 'Supabase connection failed. Verify SUPABASE_URL points to an active project and SUPABASE_SERVICE_ROLE_KEY matches that same project.';
+  }
+
+  return message;
+}
+
 function normalizeContent(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
@@ -69,48 +88,58 @@ export async function loadConversationSession(sessionId: string): Promise<Conver
   }
 
   const supabase = await getRequiredSupabase();
-  const { data, error } = await supabase
-    .from(TABLE_NAME)
-    .select('session_id, answers, asked_keys, transcript, last_question_key, created_at, updated_at')
-    .eq('session_id', normalizedSessionId)
-    .maybeSingle();
+  try {
+    const { data, error } = await supabase
+      .from(TABLE_NAME)
+      .select('session_id, answers, asked_keys, transcript, last_question_key, created_at, updated_at')
+      .eq('session_id', normalizedSessionId)
+      .maybeSingle();
 
-  if (error) {
-    if (isMissingTableError(error.message)) {
-      throw new Error(
-        'Conversation logging table is missing. Create `estimate_sessions` in Supabase before using logs.'
-      );
+    if (error) {
+      if (isMissingTableError(error.message)) {
+        throw new Error(
+          'Conversation logging table is missing. Create `estimate_sessions` in Supabase before using logs.'
+        );
+      }
+      throw new Error(mapSupabaseErrorMessage(error.message));
     }
-    throw new Error(error.message);
-  }
 
-  return normalizeRow(normalizedSessionId, (data as Partial<ConversationSessionRecord> | null) ?? null);
+    return normalizeRow(normalizedSessionId, (data as Partial<ConversationSessionRecord> | null) ?? null);
+  } catch (error) {
+    throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
+  }
 }
 
 export async function listConversationSessions(limit = 100): Promise<ConversationSessionRecord[]> {
   const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.round(limit))) : 100;
   const supabase = await getRequiredSupabase();
 
-  const { data, error } = await supabase
-    .from(TABLE_NAME)
-    .select('session_id, answers, asked_keys, transcript, last_question_key, created_at, updated_at')
-    .order('updated_at', { ascending: false })
-    .limit(normalizedLimit);
+  try {
+    const { data, error } = await supabase
+      .from(TABLE_NAME)
+      .select('session_id, answers, asked_keys, transcript, last_question_key, created_at, updated_at')
+      .order('updated_at', { ascending: false })
+      .limit(normalizedLimit);
 
-  if (error) {
-    if (isMissingTableError(error.message)) {
-      throw new Error(
-        'Conversation logging table is missing. Create `estimate_sessions` in Supabase before using logs.'
-      );
+    if (error) {
+      if (isMissingTableError(error.message)) {
+        throw new Error(
+          'Conversation logging table is missing. Create `estimate_sessions` in Supabase before using logs.'
+        );
+      }
+      throw new Error(mapSupabaseErrorMessage(error.message));
     }
-    throw new Error(error.message);
-  }
 
-  if (!Array.isArray(data)) {
-    return [];
-  }
+    if (!Array.isArray(data)) {
+      return [];
+    }
 
-  return data.map((row) => normalizeRow(String((row as { session_id?: string }).session_id ?? ''), row as Partial<ConversationSessionRecord>));
+    return data.map((row) =>
+      normalizeRow(String((row as { session_id?: string }).session_id ?? ''), row as Partial<ConversationSessionRecord>)
+    );
+  } catch (error) {
+    throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
+  }
 }
 
 export async function appendConversationTurn(
@@ -150,28 +179,31 @@ export async function appendConversationTurn(
   };
 
   const supabase = await getRequiredSupabase();
-  const { error } = await supabase.from(TABLE_NAME).upsert(
-    {
-      session_id: next.session_id,
-      answers: next.answers,
-      asked_keys: next.asked_keys,
-      transcript: next.transcript,
-      last_question_key: next.last_question_key,
-      created_at: next.created_at,
-      updated_at: next.updated_at,
-    },
-    { onConflict: 'session_id' }
-  );
+  try {
+    const { error } = await supabase.from(TABLE_NAME).upsert(
+      {
+        session_id: next.session_id,
+        answers: next.answers,
+        asked_keys: next.asked_keys,
+        transcript: next.transcript,
+        last_question_key: next.last_question_key,
+        created_at: next.created_at,
+        updated_at: next.updated_at,
+      },
+      { onConflict: 'session_id' }
+    );
 
-  if (error) {
-    if (isMissingTableError(error.message)) {
-      throw new Error(
-        'Conversation logging table is missing. Create `estimate_sessions` in Supabase before using logs.'
-      );
+    if (error) {
+      if (isMissingTableError(error.message)) {
+        throw new Error(
+          'Conversation logging table is missing. Create `estimate_sessions` in Supabase before using logs.'
+        );
+      }
+      throw new Error(mapSupabaseErrorMessage(error.message));
     }
-    throw new Error(error.message);
+  } catch (error) {
+    throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
   }
 
   return next;
 }
-
