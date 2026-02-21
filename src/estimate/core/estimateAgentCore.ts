@@ -18,6 +18,7 @@ import {
   type AgentModelOption,
 } from './agentModelConfig.js';
 import { getAgentModelConfig as getStoredAgentModelConfig } from '../../../server/agentModelStore.js';
+import { DEFAULT_AGENT_SYSTEM_PROMPT, getAgentSystemPromptConfig } from '../../../server/agentPromptStore.js';
 
 export type PostagentChannel = 'web' | 'voice' | 'sms' | 'test';
 
@@ -290,28 +291,7 @@ const TOOL_DEFS = [
   },
 ] as const;
 
-const CORE_PROMPT_PREFIX = [
-  'You are a human-like Steam Zone customer service representative handling chat/voice/sms conversations.',
-  'Your first job is to help with customer questions naturally. Estimate collection is secondary unless the customer asks for a quote.',
-  'Collect estimate answers to match the schema and compute quotes deterministically only with tools.',
-  'Only start with a warm opener on a brand-new conversation. Do not repeat greetings after the first assistant turn.',
-  'When users ask service/business questions, use FAQ/training data first before answering.',
-  'If the answer is not clearly available in FAQ/training data, do not guess. Offer a team follow-up by call/text/email.',
-  'Rules:',
-  '- Use tool calling for state, FAQ search, normalization, validation, next question, and quote.',
-  '- Sound like a real Steam Zone rep: concise, friendly, direct.',
-  '- Default to English unless the customer explicitly asks for another language.',
-  '- Never invent quote values or pricing. Only use compute_quote output.',
-  '- Never invent business facts that are not in FAQ/training data.',
-  '- Ask exactly one question per message. Never ask two questions in the same turn.',
-  '- If a response will take a few seconds, first send a short hold line like "One moment while I check that for you."',
-  '- Respect user intent: answer their question first, then offer estimate help if relevant.',
-  '- If input contains multiple independent answers, call normalize_and_validate for each one.',
-  '- If a user correction is made (e.g., "actually 12"), update the previously answered field.',
-  '- If input is ambiguous or invalid, call normalize_and_validate and follow the clarification question.',
-  '- If enough required data exists, call compute_quote and present the returned number.',
-  '- Do not output raw JSON tool calls in plain text.',
-].join('\n');
+const CORE_PROMPT_PREFIX = DEFAULT_AGENT_SYSTEM_PROMPT;
 
 const DEFAULT_USER_START = 'Hi, how are you? What can I help you with today?';
 
@@ -564,7 +544,8 @@ function buildInstructionContext(
   channel: PostagentChannel | undefined,
   session: SessionRecord,
   inputText: string,
-  faqMatches: KnowledgeMatch[]
+  faqMatches: KnowledgeMatch[],
+  systemPrompt: string
 ): string {
   const channelText = channel ? `Input channel: ${channel}.` : 'Input channel: web.';
   const channelGuidance =
@@ -578,7 +559,7 @@ function buildInstructionContext(
   const askedKeys = (session.asked_keys ?? []).join(', ') || '(none)';
 
   return [
-    CORE_PROMPT_PREFIX,
+    systemPrompt || CORE_PROMPT_PREFIX,
     channelText,
     channelGuidance,
     'Session Context:',
@@ -1070,13 +1051,14 @@ async function maybeComputeQuote(
   return runtime.toolComputeQuote(sessionId);
 }
 
-function instructionsForContext(
+async function instructionsForContext(
   channel: PostagentChannel | undefined,
   session: SessionRecord,
   inputText: string,
-  faqMatches: KnowledgeMatch[]
-): string {
-  return buildInstructionContext(channel, session, inputText, faqMatches);
+  faqMatches: KnowledgeMatch[],
+  systemPrompt: string
+): Promise<string> {
+  return buildInstructionContext(channel, session, inputText, faqMatches, systemPrompt);
 }
 
 async function runAgentLoop(
@@ -1087,6 +1069,8 @@ async function runAgentLoop(
   channel?: PostagentChannel
 ): Promise<{ assistant_message: string; quote: unknown; next_hint: NextHint; done: boolean }> {
   let sessionContext = await runtime.toolGetState(sessionId);
+  const promptConfig = await getAgentSystemPromptConfig();
+  const systemPrompt = promptConfig.prompt || CORE_PROMPT_PREFIX;
   const faqMatches = await searchSteamZoneKnowledgeAsync(inputText, 3);
   const hadPriorAssistantTurn = Boolean(
     sessionContext.transcript?.some((entry) => asRecord(entry)?.role === 'assistant')
@@ -1094,7 +1078,7 @@ async function runAgentLoop(
 
   let response = await callOpenAIWithFallback(modelConfig, {
     model: modelConfig.model,
-    instructions: instructionsForContext(channel, sessionContext, inputText, faqMatches),
+    instructions: await instructionsForContext(channel, sessionContext, inputText, faqMatches, systemPrompt),
     input: [
       {
         role: 'user',
@@ -1130,7 +1114,7 @@ async function runAgentLoop(
 
       response = await callOpenAIWithFallback(modelConfig, {
         model: modelConfig.model,
-        instructions: instructionsForContext(channel, sessionContext, inputText, faqMatches),
+        instructions: await instructionsForContext(channel, sessionContext, inputText, faqMatches, systemPrompt),
         previous_response_id: response.id,
         input: outputs,
         tools: TOOL_DEFS,

@@ -43,6 +43,14 @@ interface AgentModelResponse {
   available_voice_models?: AgentModelOption[];
 }
 
+interface AgentPromptResponse {
+  prompt: string;
+  source: 'db' | 'fallback';
+  updatedAt?: string;
+  message?: string;
+  defaultPrompt?: string;
+}
+
 type TrainingGetPayload = {
   items?: Array<unknown>;
   source?: 'db' | 'fallback';
@@ -70,6 +78,8 @@ type ConversationSummary = {
   channels: string[];
   preview: string;
   last_question_key: string | null;
+  review_status: 'processed' | 'unprocessed';
+  review_notes: string;
 };
 
 type ConversationTurn = {
@@ -86,12 +96,22 @@ type ConversationDetail = {
   answers: Record<string, unknown>;
   asked_keys: string[];
   last_question_key: string | null;
+  review_status: 'processed' | 'unprocessed';
+  review_notes: string;
   transcript: ConversationTurn[];
 };
 
 type TranscriptGetPayload = {
   sessions?: ConversationSummary[];
   session?: ConversationDetail;
+  storage_mode?: 'database' | 'memory_fallback';
+  message?: string;
+};
+
+type TranscriptUpdatePayload = {
+  session_id: string;
+  review_status: 'processed' | 'unprocessed';
+  review_notes?: string;
   storage_mode?: 'database' | 'memory_fallback';
   message?: string;
 };
@@ -124,6 +144,8 @@ function parsePayloadError<T>(result: SafeJsonResult<T>): string {
 const STORAGE_KEY = 'steamzone_training_admin_tab';
 
 const cardClass = 'rounded-2xl border border-gray-200 bg-white p-6 shadow-sm';
+const PROMPT_FALLBACK =
+  'You can add your shared system prompt instructions here to control tone, style, and behavior for both web and voice estimate agents.';
 
 function NumberField({
   label,
@@ -184,6 +206,12 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [agentModelLoading, setAgentModelLoading] = useState(false);
   const [agentModelSaving, setAgentModelSaving] = useState(false);
   const [agentModelMessage, setAgentModelMessage] = useState('');
+  const [agentPrompt, setAgentPrompt] = useState('');
+  const [agentPromptSource, setAgentPromptSource] = useState<'db' | 'fallback'>('fallback');
+  const [agentPromptUpdatedAt, setAgentPromptUpdatedAt] = useState('');
+  const [agentPromptLoading, setAgentPromptLoading] = useState(false);
+  const [agentPromptSaving, setAgentPromptSaving] = useState(false);
+  const [agentPromptMessage, setAgentPromptMessage] = useState('');
   const [records] = useState<EstimateRecord[]>([]);
   const [trainingItems, setTrainingItems] = useState<TrainingItem[]>([]);
   const [trainingSource, setTrainingSource] = useState('fallback');
@@ -195,10 +223,14 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
   const [conversationLoading, setConversationLoading] = useState(false);
   const [conversationError, setConversationError] = useState('');
+  const [conversationMessage, setConversationMessage] = useState('');
   const [conversationLoaded, setConversationLoaded] = useState(false);
+  const [conversationStatusFilter, setConversationStatusFilter] = useState<'all' | 'processed' | 'unprocessed'>('unprocessed');
   const [conversationStorageMode, setConversationStorageMode] = useState<'database' | 'memory_fallback' | ''>('');
   const [selectedConversationId, setSelectedConversationId] = useState('');
   const [selectedConversation, setSelectedConversation] = useState<ConversationDetail | null>(null);
+  const [reviewStatusDraft, setReviewStatusDraft] = useState<'processed' | 'unprocessed'>('unprocessed');
+  const [reviewNotesDraft, setReviewNotesDraft] = useState('');
   const [conversationDetailLoading, setConversationDetailLoading] = useState(false);
   const [supabaseDiagLoading, setSupabaseDiagLoading] = useState(false);
   const [supabaseDiagError, setSupabaseDiagError] = useState('');
@@ -224,33 +256,55 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     async function loadModelConfig(): Promise<void> {
       setAgentModelLoading(true);
       setAgentModelMessage('');
+      setAgentPromptLoading(true);
+      setAgentPromptMessage('');
 
       try {
-        const response = await parseJsonResponse<AgentModelResponse>(await fetch('/api/agent-model'));
-        const payload = response.payload;
+        const [modelResponse, promptResponse] = await Promise.all([
+          parseJsonResponse<AgentModelResponse>(await fetch('/api/agent-model')),
+          parseJsonResponse<AgentPromptResponse>(await fetch('/api/agent-prompt')),
+        ]);
 
-        if (!response.ok || !payload?.model) {
-          setAgentModelMessage(payload?.message ?? parsePayloadError(response));
+        const modelPayload = modelResponse.payload;
+        const promptPayload = promptResponse.payload;
+
+        if (!modelResponse.ok || !modelPayload?.model) {
+          setAgentModelMessage(modelPayload?.message ?? parsePayloadError(modelResponse));
           return;
         }
 
-        setAgentModel(payload.model);
-        setAgentVoiceModel(payload.voice_model ?? AGENT_DEFAULT_VOICE_MODEL);
+        setAgentModel(modelPayload.model);
+        setAgentVoiceModel(modelPayload.voice_model ?? AGENT_DEFAULT_VOICE_MODEL);
         setAgentModelOptions(
-          Array.isArray(payload.available_models) && payload.available_models.length > 0 ? payload.available_models : AGENT_MODEL_OPTIONS
+          Array.isArray(modelPayload.available_models) && modelPayload.available_models.length > 0 ? modelPayload.available_models : AGENT_MODEL_OPTIONS
         );
         setAgentVoiceModelOptions(
-          Array.isArray(payload.available_voice_models) && payload.available_voice_models.length > 0
-            ? payload.available_voice_models
+          Array.isArray(modelPayload.available_voice_models) && modelPayload.available_voice_models.length > 0
+            ? modelPayload.available_voice_models
             : AGENT_VOICE_MODEL_OPTIONS
         );
-        setAgentModelSource(payload.source ?? 'fallback');
-        setAgentModelUpdatedAt(payload.updatedAt ?? '');
-        setAgentModelMessage(payload.message ?? `Loaded model ${payload.model}.`);
+        setAgentModelSource(modelPayload.source ?? 'fallback');
+        setAgentModelUpdatedAt(modelPayload.updatedAt ?? '');
+        setAgentModelMessage(modelPayload.message ?? `Loaded model ${modelPayload.model}.`);
+
+        if (!promptResponse.ok || !promptPayload?.prompt) {
+          setAgentPrompt(PROMPT_FALLBACK);
+          setAgentPromptSource(promptPayload?.source ?? 'fallback');
+          setAgentPromptUpdatedAt(promptPayload?.updatedAt ?? '');
+          setAgentPromptMessage(promptPayload?.message ?? parsePayloadError(promptResponse));
+          return;
+        }
+
+        setAgentPrompt(promptPayload.prompt);
+        setAgentPromptSource(promptPayload.source ?? 'fallback');
+        setAgentPromptUpdatedAt(promptPayload.updatedAt ?? '');
+        setAgentPromptMessage(promptPayload.message ?? `Loaded prompt ${promptPayload.source === 'db' ? 'from DB' : 'from fallback'}.`);
       } catch {
         setAgentModelMessage('Unable to reach /api/agent-model. Ensure endpoint is deployed.');
+        setAgentPromptMessage('Unable to reach /api/agent-prompt. Ensure endpoint is deployed.');
       } finally {
         setAgentModelLoading(false);
+        setAgentPromptLoading(false);
       }
     }
 
@@ -329,9 +383,13 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   async function loadConversationData(): Promise<void> {
     setConversationLoading(true);
     setConversationError('');
+    setConversationMessage('');
 
     try {
-      const response = await parseJsonResponse<TranscriptGetPayload>(await fetch('/api/transcripts-get?limit=100'));
+      const statusQuery = conversationStatusFilter === 'all' ? '' : `&status=${conversationStatusFilter}`;
+      const response = await parseJsonResponse<TranscriptGetPayload>(
+        await fetch(`/api/transcripts-get?limit=100${statusQuery}`)
+      );
       const payload = response.payload;
 
       if (!response.ok || !payload) {
@@ -344,7 +402,8 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       setConversationStorageMode(payload.storage_mode ?? '');
       setConversationLoaded(true);
 
-      if (summaries.length > 0 && !selectedConversationId) {
+      const shouldLoadFirst = summaries.length > 0 && (!selectedConversationId || !summaries.some((item) => item.session_id === selectedConversationId));
+      if (shouldLoadFirst) {
         const first = summaries[0].session_id;
         if (first) {
           setSelectedConversationId(first);
@@ -364,6 +423,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
     setConversationDetailLoading(true);
     setConversationError('');
+    setConversationMessage('');
     try {
       const encoded = encodeURIComponent(normalized);
       const response = await parseJsonResponse<TranscriptGetPayload>(await fetch(`/api/transcripts-get?session_id=${encoded}`));
@@ -376,6 +436,8 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
       setSelectedConversation(payload.session);
       setSelectedConversationId(normalized);
+      setReviewStatusDraft(payload.session.review_status || 'unprocessed');
+      setReviewNotesDraft(payload.session.review_notes || '');
     } catch {
       setConversationError('Unable to load conversation detail.');
     } finally {
@@ -402,6 +464,81 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       setSupabaseDiagError('Unable to run Supabase diagnostics. Ensure /api/supabase-diagnostics is deployed.');
     } finally {
       setSupabaseDiagLoading(false);
+    }
+  }
+
+  async function saveConversationReviewState(): Promise<void> {
+    if (!selectedConversationId) {
+      setConversationError('Select a conversation before saving review notes.');
+      return;
+    }
+
+    const notesChanged = selectedConversation?.review_notes !== reviewNotesDraft;
+    const statusChanged = selectedConversation?.review_status !== reviewStatusDraft;
+    const payload: {
+      session_id: string;
+      review_status: 'processed' | 'unprocessed';
+      review_notes?: string;
+    } = {
+      session_id: selectedConversationId,
+      review_status: reviewStatusDraft,
+    };
+
+    if (notesChanged) {
+      payload.review_notes = reviewNotesDraft;
+    }
+    if (!notesChanged && !statusChanged) {
+      setConversationMessage('No changes to save.');
+      return;
+    }
+
+    setConversationDetailLoading(true);
+    setConversationError('');
+    setConversationMessage('');
+    try {
+      const response = await parseJsonResponse<TranscriptUpdatePayload>(await fetch('/api/transcripts-update', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      }));
+      const responsePayload = response.payload;
+
+      if (!response.ok || !responsePayload) {
+        setConversationError(responsePayload?.message ?? parsePayloadError(response));
+        return;
+      }
+
+      setConversationStorageMode(responsePayload.storage_mode ?? conversationStorageMode);
+      setSelectedConversation((previous) =>
+        previous
+          ? {
+              ...previous,
+              review_status: responsePayload.review_status,
+              review_notes: responsePayload.review_notes ?? previous.review_notes,
+            }
+          : previous
+      );
+      setReviewStatusDraft(responsePayload.review_status);
+      setReviewNotesDraft(responsePayload.review_notes ?? reviewNotesDraft);
+      setConversationMessage('Review notes and status saved.');
+      setConversationSummaries((previous) =>
+        previous.map((item) =>
+          item.session_id === responsePayload.session_id
+            ? {
+                ...item,
+                review_status: responsePayload.review_status,
+                review_notes: responsePayload.review_notes ?? item.review_notes,
+              }
+            : item
+        )
+      );
+      setConversationError('');
+    } catch {
+      setConversationError('Unable to save review state for this session.');
+    } finally {
+      setConversationDetailLoading(false);
     }
   }
 
@@ -570,6 +707,44 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     }
   }
 
+  async function saveAgentPrompt(): Promise<void> {
+    const promptToSave = agentPrompt.trim();
+    if (!promptToSave) {
+      setAgentPromptMessage('Prompt text is required.');
+      return;
+    }
+
+    setAgentPromptSaving(true);
+    setAgentPromptMessage('Saving agent prompt...');
+
+    try {
+      const response = await parseJsonResponse<AgentPromptResponse>(
+        await fetch('/api/agent-prompt', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ prompt: promptToSave }),
+        })
+      );
+      const payload = response.payload;
+
+      if (!response.ok || !payload?.prompt) {
+        setAgentPromptMessage(payload?.message ?? parsePayloadError(response));
+        return;
+      }
+
+      setAgentPrompt(payload.prompt);
+      setAgentPromptSource(payload.source ?? 'fallback');
+      setAgentPromptUpdatedAt(payload.updatedAt ?? '');
+      setAgentPromptMessage(payload.message ?? 'Agent prompt saved. Active for next chat turns.');
+    } catch {
+      setAgentPromptMessage('Unable to reach /api/agent-prompt.');
+    } finally {
+      setAgentPromptSaving(false);
+    }
+  }
+
   useEffect(() => {
     if (activeTab === 'training' && !trainingLoaded && !trainingLoading) {
       void loadTrainingData();
@@ -578,6 +753,12 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       void loadConversationData();
     }
   }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab === 'logs' && conversationLoaded) {
+      void loadConversationData();
+    }
+  }, [activeTab, conversationStatusFilter]);
 
   const latestRecords = useMemo(() => records.slice(0, 15), [records]);
 
@@ -715,6 +896,41 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
           {agentModelMessage && (
             <p className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">{agentModelMessage}</p>
           )}
+
+          <div className="mt-8 border-t border-gray-200 pt-6">
+            <h3 className="text-lg font-semibold text-gray-900">AI Agent Instructions Prompt</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              This prompt is shared by all text and voice agents. Edit it to adjust tone, flow, and behavior.
+            </p>
+            <p className="mt-2 text-sm text-gray-500">
+              Source: {agentPromptSource} {agentPromptUpdatedAt ? `• Updated ${new Date(agentPromptUpdatedAt).toLocaleString()}` : '• Not saved yet'}
+            </p>
+            <label className="mt-4 block">
+              <span className="mb-1 block text-sm font-medium text-gray-700">System prompt</span>
+              <textarea
+                value={agentPrompt}
+                onChange={(event) => setAgentPrompt(event.target.value)}
+                disabled={agentPromptLoading}
+                rows={14}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 font-mono text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                placeholder={PROMPT_FALLBACK}
+              />
+            </label>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={saveAgentPrompt}
+                disabled={agentPromptSaving || agentPromptLoading}
+                className="inline-flex items-center rounded-lg bg-blue-600 px-5 py-2.5 font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {agentPromptSaving ? 'Saving...' : 'Save Prompt'}
+              </button>
+            </div>
+
+            {agentPromptMessage && (
+              <p className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">{agentPromptMessage}</p>
+            )}
+          </div>
         </section>
 
         <div className="mt-6 flex flex-wrap gap-3">
@@ -1788,6 +2004,20 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                 </div>
 
                 <div className="flex flex-wrap gap-2">
+                  <label className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700">
+                    <span className="text-xs font-semibold">Filter</span>
+                    <select
+                      value={conversationStatusFilter}
+                      onChange={(event) =>
+                        setConversationStatusFilter(event.target.value as 'all' | 'processed' | 'unprocessed')
+                      }
+                      className="rounded border border-gray-300 px-2 py-1 text-sm"
+                    >
+                      <option value="all">All</option>
+                      <option value="unprocessed">Unprocessed</option>
+                      <option value="processed">Processed</option>
+                    </select>
+                  </label>
                   <button
                     type="button"
                     onClick={() => void loadConversationData()}
@@ -1883,6 +2113,11 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
               {conversationError && (
                 <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{conversationError}</p>
               )}
+              {conversationMessage && (
+                <p className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                  {conversationMessage}
+                </p>
+              )}
               {conversationStorageMode === 'memory_fallback' && (
                 <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
                   Logs are currently using memory fallback, not database persistence. Configure `SUPABASE_URL` and
@@ -1912,9 +2147,13 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                         <p className="mt-1 text-xs text-gray-600">
                           {item.turn_count} turns · {item.channels.join(', ') || 'unknown channel'}
                         </p>
+                        <p className="mt-1 text-xs text-gray-700">
+                          Review status: <span className="font-semibold">{item.review_status}</span>
+                        </p>
                         <p className="mt-1 text-xs text-gray-500">
                           Updated {new Date(item.updated_at).toLocaleString()}
                         </p>
+                        {item.review_notes && <p className="mt-1 text-xs text-gray-600">{item.review_notes}</p>}
                         {item.preview && <p className="mt-2 line-clamp-2 text-xs text-gray-700">{item.preview}</p>}
                       </button>
                     ))}
@@ -1937,6 +2176,43 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                         <p><span className="font-semibold">Created:</span> {new Date(selectedConversation.created_at).toLocaleString()}</p>
                         <p><span className="font-semibold">Updated:</span> {new Date(selectedConversation.updated_at).toLocaleString()}</p>
                         <p><span className="font-semibold">Last Question Key:</span> {selectedConversation.last_question_key || 'none'}</p>
+                        <div className="mt-3 grid gap-3 md:grid-cols-2">
+                          <label className="block">
+                            <span className="mb-1 block text-sm font-medium text-gray-700">Review status</span>
+                            <select
+                              value={reviewStatusDraft}
+                              onChange={(event) =>
+                                setReviewStatusDraft(event.target.value as 'processed' | 'unprocessed')
+                              }
+                              className="w-full rounded-lg border border-gray-300 px-3 py-2"
+                            >
+                              <option value="unprocessed">unprocessed</option>
+                              <option value="processed">processed</option>
+                            </select>
+                          </label>
+                          <div>
+                            <span className="mb-1 block text-sm font-medium text-gray-700">Current notes</span>
+                            <p className="rounded-lg border border-gray-200 bg-white p-2 text-xs text-gray-700">
+                              {selectedConversation.review_notes || 'No notes yet.'}
+                            </p>
+                          </div>
+                        </div>
+                        <label className="mt-3 block">
+                          <span className="mb-1 block text-sm font-medium text-gray-700">Edit review notes</span>
+                          <textarea
+                            value={reviewNotesDraft}
+                            onChange={(event) => setReviewNotesDraft(event.target.value)}
+                            rows={4}
+                            className="w-full rounded-lg border border-gray-300 px-3 py-2"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => void saveConversationReviewState()}
+                          className="mt-3 inline-flex rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"
+                        >
+                          Save Review Notes
+                        </button>
                       </div>
 
                       <div className="max-h-[500px] space-y-2 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
