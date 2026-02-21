@@ -243,26 +243,6 @@ export default function EstimateBotLabPage() {
     typeof window.speechSynthesis.speak === 'function';
   const isAudioPlaybackSupported = typeof window !== 'undefined' && typeof Audio !== 'undefined';
 
-  const voiceStatus = useMemo(() => {
-    if (!isVoiceCallActive) {
-      return isSpeechRecognitionSupported ? 'Text mode active' : 'Speech recognition unavailable';
-    }
-
-    if (isSpeaking) {
-      return 'Agent speaking...';
-    }
-
-    if (isListening) {
-      return 'Listening...';
-    }
-
-    if (isBusy) {
-      return 'Processing...';
-    }
-
-    return 'Connected, waiting';
-  }, [isBusy, isListening, isSpeaking, isVoiceCallActive, isSpeechRecognitionSupported]);
-
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, isBusy, typingTick]);
@@ -364,41 +344,6 @@ export default function EstimateBotLabPage() {
       setErrorMessage('Voice recognition could not start. Please check microphone permissions and try again.');
       setIsVoiceCallActive(false);
     }
-  }
-
-  async function startVoiceCall(): Promise<void> {
-    if (!isSpeechRecognitionSupported) {
-      setErrorMessage('Speech recognition is not available in this browser. Please use the text input instead.');
-      return;
-    }
-
-    if (isVoiceCallActive) {
-      return;
-    }
-
-    // Voice uses an isolated agent session, separate from text chat session state.
-    const isolatedVoiceSessionId = newSessionId();
-    voiceSessionIdRef.current = isolatedVoiceSessionId;
-    saveSessionId(VOICE_SESSION_STORAGE_KEY, isolatedVoiceSessionId);
-    setMessages([]);
-    setState(null);
-    setQuote(null);
-    setDone(false);
-    setHint(null);
-    setLastQuestionText('');
-    setHasUserTurn(false);
-    setEstimateEngaged(false);
-
-    setIsVoiceCallActive(true);
-    setErrorMessage('');
-
-    await sendMessage(WARM_OPENER, { silentUserBubble: true, channel: 'voice' });
-  }
-
-  function stopVoiceCall(): void {
-    setIsVoiceCallActive(false);
-    stopListening();
-    stopSpeaking();
   }
 
   async function speakText(text: string): Promise<void> {
@@ -799,23 +744,17 @@ export default function EstimateBotLabPage() {
 
               <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
                 <h2 className="text-base font-semibold text-gray-900">Mode</h2>
-                <p className="mt-2 text-sm text-gray-700">
-                  {isVoiceCallActive ? 'Test voice call mode' : 'Text chat mode'}
+                <p className="mt-2 text-sm text-gray-700">Text chat mode</p>
+                <p className="mt-1 text-xs text-gray-600">
+                  Voice has moved to a dedicated realtime page so it stays fully separate from this text session.
                 </p>
-                <p className="mt-1 text-xs text-gray-600">{voiceStatus}</p>
-
-                {isSpeechRecognitionSupported ? (
-                  <button
-                    type="button"
-                    onClick={isVoiceCallActive ? stopVoiceCall : startVoiceCall}
-                    disabled={isBusy}
-                    className="mt-3 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
-                  >
-                    {isVoiceCallActive ? 'Stop Voice Test Call' : 'Start Voice Test Call'}
-                  </button>
-                ) : (
-                  <p className="mt-2 text-xs text-rose-700">Speech recognition unavailable in this browser.</p>
-                )}
+                <p className="sr-only">Legacy speaking state: {isSpeaking ? 'speaking' : 'idle'}</p>
+                <a
+                  href="/estimate-voice-lab"
+                  className="mt-3 inline-flex w-full items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                >
+                  Open Realtime Voice Lab
+                </a>
               </div>
 
               <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">

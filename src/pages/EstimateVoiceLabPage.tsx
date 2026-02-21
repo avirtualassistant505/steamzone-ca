@@ -1,0 +1,619 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Mic, Phone, PhoneOff, RotateCcw } from 'lucide-react';
+import { parseJsonResponse } from '../lib/responseParsing';
+
+type RealtimeStatus = 'idle' | 'connecting' | 'connected' | 'error';
+type TranscriptRole = 'user' | 'assistant' | 'system';
+
+interface TranscriptEntry {
+  id: string;
+  role: TranscriptRole;
+  content: string;
+}
+
+interface PostagentResponse {
+  session_id?: string;
+  assistant_message: string;
+  done?: boolean;
+  state?: {
+    answers?: Record<string, unknown>;
+    asked_keys?: string[];
+    last_question_key?: string | null;
+  };
+}
+
+type RealtimeEventPayload = Record<string, unknown>;
+
+const VOICE_SESSION_STORAGE_KEY = 'steamzone_estimate_voice_lab_session_id';
+
+function randomId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function newSessionId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `voice-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function readVoiceSessionId(): string {
+  if (typeof window === 'undefined') return newSessionId();
+  const existing = window.localStorage.getItem(VOICE_SESSION_STORAGE_KEY)?.trim();
+  if (existing) return existing;
+  const created = newSessionId();
+  window.localStorage.setItem(VOICE_SESSION_STORAGE_KEY, created);
+  return created;
+}
+
+function saveVoiceSessionId(sessionId: string): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(VOICE_SESSION_STORAGE_KEY, sessionId);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw);
+    return asRecord(parsed) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function extractAssistantText(event: Record<string, unknown>): string {
+  const response = asRecord(event.response);
+  if (!response) return '';
+
+  const output = Array.isArray(response.output) ? response.output : [];
+  for (const item of output) {
+    const rec = asRecord(item);
+    if (!rec || asString(rec.type) !== 'message') continue;
+    const content = Array.isArray(rec.content) ? rec.content : [];
+    const chunks: string[] = [];
+    for (const chunk of content) {
+      const chunkRecord = asRecord(chunk);
+      if (!chunkRecord) continue;
+      const chunkType = asString(chunkRecord.type);
+      if (chunkType === 'output_text' || chunkType === 'text') {
+        const text = asString(chunkRecord.text).trim();
+        if (text) chunks.push(text);
+      }
+    }
+    if (chunks.length > 0) return chunks.join(' ').trim();
+  }
+
+  return '';
+}
+
+function extractFunctionCall(event: Record<string, unknown>): { callId: string; name: string; argumentsText: string } | null {
+  const type = asString(event.type);
+
+  if (type === 'response.output_item.done') {
+    const item = asRecord(event.item);
+    if (!item) return null;
+    if (asString(item.type) !== 'function_call') return null;
+    return {
+      callId: asString(item.call_id),
+      name: asString(item.name),
+      argumentsText: asString(item.arguments),
+    };
+  }
+
+  if (type === 'response.done') {
+    const response = asRecord(event.response);
+    const output = Array.isArray(response?.output) ? response?.output : [];
+    for (const entry of output) {
+      const item = asRecord(entry);
+      if (!item || asString(item.type) !== 'function_call') continue;
+      return {
+        callId: asString(item.call_id),
+        name: asString(item.name),
+        argumentsText: asString(item.arguments),
+      };
+    }
+  }
+
+  return null;
+}
+
+export default function EstimateVoiceLabPage() {
+  const [status, setStatus] = useState<RealtimeStatus>('idle');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [isListening, setIsListening] = useState(false);
+  const [sessionId, setSessionId] = useState<string>(() => readVoiceSessionId());
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  const [turnCount, setTurnCount] = useState(0);
+
+  const peerRef = useRef<RTCPeerConnection | null>(null);
+  const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const pendingToolCallsRef = useRef<Set<string>>(new Set());
+  const sessionIdRef = useRef(sessionId);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  const connectionLabel = useMemo(() => {
+    if (status === 'connecting') return 'Connecting...';
+    if (status === 'connected' && isListening) return 'Connected, listening';
+    if (status === 'connected') return 'Connected';
+    if (status === 'error') return 'Connection failed';
+    return 'Not connected';
+  }, [isListening, status]);
+
+  function appendTranscript(role: TranscriptRole, content: string): void {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+    setTranscript((prev) => [...prev, { id: randomId(), role, content: trimmed }]);
+  }
+
+  function sendRealtimeEvent(event: RealtimeEventPayload): void {
+    const channel = dataChannelRef.current;
+    if (!channel || channel.readyState !== 'open') return;
+    channel.send(JSON.stringify(event));
+  }
+
+  async function runPostagentTurn(userText: string): Promise<PostagentResponse> {
+    const response = await fetch('/api/postagent/estimate', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        session_id: sessionIdRef.current,
+        input_text: userText,
+        channel: 'voice',
+      }),
+    });
+
+    const parsed = await parseJsonResponse<PostagentResponse & { message?: string }>(response);
+    const payload = parsed.payload;
+    if (!parsed.ok || !response.ok || !payload) {
+      throw new Error(parsed.textError ?? payload?.message ?? 'Voice tool call failed.');
+    }
+
+    if (payload.session_id && payload.session_id !== sessionIdRef.current) {
+      sessionIdRef.current = payload.session_id;
+      saveVoiceSessionId(payload.session_id);
+      setSessionId(payload.session_id);
+    }
+
+    return payload;
+  }
+
+  async function handleToolCall(callId: string, name: string, argumentsText: string): Promise<void> {
+    if (!callId || pendingToolCallsRef.current.has(callId)) {
+      return;
+    }
+    pendingToolCallsRef.current.add(callId);
+
+    try {
+      const args = parseJsonObject(argumentsText);
+      const requestedSessionId = asString(args.session_id).trim();
+      if (requestedSessionId && requestedSessionId !== sessionIdRef.current) {
+        sessionIdRef.current = requestedSessionId;
+        saveVoiceSessionId(requestedSessionId);
+        setSessionId(requestedSessionId);
+      }
+
+      if (name !== 'postagent_estimate_turn') {
+        sendRealtimeEvent({
+          type: 'conversation.item.create',
+          item: {
+            type: 'function_call_output',
+            call_id: callId,
+            output: JSON.stringify({
+              ok: false,
+              message: `Unsupported tool: ${name}`,
+            }),
+          },
+        });
+        sendRealtimeEvent({ type: 'response.create' });
+        return;
+      }
+
+      const userText = asString(args.user_text).trim();
+      if (!userText) {
+        sendRealtimeEvent({
+          type: 'conversation.item.create',
+          item: {
+            type: 'function_call_output',
+            call_id: callId,
+            output: JSON.stringify({
+              ok: false,
+              message: 'Tool call requires user_text.',
+            }),
+          },
+        });
+        sendRealtimeEvent({ type: 'response.create' });
+        return;
+      }
+
+      const turn = await runPostagentTurn(userText);
+      const assistantText = asString(turn.assistant_message).trim();
+      if (assistantText) {
+        appendTranscript('assistant', assistantText);
+        setTurnCount((prev) => prev + 1);
+      }
+
+      sendRealtimeEvent({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: JSON.stringify({
+            ok: true,
+            session_id: sessionIdRef.current,
+            assistant_message: turn.assistant_message,
+            done: turn.done ?? false,
+            state: turn.state ?? null,
+          }),
+        },
+      });
+      sendRealtimeEvent({ type: 'response.create' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Tool execution failed.';
+      sendRealtimeEvent({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: JSON.stringify({
+            ok: false,
+            message,
+          }),
+        },
+      });
+      sendRealtimeEvent({ type: 'response.create' });
+      setErrorMessage(message);
+      setStatus('error');
+    } finally {
+      pendingToolCallsRef.current.delete(callId);
+    }
+  }
+
+  function stopCall(): void {
+    const dataChannel = dataChannelRef.current;
+    if (dataChannel) {
+      try {
+        dataChannel.close();
+      } catch {
+        // Ignore.
+      }
+    }
+    dataChannelRef.current = null;
+
+    const peer = peerRef.current;
+    if (peer) {
+      try {
+        peer.close();
+      } catch {
+        // Ignore.
+      }
+    }
+    peerRef.current = null;
+
+    const stream = localStreamRef.current;
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+    }
+    localStreamRef.current = null;
+
+    const remoteAudio = remoteAudioRef.current;
+    if (remoteAudio) {
+      remoteAudio.pause();
+      remoteAudio.srcObject = null;
+    }
+    remoteAudioRef.current = null;
+
+    pendingToolCallsRef.current.clear();
+    setIsListening(false);
+    if (status !== 'error') {
+      setStatus('idle');
+    }
+  }
+
+  async function startCall(): Promise<void> {
+    if (status === 'connecting' || status === 'connected') {
+      return;
+    }
+
+    setErrorMessage('');
+    setStatus('connecting');
+    setTranscript([]);
+    setTurnCount(0);
+
+    const newId = newSessionId();
+    sessionIdRef.current = newId;
+    setSessionId(newId);
+    saveVoiceSessionId(newId);
+
+    try {
+      const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      localStreamRef.current = localStream;
+
+      const peer = new RTCPeerConnection();
+      peerRef.current = peer;
+
+      for (const track of localStream.getTracks()) {
+        peer.addTrack(track, localStream);
+      }
+
+      const remoteAudio = new Audio();
+      remoteAudio.autoplay = true;
+      remoteAudioRef.current = remoteAudio;
+
+      peer.ontrack = (event) => {
+        const [remoteStream] = event.streams;
+        if (!remoteStream) return;
+        remoteAudio.srcObject = remoteStream;
+        void remoteAudio.play().catch(() => {
+          // Autoplay may require user interaction; we already have a click gesture.
+        });
+      };
+
+      const dataChannel = peer.createDataChannel('oai-events');
+      dataChannelRef.current = dataChannel;
+
+      dataChannel.onopen = () => {
+        setStatus('connected');
+        appendTranscript('system', 'Voice call connected.');
+        sendRealtimeEvent({
+          type: 'response.create',
+          response: {
+            instructions: 'Greet the customer briefly and ask how you can help today.',
+          },
+        });
+      };
+
+      dataChannel.onclose = () => {
+        if (status !== 'error') {
+          setStatus('idle');
+        }
+        setIsListening(false);
+      };
+
+      dataChannel.onerror = () => {
+        setStatus('error');
+        setErrorMessage('Realtime data channel error.');
+      };
+
+      dataChannel.onmessage = (event) => {
+        let payload: Record<string, unknown> = {};
+        try {
+          payload = JSON.parse(String(event.data)) as Record<string, unknown>;
+        } catch {
+          return;
+        }
+
+        const type = asString(payload.type);
+
+        if (type === 'input_audio_buffer.speech_started') {
+          setIsListening(true);
+          return;
+        }
+
+        if (type === 'input_audio_buffer.speech_stopped') {
+          setIsListening(false);
+          return;
+        }
+
+        if (type === 'conversation.item.input_audio_transcription.completed') {
+          const transcriptText = asString(payload.transcript).trim();
+          if (transcriptText) {
+            appendTranscript('user', transcriptText);
+          }
+          return;
+        }
+
+        const call = extractFunctionCall(payload);
+        if (call) {
+          void handleToolCall(call.callId, call.name, call.argumentsText);
+          return;
+        }
+
+        if (type === 'response.done') {
+          const assistantText = extractAssistantText(payload);
+          if (assistantText) {
+            appendTranscript('assistant', assistantText);
+          }
+          return;
+        }
+
+        if (type === 'error') {
+          const errorRecord = asRecord(payload.error);
+          const message = asString(errorRecord?.message) || 'Realtime voice error.';
+          setStatus('error');
+          setErrorMessage(message);
+          appendTranscript('system', `Error: ${message}`);
+        }
+      };
+
+      const offer = await peer.createOffer({
+        offerToReceiveAudio: true,
+      });
+      await peer.setLocalDescription(offer);
+
+      const sdpBody = offer.sdp ?? '';
+      if (!sdpBody) {
+        throw new Error('Failed to generate local SDP offer.');
+      }
+
+      const answerResponse = await fetch('/api/voice/realtime-call', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/sdp',
+        },
+        body: sdpBody,
+      });
+
+      if (!answerResponse.ok) {
+        const details = await answerResponse.text();
+        throw new Error(details || `Realtime call setup failed (${answerResponse.status}).`);
+      }
+
+      const answerSdp = await answerResponse.text();
+      await peer.setRemoteDescription({
+        type: 'answer',
+        sdp: answerSdp,
+      });
+    } catch (error) {
+      setStatus('error');
+      setErrorMessage(error instanceof Error ? error.message : 'Failed to start voice call.');
+      stopCall();
+    }
+  }
+
+  function startOver(): void {
+    stopCall();
+    const newId = newSessionId();
+    sessionIdRef.current = newId;
+    saveVoiceSessionId(newId);
+    setSessionId(newId);
+    setTranscript([]);
+    setTurnCount(0);
+    setErrorMessage('');
+    setStatus('idle');
+  }
+
+  useEffect(() => {
+    return () => {
+      stopCall();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const canStart = status !== 'connecting' && status !== 'connected';
+  const canStop = status === 'connecting' || status === 'connected';
+
+  return (
+    <main className="bg-gradient-to-br from-slate-50 via-cyan-50 to-white pb-20 pt-28">
+      <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
+        <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-wide text-cyan-700">Sandbox Route</p>
+            <h1 className="text-3xl font-bold text-gray-900">Realtime Voice Agent Lab</h1>
+            <p className="mt-1 text-sm text-gray-600">
+              Dedicated OpenAI realtime voice agent, isolated from text chat session state.
+            </p>
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={startOver}
+              className="inline-flex items-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+            >
+              <RotateCcw className="mr-2 h-4 w-4" />
+              Start Over
+            </button>
+            <a
+              href="/estimate-bot-lab"
+              className="inline-flex items-center rounded-lg border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 hover:bg-cyan-100"
+            >
+              Back To Text Lab
+            </a>
+          </div>
+        </header>
+
+        <section className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
+          <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm md:p-5">
+            <div className="h-[56vh] overflow-y-auto rounded-xl border border-gray-100 bg-slate-50 p-3">
+              {transcript.length === 0 && (
+                <p className="text-sm text-gray-500">Start the call to begin realtime voice conversation.</p>
+              )}
+
+              <div className="space-y-3">
+                {transcript.map((entry) => (
+                  <div
+                    key={entry.id}
+                    className={
+                      entry.role === 'user'
+                        ? 'flex justify-end'
+                        : entry.role === 'assistant'
+                          ? 'flex justify-start'
+                          : 'flex justify-center'
+                    }
+                  >
+                    <div
+                      className={`max-w-[90%] rounded-xl px-3 py-2 text-sm ${
+                        entry.role === 'user'
+                          ? 'bg-cyan-600 text-white'
+                          : entry.role === 'assistant'
+                            ? 'border border-gray-200 bg-white text-gray-800'
+                            : 'border border-amber-200 bg-amber-50 text-amber-800'
+                      }`}
+                    >
+                      {entry.content}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {errorMessage && <p className="mt-3 text-sm text-rose-700">{errorMessage}</p>}
+          </div>
+
+          <aside className="space-y-4">
+            <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+              <h2 className="text-base font-semibold text-gray-900">Session</h2>
+              <p className="mt-1 break-all text-xs text-gray-600">{sessionId}</p>
+              <p className="mt-2 text-xs text-gray-500">Turns completed: {turnCount}</p>
+            </div>
+
+            <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+              <h2 className="text-base font-semibold text-gray-900">Voice Status</h2>
+              <p className="mt-2 text-sm text-gray-700">{connectionLabel}</p>
+              <p className="mt-1 inline-flex items-center text-xs text-gray-600">
+                <Mic className="mr-1 h-3.5 w-3.5" />
+                {isListening ? 'Caller speech detected' : 'Waiting for speech'}
+              </p>
+
+              <div className="mt-3 grid gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void startCall();
+                  }}
+                  disabled={!canStart}
+                  className="inline-flex w-full items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+                >
+                  <Phone className="mr-2 h-4 w-4" />
+                  {status === 'connecting' ? 'Connecting...' : 'Start Realtime Voice Call'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={stopCall}
+                  disabled={!canStop}
+                  className="inline-flex w-full items-center justify-center rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-60"
+                >
+                  <PhoneOff className="mr-2 h-4 w-4" />
+                  Stop Voice Call
+                </button>
+              </div>
+            </div>
+          </aside>
+        </section>
+      </div>
+    </main>
+  );
+}

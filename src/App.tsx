@@ -11,13 +11,14 @@ import GhlWidgetLoader from './components/GhlWidgetLoader';
 import GetEstimatePage from './pages/GetEstimatePage';
 import AdminPricingPage from './pages/AdminPricingPage';
 import EstimateBotLabPage from './pages/EstimateBotLabPage';
+import EstimateVoiceLabPage from './pages/EstimateVoiceLabPage';
 import {
   createDefaultPricingConfig,
   type PricingConfig,
 } from './lib/estimateEngine';
 import { parseJsonResponse } from './lib/responseParsing';
 
-type AppRoute = '/' | '/estimate' | '/estimate-bot-lab' | '/admin' | 'notFound';
+type AppRoute = '/' | '/estimate' | '/estimate-bot-lab' | '/estimate-voice-lab' | '/admin' | 'notFound';
 
 interface PricingGetResponse {
   config?: PricingConfig;
@@ -37,6 +38,10 @@ function normalizeRoute(pathname: string): AppRoute {
 
   if (trimmed === '/estimate-bot-lab') {
     return '/estimate-bot-lab';
+  }
+
+  if (trimmed === '/estimate-voice-lab') {
+    return '/estimate-voice-lab';
   }
 
   if (trimmed === '/admin') {
@@ -134,6 +139,8 @@ function App() {
     content = <GetEstimatePage />;
   } else if (route === '/estimate-bot-lab') {
     content = <EstimateBotLabPage />;
+  } else if (route === '/estimate-voice-lab') {
+    content = <EstimateVoiceLabPage />;
   } else if (route === '/admin') {
     content = (
       <AdminPricingPage
@@ -148,7 +155,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-white">
-      <GhlWidgetLoader enabled={route !== '/estimate-bot-lab'} />
+      <GhlWidgetLoader enabled={route !== '/estimate-bot-lab' && route !== '/estimate-voice-lab'} />
       <nav className="bg-white shadow-md fixed w-full z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-24">
