@@ -65,7 +65,7 @@ interface SpeechRecognitionLike {
   continuous: boolean;
   onstart: (() => void) | null;
   onend: (() => void) | null;
-  onerror: (() => void) | null;
+  onerror: ((event: SpeechRecognitionLikeErrorEvent) => void) | null;
   onresult: ((event: SpeechRecognitionLikeEvent) => void) | null;
   stop: () => void;
   abort: () => void;
@@ -81,6 +81,10 @@ interface SpeechRecognitionLikeEvent {
       };
     };
   };
+}
+
+interface SpeechRecognitionLikeErrorEvent {
+  error?: string;
 }
 
 interface WindowWithSpeechApi extends Window {
@@ -162,6 +166,20 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
   });
+}
+
+function speechRecognitionErrorMessage(errorCode: string): string {
+  switch (errorCode) {
+    case 'not-allowed':
+    case 'service-not-allowed':
+      return 'Microphone access is blocked. Allow microphone permission in Chrome site settings, then start voice mode again.';
+    case 'audio-capture':
+      return 'No microphone was detected. Connect a microphone and try voice mode again.';
+    case 'network':
+      return 'Speech recognition had a network issue. Please try voice mode again.';
+    default:
+      return 'Voice recognition could not start. Try again or use text mode.';
+  }
 }
 
 function getPreThinkingDelayMs(inputText: string): number {
@@ -306,8 +324,16 @@ export default function EstimateBotLabPage() {
       recognition.onstart = () => {
         setIsListening(true);
       };
-      recognition.onerror = () => {
+      recognition.onerror = (event: SpeechRecognitionLikeErrorEvent) => {
         setIsListening(false);
+        const errorCode = typeof event?.error === 'string' ? event.error : '';
+        if (errorCode && errorCode !== 'aborted' && errorCode !== 'no-speech') {
+          setErrorMessage(speechRecognitionErrorMessage(errorCode));
+        }
+        if (errorCode === 'not-allowed' || errorCode === 'service-not-allowed' || errorCode === 'audio-capture') {
+          setIsVoiceCallActive(false);
+          stopListening();
+        }
       };
       recognition.onresult = (event: SpeechRecognitionLikeEvent) => {
         const lastResult = event.results[event.results.length - 1];
@@ -330,6 +356,8 @@ export default function EstimateBotLabPage() {
       recognition.start();
     } catch {
       setIsListening(false);
+      setErrorMessage('Voice recognition could not start. Please check microphone permissions and try again.');
+      setIsVoiceCallActive(false);
     }
   }
 
@@ -345,9 +373,24 @@ export default function EstimateBotLabPage() {
 
     setIsVoiceCallActive(true);
     setErrorMessage('');
-    startListening();
+
     if (messages.length === 0 && !isBusy) {
       await sendMessage(WARM_OPENER, { silentUserBubble: true, channel: 'test' });
+      return;
+    }
+
+    const latestAssistantMessage = [...messages].reverse().find((message) => message.role === 'assistant')?.content;
+    const kickoffPrompt =
+      latestAssistantMessage && latestAssistantMessage.length <= 220
+        ? latestAssistantMessage
+        : 'Voice mode connected. How can I help you today?';
+
+    if (isSpeechSynthesisSupported) {
+      await speakText(kickoffPrompt);
+    }
+
+    if (isVoiceCallActiveRef.current && !isBusyRef.current) {
+      startListening();
     }
   }
 
