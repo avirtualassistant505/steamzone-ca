@@ -6,8 +6,9 @@ import {
   type SchemaField,
   type SchemaOption,
   type ServiceType,
-} from '../../quote/schema';
-import { searchSteamZoneKnowledgeAsync, type KnowledgeMatch } from './steamzoneKnowledge';
+} from '../../quote/schema.js';
+
+import { searchSteamZoneKnowledgeAsync, type KnowledgeMatch } from './steamzoneKnowledge.js';
 import * as estimateAgentRuntime from '../../../server/estimateAgentRuntime.mjs';
 import {
   AGENT_DEFAULT_MODEL,
@@ -15,8 +16,8 @@ import {
   AGENT_MODEL_OPTIONS,
   AGENT_VOICE_MODEL_OPTIONS,
   type AgentModelOption,
-} from './agentModelConfig';
-import { getAgentModelConfig as getStoredAgentModelConfig } from '../../../server/agentModelStore';
+} from './agentModelConfig.js';
+import { getAgentModelConfig as getStoredAgentModelConfig } from '../../../server/agentModelStore.js';
 
 export type PostagentChannel = 'web' | 'voice' | 'sms' | 'test';
 
