@@ -60,6 +60,26 @@ describe('normalize_and_validate', () => {
     expect(result.normalized_value).toBe(1);
   });
 
+  it('parses spoken "one" mixed with trailing context', () => {
+    const result = normalizeAndValidateField('patioQuantity', 'one patio', {
+      serviceType: 'window',
+      patioDoors: 'slide-only',
+      zone: 'zoneA',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.normalized_value).toBe(1);
+  });
+
+  it('interprets O and E as one', () => {
+    const result = normalizeAndValidateField('patioQuantity', 'O and E', {
+      serviceType: 'window',
+      patioDoors: 'slide-only',
+      zone: 'zoneA',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.normalized_value).toBe(1);
+  });
+
   it('maps select answers for size bracket without spacing', () => {
     const result = normalizeAndValidateField('sizeBracket', '1500to2000', {
       serviceType: 'window',

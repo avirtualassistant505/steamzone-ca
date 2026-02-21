@@ -18497,11 +18497,112 @@ var serviceSynonyms = {
   carpet: ["carpet", "carpets", "carpet cleaning"],
   postConstruction: ["post construction", "post-construction", "post construction cleaning", "construction cleanup"]
 };
+var numberWordValues = {
+  zero: 0,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  sixteen: 16,
+  seventeen: 17,
+  eighteen: 18,
+  nineteen: 19,
+  twenty: 20,
+  thirty: 30,
+  forty: 40,
+  fifty: 50,
+  sixty: 60,
+  seventy: 70,
+  eighty: 80,
+  ninety: 90,
+  hundred: 100,
+  thousand: 1000
+};
+var numberWordAliases = {
+  to: "two",
+  too: "two",
+  for: "four",
+  fore: "four",
+  ate: "eight",
+  o: "one",
+  e: "one",
+  oh: "one"
+};
+var numberWordFillers = /* @__PURE__ */ new Set(["a", "an", "the", "about", "around", "approximately", "approx", "roughly", "rough", "exactly", "maybe"]);
 function text(input) {
   return String(input ?? "").trim();
 }
 function normalizeTextForMatch(input) {
   return input.trim().toLowerCase().replace(/[._-]+/g, " ").replace(/\s+/g, " ");
+}
+function compactIntegerText(input) {
+  return input.toLowerCase().replace(/[_]/g, " ").replace(/[^\w\s-]/g, " ").replace(/\s+/g, " ").trim();
+}
+function parseNumberWordTokens(tokens) {
+  if (tokens.length === 0) return null;
+  const mappedTokens = tokens.map((token) => numberWordAliases[token] ?? token).filter((token) => token.length > 0 && !numberWordFillers.has(token));
+  if (mappedTokens.length === 0) return null;
+  let value = 0;
+  let currentGroup = 0;
+  let sawNumber = false;
+  for (const token of mappedTokens) {
+    const mapped = numberWordValues[token];
+    if (mapped === void 0) {
+      if (token === "and") {
+        continue;
+      }
+      return null;
+    }
+    sawNumber = true;
+    if (token === "hundred") {
+      currentGroup *= 100;
+      continue;
+    }
+    if (token === "thousand") {
+      value += currentGroup * 1e3;
+      currentGroup = 0;
+      continue;
+    }
+    currentGroup += mapped;
+  }
+  return sawNumber ? value + currentGroup : null;
+}
+function parseNumberWords(input) {
+  const compact = compactIntegerText(input);
+  if (!compact) return null;
+  const compactNoPunctuation = compact.replace(/-/g, " ").replace(/\s+/g, " ").trim();
+  if (!compactNoPunctuation) return null;
+  if (/^(?:o\s*(?:and\s+)?e|e\s*(?:and\s+)?o|oe|o\s+e|e\s+o)$/i.test(compactNoPunctuation)) {
+    return 1;
+  }
+  const exact = parseNumberWordTokens(compactNoPunctuation.split(/\s+/));
+  if (exact !== null) return exact;
+  const fillerRemoved = compactNoPunctuation.split(/\s+/).filter((token) => !numberWordFillers.has(token)).join(" ").trim();
+  if (!fillerRemoved) return null;
+  const cleanedTokens = fillerRemoved.split(/\s+/);
+  for (let start = 0; start < cleanedTokens.length; start += 1) {
+    for (let end = Math.min(cleanedTokens.length, start + 5); end > start; end -= 1) {
+      const parsed = parseNumberWordTokens(cleanedTokens.slice(start, end));
+      if (parsed !== null) {
+        return parsed;
+      }
+    }
+  }
+  return null;
+}
+function compactSelectText(input) {
+  return input.toLowerCase().replace(/\u2010|\u2011|\u2012|\u2013|\u2014/g, "-").replace(/-/g, " to ").replace(/[._]/g, " ").replace(/\bsq\s*ft\b|square\s*feet|square\s*foot/g, "").replace(/\bft\b/g, "").replace(/[\r\n]+/g, " ").replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, "").trim();
 }
 function parseYesNo(input) {
   const normalized = normalizeTextForMatch(input);
@@ -18572,6 +18673,8 @@ function extractInteger(input) {
   }
   const roomsLike = input.match(/(\d+)\s*(bed(?:room)?s?)/i);
   if (roomsLike) return Number(roomsLike[1]);
+  const spokenNumber = parseNumberWords(input);
+  if (spokenNumber !== null) return Math.round(spokenNumber);
   const tokens = input.replace(/sq\s*ft|sqft|square\s*feet|ft|feet|lbs?|pounds?|storeys?|stories?|levels?|steps?/gi, " ").split(/\s+/).filter(Boolean);
   for (const token of tokens) {
     const parsed = parseScaledNumber(token);
@@ -18601,6 +18704,43 @@ function coerceSelect(field, input, answersSoFar) {
     if (normalized.includes("inside") && normalized.includes("outside")) return "both";
     if (normalized.includes("interior")) return "interior";
     if (normalized.includes("exterior") || normalized.includes("outside")) return "exterior";
+  }
+  const compactInput = compactSelectText(input);
+  if (compactInput) {
+    for (const option of options) {
+      if (compactSelectText(option.value) === compactInput) return option.value;
+      if (compactSelectText(option.label) === compactInput) return option.value;
+    }
+    const rangeMatch = normalized.match(/(\d+)\s*(?:to|-|–|—|from)\s*(\d+)/i);
+    if (rangeMatch) {
+      const candidate = `${rangeMatch[1]}to${rangeMatch[2]}`;
+      for (const option of options) {
+        if (compactSelectText(option.value) === compactSelectText(candidate)) {
+          return option.value;
+        }
+      }
+    }
+    const underMatch = normalized.match(/under\s*(\d+)/i);
+    if (underMatch) {
+      const candidate = `under${underMatch[1]}`;
+      for (const option of options) {
+        if (compactSelectText(option.value) === compactSelectText(candidate)) return option.value;
+      }
+    }
+    const overMatch = normalized.match(/(?:over|above)\s*(\d+)/i);
+    if (overMatch) {
+      const candidate = `over${overMatch[1]}`;
+      for (const option of options) {
+        if (compactSelectText(option.value) === compactSelectText(candidate)) return option.value;
+      }
+    }
+    const plusMatch = normalized.match(/(\d+)\s*\+$/i);
+    if (plusMatch) {
+      const candidate = `over${plusMatch[1]}`;
+      for (const option of options) {
+        if (compactSelectText(option.value) === compactSelectText(candidate)) return option.value;
+      }
+    }
   }
   return null;
 }

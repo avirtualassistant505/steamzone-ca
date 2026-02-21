@@ -59,6 +59,19 @@ const numberWordValues: Record<string, number> = {
   thousand: 1000,
 };
 
+const numberWordAliases: Record<string, string> = {
+  to: 'two',
+  too: 'two',
+  for: 'four',
+  fore: 'four',
+  ate: 'eight',
+  o: 'one',
+  e: 'one',
+  oh: 'one',
+};
+
+const numberWordFillers = new Set(['a', 'an', 'the', 'about', 'around', 'approximately', 'approx', 'roughly', 'rough', 'exactly', 'maybe']);
+
 function compactIntegerText(input: string): string {
   return input
     .toLowerCase()
@@ -68,28 +81,26 @@ function compactIntegerText(input: string): string {
     .trim();
 }
 
-function parseNumberWords(input: string): number | null {
-  const compact = compactIntegerText(input);
-  if (!compact) return null;
-
-  if (compact in numberWordValues && !compact.includes(' ')) {
-    return numberWordValues[compact];
-  }
-
-  const normalized = compact.replace(/[-]/g, ' ');
-  const tokens = normalized.split(/\s+/).filter(Boolean);
+function parseNumberWordTokens(tokens: string[]): number | null {
   if (tokens.length === 0) return null;
+
+  const mappedTokens = tokens
+    .map((token) => numberWordAliases[token] ?? token)
+    .filter((token) => token.length > 0 && !numberWordFillers.has(token));
+
+  if (mappedTokens.length === 0) return null;
 
   let value = 0;
   let currentGroup = 0;
   let sawNumber = false;
 
-  for (const token of tokens) {
+  for (const token of mappedTokens) {
     const mapped = numberWordValues[token];
     if (mapped === undefined) {
       if (token === 'and') {
         continue;
       }
+
       return null;
     }
 
@@ -110,6 +121,46 @@ function parseNumberWords(input: string): number | null {
   }
 
   return sawNumber ? value + currentGroup : null;
+}
+
+function parseNumberWords(input: string): number | null {
+  const compact = compactIntegerText(input);
+  if (!compact) return null;
+
+  const compactNoPunctuation = compact
+    .replace(/[-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!compactNoPunctuation) return null;
+
+  if (/^(?:o\s*(?:and\s+)?e|e\s*(?:and\s+)?o|oe|o\s+e|e\s+o)$/i.test(compactNoPunctuation)) {
+    return 1;
+  }
+
+  const exact = parseNumberWordTokens(compactNoPunctuation.split(/\s+/));
+  if (exact !== null) {
+    return exact;
+  }
+
+  const fillerRemoved = compactNoPunctuation
+    .split(/\s+/)
+    .filter((token) => !numberWordFillers.has(token))
+    .join(' ')
+    .trim();
+  if (!fillerRemoved) return null;
+
+  const cleanedTokens = fillerRemoved.split(/\s+/);
+  for (let start = 0; start < cleanedTokens.length; start += 1) {
+    for (let end = Math.min(cleanedTokens.length, start + 5); end > start; end -= 1) {
+      const parsed = parseNumberWordTokens(cleanedTokens.slice(start, end));
+      if (parsed !== null) {
+        return parsed;
+      }
+    }
+  }
+
+  return null;
 }
 
 function compactSelectText(input: string): string {

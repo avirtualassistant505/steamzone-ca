@@ -59,6 +59,9 @@ function sanitizeMessageText(text: string): string {
   return text
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
+    .replace(/(\d{3,4})to(\d{3,4})/gi, '$1 to $2')
+    .replace(/\bunder(\d{3,5})/gi, 'under $1')
+    .replace(/\bover(\d{3,5})/gi, 'over $1')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/[ \t]{2,}/g, ' ')
     .trim();
