@@ -463,7 +463,20 @@ export default function EstimateBotLabPage() {
         }
       }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Unable to reach estimate agent.');
+      const fallback =
+        error instanceof Error
+          ? error.message
+          : 'Unable to reach estimate agent.';
+
+      setErrorMessage(fallback);
+      const spokenFallback = sanitizeMessageText(
+        `Call failed: ${fallback}`
+      );
+      setMessages((prev) => [...prev, { id: newMessageId(), role: 'assistant', content: spokenFallback }]);
+
+      if (isVoiceCallActiveRef.current && (options?.channel === 'test' || options?.channel === 'voice')) {
+        await speakText(spokenFallback);
+      }
     } finally {
       setIsThinking(false);
       setIsBusy(false);

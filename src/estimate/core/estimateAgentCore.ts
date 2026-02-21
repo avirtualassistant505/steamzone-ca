@@ -368,6 +368,12 @@ function getModelProviderHint(model: string): 'openrouter' | 'openai' {
   return 'openrouter';
 }
 
+function isAllowedModel(model: string, isVoiceChannel: boolean): boolean {
+  const normalized = normalizeProviderModelLabel(model);
+  const options = isVoiceChannel ? AGENT_VOICE_MODEL_OPTIONS : AGENT_MODEL_OPTIONS;
+  return options.some((option) => option.value.toLowerCase() === normalized.toLowerCase());
+}
+
 function openAIFallbackModel(model: string): string {
   const fallback = getModelOptionByValue(model)?.value ?? model;
   if (fallback.startsWith('openai/')) {
@@ -414,11 +420,16 @@ async function resolveModelProviderConfig(channel?: PostagentChannel): Promise<A
     ) || (isVoiceChannel ? AGENT_DEFAULT_VOICE_MODEL : AGENT_DEFAULT_MODEL);
 
   const requestedModel = normalizeProviderModelLabel(envModel);
+  const safeModel = isAllowedModel(requestedModel, isVoiceChannel)
+    ? requestedModel
+    : isVoiceChannel
+      ? AGENT_DEFAULT_VOICE_MODEL
+      : AGENT_DEFAULT_MODEL;
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
   if (openRouterKey) {
     return {
-      provider: getModelProviderHint(requestedModel),
-      model: requestedModel,
+      provider: getModelProviderHint(safeModel),
+      model: safeModel,
       apiKey: openRouterKey,
       responsesUrl: OPENROUTER_RESPONSES_URL,
       headers: createProviderHeaders(openRouterKey, 'openrouter'),
@@ -434,7 +445,7 @@ async function resolveModelProviderConfig(channel?: PostagentChannel): Promise<A
 
   return {
     provider: 'openai',
-    model: openAIFallbackModel(requestedModel),
+    model: openAIFallbackModel(safeModel),
     apiKey: openAiKey,
     responsesUrl: OPENAI_RESPONSES_URL,
     headers: createProviderHeaders(openAiKey, 'openai'),
