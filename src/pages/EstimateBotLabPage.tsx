@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, RotateCcw, SendHorizonal } from 'lucide-react';
+import { formatCurrency } from '../lib/estimateEngine';
+import { parseJsonResponse } from '../lib/responseParsing';
 
 type ChatRole = 'user' | 'assistant';
 
@@ -97,14 +99,6 @@ function readSessionId(): string {
 function saveSessionId(id: string): void {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(SESSION_STORAGE_KEY, id);
-}
-
-function formatCurrency(amount: number, currency: string): string {
-  return new Intl.NumberFormat('en-CA', {
-    style: 'currency',
-    currency: currency || 'CAD',
-    maximumFractionDigits: 0,
-  }).format(amount);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -210,9 +204,10 @@ export default function EstimateBotLabPage() {
       setIsThinking(true);
 
       const response = await responsePromise;
-      const payload = (await response.json()) as AgentResponse & { message?: string };
-      if (!response.ok) {
-        throw new Error(payload.message ?? 'Unable to reach estimate agent.');
+      const parsed = await parseJsonResponse<AgentResponse & { message?: string }>(response);
+      const payload = parsed.payload;
+      if (!parsed.ok || !response.ok || !payload) {
+        throw new Error(parsed.textError ?? payload?.message ?? 'Unable to reach estimate agent.');
       }
 
       const assistantText = sanitizeMessageText(payload.assistant_message);
@@ -281,10 +276,10 @@ export default function EstimateBotLabPage() {
 
     const summary = [
       `Quote ID: ${quote.quote_id}`,
-      `Total: ${formatCurrency(quote.total, quote.currency)}`,
+      `Total: ${formatCurrency(quote.total)}`,
       '',
       'Line items:',
-      ...quote.line_items.map((item) => `- ${item.label}: ${formatCurrency(item.amount, quote.currency)}`),
+      ...quote.line_items.map((item) => `- ${item.label}: ${formatCurrency(item.amount)}`),
       '',
       'Assumptions:',
       ...quote.assumptions.map((item) => `- ${item}`),
@@ -442,13 +437,13 @@ export default function EstimateBotLabPage() {
               <div className="rounded-2xl border border-cyan-200 bg-white p-4 shadow-sm">
                 <h2 className="text-base font-semibold text-gray-900">Quote</h2>
                 <p className="mt-1 text-xs text-gray-500">{quote.quote_id}</p>
-                <p className="mt-2 text-2xl font-bold text-cyan-800">{formatCurrency(quote.total, quote.currency)}</p>
+                <p className="mt-2 text-2xl font-bold text-cyan-800">{formatCurrency(quote.total)}</p>
 
                 <ul className="mt-3 space-y-1 text-sm text-gray-700">
                   {quote.line_items.map((item) => (
                     <li key={`${item.label}-${item.amount}`} className="flex items-center justify-between gap-2">
                       <span>{item.label}</span>
-                      <span className="font-semibold">{formatCurrency(item.amount, quote.currency)}</span>
+                      <span className="font-semibold">{formatCurrency(item.amount)}</span>
                     </li>
                   ))}
                 </ul>

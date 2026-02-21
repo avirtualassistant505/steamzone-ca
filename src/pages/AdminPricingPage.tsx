@@ -11,6 +11,7 @@ import {
   type WindowZone,
 } from '../lib/estimateEngine';
 import { AGENT_DEFAULT_MODEL, AGENT_MODEL_OPTIONS, type AgentModelOption } from '../estimate/core/agentModelConfig';
+import { parseJsonResponse, type SafeJsonResult } from '../lib/responseParsing';
 
 interface AdminPricingPageProps {
   pricingConfig: PricingConfig;
@@ -32,6 +33,29 @@ interface AgentModelResponse {
   updatedAt?: string;
   message?: string;
   available_models?: AgentModelOption[];
+}
+
+type TrainingGetPayload = {
+  items?: Array<unknown>;
+  source?: 'db' | 'fallback';
+  updatedAt?: string;
+  message?: string;
+};
+
+type TrainingSavePayload = {
+  items?: Array<TrainingItem>;
+  source?: 'db' | 'fallback';
+  updatedAt?: string;
+  message?: string;
+};
+
+type PricingSavePayload = {
+  config?: PricingConfig;
+  message?: string;
+};
+
+function parsePayloadError<T>(result: SafeJsonResult<T>): string {
+  return result.textError ?? `Unable to parse response (HTTP ${result.status}).`;
 }
 
 const STORAGE_KEY = 'steamzone_training_admin_tab';
@@ -127,11 +151,11 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       setAgentModelMessage('');
 
       try {
-        const response = await fetch('/api/agent-model');
-        const payload = (await response.json()) as AgentModelResponse;
+        const response = await parseJsonResponse<AgentModelResponse>(await fetch('/api/agent-model'));
+        const payload = response.payload;
 
         if (!response.ok || !payload?.model) {
-          setAgentModelMessage(payload.message ?? 'Unable to load model settings.');
+          setAgentModelMessage(payload?.message ?? parsePayloadError(response));
           return;
         }
 
@@ -167,16 +191,11 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     setTrainingMessage('');
 
     try {
-      const response = await fetch('/api/training-get');
-      const payload = (await response.json()) as {
-        items?: Array<unknown>;
-        source?: 'db' | 'fallback';
-        updatedAt?: string;
-        message?: string;
-      };
+      const response = await parseJsonResponse<TrainingGetPayload>(await fetch('/api/training-get'));
+      const payload = response.payload;
 
-      if (!response.ok) {
-        setTrainingError(payload.message ?? 'Unable to load training data.');
+      if (!response.ok || !payload) {
+        setTrainingError(payload?.message ?? parsePayloadError(response));
         return;
       }
 
@@ -305,25 +324,26 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     setTrainingMessage('Saving training data...');
 
     try {
-      const response = await fetch('/api/training-save', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${saveToken.trim()}`,
-          'x-admin-training-token': saveToken.trim(),
-        },
-        body: JSON.stringify({ items: sanitized }),
-      });
+      const response = await parseJsonResponse<TrainingSavePayload>(
+        await fetch('/api/training-save', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${saveToken.trim()}`,
+            'x-admin-training-token': saveToken.trim(),
+          },
+          body: JSON.stringify({ items: sanitized }),
+        })
+      );
+      const payload = response.payload;
 
-      const payload = (await response.json()) as {
-        items?: Array<TrainingItem>;
-        source?: 'db' | 'fallback';
-        updatedAt?: string;
-        message?: string;
-      };
+      if (!payload) {
+        setTrainingError('Unable to save training data. Response was not valid JSON.');
+        return;
+      }
 
       if (!response.ok) {
-        setTrainingError(payload.message ?? 'Unable to save training data.');
+        setTrainingError(payload.message ?? parsePayloadError(response));
         return;
       }
 
@@ -357,19 +377,21 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     setAgentModelMessage('Saving model settings...');
 
     try {
-      const response = await fetch('/api/agent-model', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${saveToken.trim()}`,
-          'x-admin-training-token': saveToken.trim(),
-        },
-        body: JSON.stringify({ model: agentModel.trim() }),
-      });
+      const response = await parseJsonResponse<AgentModelResponse>(
+        await fetch('/api/agent-model', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${saveToken.trim()}`,
+            'x-admin-training-token': saveToken.trim(),
+          },
+          body: JSON.stringify({ model: agentModel.trim() }),
+        })
+      );
+      const payload = response.payload;
 
-      const payload = (await response.json()) as AgentModelResponse;
       if (!response.ok || !payload?.model) {
-        setAgentModelMessage(payload.message ?? 'Unable to save model setting.');
+        setAgentModelMessage(payload?.message ?? parsePayloadError(response));
         return;
       }
 
@@ -411,9 +433,12 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
         body: JSON.stringify({ config: draftConfig }),
       });
 
-      const payload = (await response.json()) as { config?: PricingConfig; message?: string };
-      if (!response.ok || !payload.config) {
-        setSaveMessage(payload.message ?? 'Unable to save pricing rules. Check server env vars and token.');
+      const responsePayload = await parseJsonResponse<PricingSavePayload>(response);
+      const payload = responsePayload.payload;
+
+      if (!responsePayload.ok || !payload?.config) {
+        const message = parsePayloadError(responsePayload);
+        setSaveMessage(payload?.message ?? message);
         setIsSaving(false);
         return;
       }

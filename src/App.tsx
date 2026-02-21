@@ -15,8 +15,14 @@ import {
   createDefaultPricingConfig,
   type PricingConfig,
 } from './lib/estimateEngine';
+import { parseJsonResponse } from './lib/responseParsing';
 
 type AppRoute = '/' | '/estimate' | '/estimate-bot-lab' | '/admin' | 'notFound';
+
+interface PricingGetResponse {
+  config?: PricingConfig;
+  message?: string;
+}
 
 function normalizeRoute(pathname: string): AppRoute {
   const trimmed = pathname.replace(/\/+$/, '') || '/';
@@ -82,14 +88,13 @@ function App() {
 
     async function loadFromApi(): Promise<void> {
       try {
-        const response = await fetch('/api/pricing-get');
-        if (!response.ok) {
-          throw new Error('pricing-get failed');
+        const response = await parseJsonResponse<PricingGetResponse>(await fetch('/api/pricing-get'));
+        if (!response.ok || !response.payload?.config) {
+          throw new Error(response.payload?.message ?? response.textError ?? 'pricing-get failed');
         }
 
-        const payload = (await response.json()) as { config?: PricingConfig };
-        if (!cancelled && payload.config) {
-          setPricingConfig(payload.config);
+        if (!cancelled) {
+          setPricingConfig(response.payload.config);
           setPricingStatus('ready');
         }
       } catch {

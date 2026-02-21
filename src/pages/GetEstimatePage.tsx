@@ -32,8 +32,15 @@ import {
   type WindowZone,
 } from '../lib/estimateEngine';
 import type { EstimateDeliveryMode } from '../lib/estimateMailer';
+import { parseJsonResponse } from '../lib/responseParsing';
 
 type FieldErrors = Record<string, string>;
+
+type EstimateCreatePayload = {
+  record?: EstimateRecord;
+  email?: { success: boolean; message: string; deliveryMode?: EstimateDeliveryMode; idempotent?: boolean; resent?: boolean };
+  message?: string;
+};
 
 function tid(...parts: string[]): string {
   return ['estimate', ...parts].join('__');
@@ -428,16 +435,13 @@ export default function GetEstimatePage() {
         body: JSON.stringify({ serviceType, answers }),
       });
 
-      const payload = (await response.json()) as {
-        record?: EstimateRecord;
-        email?: { success: boolean; message: string; deliveryMode?: EstimateDeliveryMode; idempotent?: boolean; resent?: boolean };
-        message?: string;
-      };
+      const parsed = await parseJsonResponse<EstimateCreatePayload>(response);
+      const payload = parsed.payload;
 
-      if (!response.ok || !payload.record) {
+      if (!response.ok || !payload?.record) {
         setEmailDeliveryMode(null);
         setLastEmailResult(null);
-        setStatusMessage(payload.message ?? 'Unable to generate estimate. Please try again.');
+        setStatusMessage(parsed.textError ?? payload?.message ?? 'Unable to generate estimate. Please try again.');
         setIsSubmitting(false);
         return;
       }
@@ -498,14 +502,11 @@ export default function GetEstimatePage() {
         body: JSON.stringify({ serviceType, answers }),
       });
 
-      const payload = (await response.json()) as {
-        record?: EstimateRecord;
-        email?: { success: boolean; message: string; deliveryMode?: EstimateDeliveryMode; idempotent?: boolean; resent?: boolean };
-        message?: string;
-      };
+      const parsed = await parseJsonResponse<EstimateCreatePayload>(response);
+      const payload = parsed.payload;
 
-      if (!response.ok || !payload.record) {
-        setStatusMessage(payload.message ?? 'Unable to resend the email. Please try again.');
+      if (!response.ok || !payload?.record) {
+        setStatusMessage(parsed.textError ?? payload?.message ?? 'Unable to resend the email. Please try again.');
         setIsSubmitting(false);
         return;
       }
