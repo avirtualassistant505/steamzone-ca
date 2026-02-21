@@ -268,4 +268,26 @@ describe('POST /api/postagent/estimate', () => {
     expect(payload.assistant_message).toMatch(/team member/i);
     expect(payload.assistant_message).toMatch(/call|text|email/i);
   });
+
+  it('strips markdown emphasis characters from assistant messages', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    mockOpenAIMessage('**Hi**, this is your **estimate** estimate flow.');
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: 'postagent-markdown-cleanup-1',
+          input_text: 'Need an estimate',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { assistant_message: string };
+    expect(payload.assistant_message).toContain('Hi, this is your estimate estimate flow.');
+    expect(payload.assistant_message).not.toMatch(/\*/);
+  });
 });

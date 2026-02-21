@@ -333,7 +333,12 @@ function hasEstimateIntent(inputText: string): boolean {
 function normalizeAssistantMessage(text: string): string {
   return text
     .replace(/^hi,\s*how are you\?\s*what can i help you with today\?\s*/i, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/\*/g, '')
     .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
     .trim();
 }
 

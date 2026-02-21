@@ -19167,7 +19167,15 @@ function hasEstimateIntent(inputText) {
   return ESTIMATE_INTENT_CUES.test(inputText);
 }
 function normalizeAssistantMessage(text2) {
-  return text2.replace(/^hi,\s*how are you\?\s*what can i help you with today\?\s*/i, "").replace(/\n{3,}/g, "\n\n").trim();
+  return text2
+    .replace(/^hi,\s*how are you\?\s*what can i help you with today\?\s*/i, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*(.*?)\*/g, "$1")
+    .replace(/\*/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 }
 function hasFollowUpOffer(text2) {
   return /\b(follow up|get back|team member|callback|call you|text you|email you|best number|best email)\b/i.test(text2);

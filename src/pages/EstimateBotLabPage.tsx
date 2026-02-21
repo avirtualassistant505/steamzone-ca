@@ -55,6 +55,15 @@ const WARM_OPENER = 'Hello';
 
 const ESTIMATE_INTENT_REGEX = /\b(estimate|quote|pricing|price|cost|book|booking|schedule|appointment)\b/i;
 
+function sanitizeMessageText(text: string): string {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
 function hasEstimateIntent(input: string): boolean {
   return ESTIMATE_INTENT_REGEX.test(input);
 }
@@ -149,7 +158,7 @@ export default function EstimateBotLabPage() {
         throw new Error(payload.message ?? 'Unable to reach estimate agent.');
       }
 
-      setMessages((prev) => [...prev, { id: newMessageId(), role: 'assistant', content: payload.assistant_message }]);
+      setMessages((prev) => [...prev, { id: newMessageId(), role: 'assistant', content: sanitizeMessageText(payload.assistant_message) }]);
       setState(payload.state);
       setQuote(payload.quote ?? null);
       setDone(Boolean(payload.done));

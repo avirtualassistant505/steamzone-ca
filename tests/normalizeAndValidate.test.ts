@@ -40,6 +40,50 @@ describe('normalize_and_validate', () => {
     expect(result.normalized_value).toBe(14);
   });
 
+  it('parses spelled-out number words', () => {
+    const result = normalizeAndValidateField('patioQuantity', 'five', {
+      serviceType: 'window',
+      patioDoors: 'slide-only',
+      zone: 'zoneA',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.normalized_value).toBe(5);
+  });
+
+  it('parses spoken phrase numbers', () => {
+    const result = normalizeAndValidateField('patioQuantity', 'one', {
+      serviceType: 'window',
+      patioDoors: 'slide-only',
+      zone: 'zoneA',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.normalized_value).toBe(1);
+  });
+
+  it('maps select answers for size bracket without spacing', () => {
+    const result = normalizeAndValidateField('sizeBracket', '1500to2000', {
+      serviceType: 'window',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.normalized_value).toBe('1500to2000');
+  });
+
+  it('maps select answers for size bracket with spaces', () => {
+    const result = normalizeAndValidateField('sizeBracket', '1500 to 2000 sq ft', {
+      serviceType: 'window',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.normalized_value).toBe('1500to2000');
+  });
+
+  it('maps plus range phrasing to over options', () => {
+    const result = normalizeAndValidateField('sizeBracket', '3000+', {
+      serviceType: 'window',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.normalized_value).toBe('over3000');
+  });
+
   it('parses dimensions by taking the leading value', () => {
     const result = normalizeAndValidateField('frontageFeet', '72x48x102', {
       serviceType: 'commercialWindow',
