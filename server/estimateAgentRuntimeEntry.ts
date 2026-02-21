@@ -7,6 +7,6 @@ export {
   toolNextQuestion,
   toolNormalizeAndValidate,
   toolSetAnswer,
-} from './estimateAgentTools';
-export { appendTranscript, getSession } from './estimateAgentSessionStore';
-export { validateRequiredAnswers } from '../src/quote/normalization';
+} from './estimateAgentTools.js';
+export { appendTranscript, getSession } from './estimateAgentSessionStore.js';
+export { validateRequiredAnswers } from '../src/quote/normalization.js';

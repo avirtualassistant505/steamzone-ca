@@ -1,4 +1,4 @@
-import { getSupabaseAdminClient } from './supabaseAdmin';
+import { getSupabaseAdminClient } from './supabaseAdmin.js';
 
 export interface TranscriptEntry {
   role: 'user' | 'assistant' | 'tool';

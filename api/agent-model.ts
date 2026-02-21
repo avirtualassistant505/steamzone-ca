@@ -3,13 +3,13 @@ import {
   getAgentModelOptions,
   getAgentVoiceModelOptions,
   setAgentModelConfig,
-} from '../server/agentModelStore';
+} from '../server/agentModelStore.js';
 import {
   AGENT_DEFAULT_MODEL,
   AGENT_DEFAULT_MODEL_LABEL,
   AGENT_DEFAULT_VOICE_MODEL,
   AGENT_VOICE_MODEL_OPTIONS,
-} from '../src/estimate/core/agentModelConfig';
+} from '../src/estimate/core/agentModelConfig.js';
 
 type ApiRequest = {
   method?: string;

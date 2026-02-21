@@ -1,4 +1,4 @@
-import { computeDeterministicQuote } from '../src/quote/quoteEngine';
+import { computeDeterministicQuote } from '../src/quote/quoteEngine.js';
 import {
   buildInputUiHint,
   buildQuestionText,
@@ -9,18 +9,18 @@ import {
   pruneInvisibleAnswers,
   type ServiceType,
   withAnswerValue,
-} from '../src/quote/schema';
+} from '../src/quote/schema.js';
 import {
   normalizeAndValidateField,
   type NormalizeValidateResult,
   validateRequiredAnswers,
-} from '../src/quote/normalization';
+} from '../src/quote/normalization.js';
 import {
   createEmptySession,
   getSession,
   saveSession,
   type EstimateSessionRecord,
-} from './estimateAgentSessionStore';
+} from './estimateAgentSessionStore.js';
 
 export interface NextQuestionResult {
   done: boolean;

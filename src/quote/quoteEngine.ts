@@ -11,9 +11,9 @@ import {
   type PostConstructionEstimateInput,
   type ServiceType,
   type WindowEstimateInput,
-} from '../lib/estimateEngine';
-import { loadActivePricingConfig } from '../../server/pricingStore';
-import { getAnswerValue } from './schema';
+} from '../lib/estimateEngine.js';
+import { loadActivePricingConfig } from '../../server/pricingStore.js';
+import { getAnswerValue } from './schema.js';
 
 export interface QuoteLineItem {
   label: string;

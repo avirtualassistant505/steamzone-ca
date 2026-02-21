@@ -1,6 +1,6 @@
-import type { PricingConfig } from './estimateEngine';
-import { createDefaultPricingConfig } from './estimateEngine';
-import { getSupabaseAdminClient } from './supabaseAdmin';
+import type { PricingConfig } from './estimateEngine.js';
+import { createDefaultPricingConfig } from './estimateEngine.js';
+import { getSupabaseAdminClient } from './supabaseAdmin.js';
 
 type PricingSource = 'supabase' | 'defaults' | 'env_missing';
 

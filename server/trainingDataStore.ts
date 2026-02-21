@@ -1,4 +1,4 @@
-import { getSupabaseAdminClient } from './supabaseAdmin';
+import { getSupabaseAdminClient } from './supabaseAdmin.js';
 import trainingData from '../GHL/steamzone.ca/data/training/steamzone_master_training_merged_2026-02-09T16-22-36-339Z.json' with { type: 'json' };
 
 type StoredTrainingItem = {

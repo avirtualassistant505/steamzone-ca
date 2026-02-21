@@ -4,8 +4,8 @@ import {
   AGENT_MODEL_OPTIONS,
   AGENT_VOICE_MODEL_OPTIONS,
   type AgentModelOption,
-} from '../src/estimate/core/agentModelConfig';
-import { getSupabaseAdminClient } from './supabaseAdmin';
+} from '../src/estimate/core/agentModelConfig.js';
+import { getSupabaseAdminClient } from './supabaseAdmin.js';
 
 type ModelSource = 'db' | 'fallback';
 

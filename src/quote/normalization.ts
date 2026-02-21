@@ -6,7 +6,7 @@ import {
   getSchemaField,
   getEstimateSchema,
   type ServiceType,
-} from './schema';
+} from './schema.js';
 
 export interface NormalizeValidateResult {
   ok: boolean;

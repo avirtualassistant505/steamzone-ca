@@ -1,4 +1,4 @@
-import type { EstimateRecord } from './estimateEngine';
+import type { EstimateRecord } from './estimateEngine.js';
 
 export type EstimateDeliveryMode = 'customer' | 'internal';
 

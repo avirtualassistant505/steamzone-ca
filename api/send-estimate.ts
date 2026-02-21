@@ -1,6 +1,6 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { Resend } from 'resend';
-import type { ApiRequest, ApiResponse } from '../server/apiTypes';
+import type { ApiRequest, ApiResponse } from '../server/apiTypes.js';
 
 interface IncomingRecord {
   quoteNumber?: string;

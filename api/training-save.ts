@@ -1,4 +1,4 @@
-import { loadActiveTrainingItems, saveActiveTrainingItems } from '../server/trainingDataStore';
+import { loadActiveTrainingItems, saveActiveTrainingItems } from '../server/trainingDataStore.js';
 
 type ApiRequest = {
   method?: string;
