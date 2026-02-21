@@ -99,6 +99,10 @@ type TranscriptGetPayload = {
 type SupabaseDiagnosticPayload = {
   ok: boolean;
   message: string;
+  errorCategory?: 'missing_env' | 'missing_table' | 'cloudflare_error' | 'network_error' | 'html_error' | 'other';
+  errorCode?: number;
+  remediationHint?: string;
+  projectHealthUrl?: string;
   config: {
     hasUrl: boolean;
     hasServiceRoleKey: boolean;
@@ -1847,6 +1851,30 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                   {supabaseDiagResult.probe.sampleError && (
                     <p className="mt-1">
                       <span className="font-semibold">Sample error:</span> {supabaseDiagResult.probe.sampleError}
+                    </p>
+                  )}
+                  {supabaseDiagResult.remediationHint && (
+                    <p className="mt-1">
+                      <span className="font-semibold">Hint:</span> {supabaseDiagResult.remediationHint}
+                    </p>
+                  )}
+                  {supabaseDiagResult.projectHealthUrl && (
+                    <p className="mt-1">
+                      <a
+                        href={supabaseDiagResult.projectHealthUrl}
+                        className="font-semibold text-blue-700 underline underline-offset-4 hover:text-blue-800"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open Supabase project health page
+                      </a>
+                    </p>
+                  )}
+                  {supabaseDiagResult.errorCategory === 'cloudflare_error' && (
+                    <p className="mt-1">
+                      Cloudflare response code detected:
+                      {' '}
+                      {supabaseDiagResult.errorCode ? `${supabaseDiagResult.errorCode}` : 'unknown'}
                     </p>
                   )}
                 </div>
