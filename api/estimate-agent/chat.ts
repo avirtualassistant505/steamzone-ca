@@ -6,7 +6,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     const { handlerForEstimateAgentPost } = await import(
       '../../src/estimate/core/estimateAgentCore.js'
     );
-    await handlerForEstimateAgentPost(req, res, false);
+    await handlerForEstimateAgentPost(req, res, true);
   } catch (error) {
     res.status(500).json({
       message:

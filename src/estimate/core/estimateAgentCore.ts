@@ -1081,7 +1081,12 @@ async function runAgentLoop(
       assistantMessage = 'Your estimate is ready. I included the quote below.';
     } else {
       const next = await runtime.toolNextQuestion(sessionId);
-      assistantMessage = next.question_text ?? 'Please provide the next detail.';
+      const questionText = next.question_text ?? 'Please provide the next detail.';
+      if (!hadPriorAssistantTurn) {
+        assistantMessage = `${DEFAULT_USER_START} ${questionText}`.trim();
+      } else {
+        assistantMessage = questionText;
+      }
     }
   }
 
@@ -1226,11 +1231,6 @@ export async function handlerForEstimateAgentPost(
 
   if (!createSessionWhenMissing && !hasSession) {
     res.status(400).json({ message: 'session_id is required.' });
-    return;
-  }
-
-  if (!inputText) {
-    res.status(400).json({ message: 'input_text is required.' });
     return;
   }
 
