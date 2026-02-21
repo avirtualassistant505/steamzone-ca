@@ -460,9 +460,9 @@ export default function EstimateVoiceLabPage() {
       const answerResponse = await fetch('/api/voice/realtime-call', {
         method: 'POST',
         headers: {
-          'content-type': 'application/sdp',
+          'content-type': 'application/json',
         },
-        body: sdpBody,
+        body: JSON.stringify({ sdp: sdpBody }),
       });
 
       if (!answerResponse.ok) {
