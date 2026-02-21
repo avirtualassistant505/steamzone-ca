@@ -81,18 +81,17 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   const voice = process.env.OPENAI_REALTIME_VOICE?.trim() || 'marin';
 
   const sessionConfig = {
-    type: 'realtime',
     model,
     instructions: REALTIME_INSTRUCTIONS,
-    audio: {
-      input: {
-        turn_detection: {
-          type: 'server_vad',
-        },
-      },
-      output: {
-        voice,
-      },
+    modalities: ['text', 'audio'],
+    voice,
+    input_audio_format: 'pcm16',
+    output_audio_format: 'pcm16',
+    turn_detection: {
+      type: 'server_vad',
+    },
+    input_audio_transcription: {
+      model: 'whisper-1',
     },
     tools: [
       {
