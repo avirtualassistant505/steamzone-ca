@@ -129,7 +129,7 @@ type EstimateAgentRuntimeModule = {
   toolComputeQuote: (sessionId: string) => Promise<unknown>;
   appendTranscript: (
     sessionId: string,
-    entry: { role: TranscriptRole; content: string; at: string }
+    entry: { role: TranscriptRole; content: string; at: string; channel?: PostagentChannel }
   ) => Promise<{
     session_id: string;
     answers: Record<string, unknown>;
@@ -983,19 +983,21 @@ export async function appendSessionTranscript(
   sessionId: string,
   role: TranscriptRole,
   content: string,
-  at = nowIso()
+  at = nowIso(),
+  channel?: PostagentChannel
 ): Promise<void> {
   const runtime = await getRuntime();
-  await runtime.appendTranscript(sessionId, { role, content, at });
+  await runtime.appendTranscript(sessionId, { role, content, at, channel });
 }
 
 export async function appendTranscript(
   sessionId: string,
   role: TranscriptRole,
   content: string,
-  at = nowIso()
+  at = nowIso(),
+  channel?: PostagentChannel
 ): Promise<void> {
-  return appendSessionTranscript(sessionId, role, content, at);
+  return appendSessionTranscript(sessionId, role, content, at, channel);
 }
 
 async function callOpenAI(
@@ -1066,13 +1068,8 @@ async function callOpenAIWithFallback(
   }
 }
 
-function transcriptLine(inputText: string, channel?: PostagentChannel, metadata?: Record<string, unknown>): string {
-  const prefix = channel ? `[${channel}] ` : '';
-  if (!metadata || Object.keys(metadata).length === 0) {
-    return `${prefix}${inputText}`;
-  }
-
-  return `${prefix}${inputText} ${JSON.stringify(metadata)}`;
+function transcriptLine(inputText: string): string {
+  return inputText.trim();
 }
 
 async function appendDurableConversationTurn(
@@ -1080,17 +1077,28 @@ async function appendDurableConversationTurn(
   role: TranscriptRole,
   content: string,
   at: string,
-  options?: { reasoning?: string[] }
+  options?: { reasoning?: string[]; channel?: PostagentChannel }
 ): Promise<void> {
   try {
     const logs = await import('../../../server/conversationLogStore.js');
     const reasoning = options?.reasoning;
-    await logs.appendConversationTurn(sessionId, {
+    const turn = {
       role,
       content,
       at,
       reasoning: Array.isArray(reasoning) && reasoning.length > 0 ? reasoning.join('\n') : undefined,
-    });
+    } as {
+      role: TranscriptRole;
+      content: string;
+      at: string;
+      reasoning?: string;
+      channel?: PostagentChannel;
+    };
+    const normalizedChannel = options?.channel?.toLowerCase() as PostagentChannel | undefined;
+    if (normalizedChannel) {
+      turn.channel = normalizedChannel;
+    }
+    await logs.appendConversationTurn(sessionId, turn);
   } catch {
     // Keep primary chat flow working even if log persistence is unavailable.
   }
@@ -1529,13 +1537,16 @@ export async function runEstimateAgentCore(
   const channel = request.channel;
 
   const userTranscriptAt = nowIso();
-  const userTranscript = transcriptLine(inputText, channel, request.metadata);
+  const userTranscript = transcriptLine(inputText);
   await runtime.appendTranscript(sessionId, {
     role: 'user',
     content: userTranscript,
     at: userTranscriptAt,
+    channel,
   });
-  await appendDurableConversationTurn(sessionId, 'user', userTranscript, userTranscriptAt);
+  await appendDurableConversationTurn(sessionId, 'user', userTranscript, userTranscriptAt, {
+    channel,
+  });
 
   const schema = await runtime.toolGetSchema();
   const state = await runtime.toolGetState(sessionId);
@@ -1562,14 +1573,16 @@ export async function runEstimateAgentCore(
   };
 
   const assistantTranscriptAt = nowIso();
-  const assistantTranscript = transcriptLine(loopResult.assistant_message, channel);
+  const assistantTranscript = transcriptLine(loopResult.assistant_message);
   await runtime.appendTranscript(sessionId, {
     role: 'assistant',
     content: assistantTranscript,
     at: assistantTranscriptAt,
+    channel,
   });
   await appendDurableConversationTurn(sessionId, 'assistant', assistantTranscript, assistantTranscriptAt, {
     reasoning: loopResult.assistant_reasoning,
+    channel,
   });
 
   const response: PostagentEstimateResponse = {

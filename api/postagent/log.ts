@@ -33,14 +33,6 @@ function asText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function withChannelAndMetadata(
-  content: string,
-  channel: string
-): string {
-  const prefix = channel ? `[${channel}] ` : '';
-  return `${prefix}${content}`.trim();
-}
-
 export default async function handler(req: ApiRequest, res: ApiResponse): Promise<void> {
   if (req.method !== 'POST') {
     res.status(405).json({ message: 'Method not allowed.' });
@@ -72,11 +64,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   }
 
   const channel = asText(payload.channel);
-  const line = withChannelAndMetadata(content, channel);
 
   try {
     const { appendConversationTurn, getConversationStorageMode } = await import('../../server/conversationLogStore.js');
-    await appendConversationTurn(sessionId, { role, content: line, at: new Date().toISOString() });
+    const normalizedChannel = channel ? channel.toLowerCase() : '';
+    await appendConversationTurn(sessionId, {
+      role,
+      content,
+      at: new Date().toISOString(),
+      channel: normalizedChannel,
+    });
 
     res.status(200).json({
       ok: true,

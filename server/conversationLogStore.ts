@@ -8,6 +8,8 @@ export interface ConversationTurn {
   role: ConversationRole;
   content: string;
   at: string;
+  channel?: string;
+  source?: string;
   reasoning?: string;
 }
 
@@ -159,7 +161,7 @@ function normalizeContent(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
-function parseConversationContent(content: string): ParsedConversationContent {
+function parseLegacyPrefix(content: string): ParsedConversationContent {
   const normalized = normalizeContent(content);
   const channelMatch = normalized.match(CHANNEL_PREFIX_RE);
   const channel = (channelMatch?.[1]?.toLowerCase() as ConversationChannel | undefined) ?? 'unknown';
@@ -171,6 +173,46 @@ function parseConversationContent(content: string): ParsedConversationContent {
     .trim();
 
   return { channel, stripped, canonical };
+}
+
+function parseConversationContent(
+  content: string,
+  explicitChannel?: string
+): ParsedConversationContent {
+  if (explicitChannel) {
+    const explicit = explicitChannel.toLowerCase().trim();
+    if (explicit) {
+      const normalizedChannel =
+        explicit === 'web' || explicit === 'voice' || explicit === 'sms' || explicit === 'test'
+          ? (explicit as ConversationChannel)
+          : 'unknown';
+      return {
+        channel: normalizedChannel,
+        stripped: normalizeContent(content),
+        canonical: normalizeContent(content)
+          .toLowerCase()
+          .replace(/[^a-z0-9 ]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim(),
+      };
+    }
+  }
+
+  return parseLegacyPrefix(content);
+}
+
+function normalizeLegacyTranscriptContent(entry: ConversationTurn): ConversationTurn {
+  const parsed = parseConversationContent(entry.content, entry.channel);
+  if (!entry.channel && !CHANNEL_PREFIX_RE.test(normalizeContent(entry.content))) {
+    return entry;
+  }
+
+  const next: ConversationTurn = {
+    ...entry,
+    content: parsed.stripped,
+    channel: parsed.channel,
+  };
+  return next;
 }
 
 function parseTimestampMs(value: string | undefined): number {
@@ -186,8 +228,8 @@ function shouldTreatAsNearDuplicate(previous: ConversationTurn, incoming: Conver
     return false;
   }
 
-  const previousParsed = parseConversationContent(previous.content);
-  const incomingParsed = parseConversationContent(incoming.content);
+  const previousParsed = parseConversationContent(previous.content, previous.channel);
+  const incomingParsed = parseConversationContent(incoming.content, incoming.channel);
   if (!previousParsed.canonical || !incomingParsed.canonical) {
     return false;
   }
@@ -205,8 +247,8 @@ function shouldTreatAsNearDuplicate(previous: ConversationTurn, incoming: Conver
 }
 
 function shouldUpgradeUnknownChannel(previous: ConversationTurn, incoming: ConversationTurn): boolean {
-  const previousParsed = parseConversationContent(previous.content);
-  const incomingParsed = parseConversationContent(incoming.content);
+  const previousParsed = parseConversationContent(previous.content, previous.channel);
+  const incomingParsed = parseConversationContent(incoming.content, incoming.channel);
   return previousParsed.channel === 'unknown' && incomingParsed.channel !== 'unknown';
 }
 
@@ -258,7 +300,9 @@ function normalizeRow(
     session_id: row?.session_id ?? sessionId,
     answers: (row?.answers ?? {}) as Record<string, unknown>,
     asked_keys: (row?.asked_keys ?? []) as string[],
-    transcript: (row?.transcript ?? []) as ConversationTurn[],
+    transcript: Array.isArray(row?.transcript)
+      ? (row?.transcript as unknown[]).map((entry) => normalizeLegacyTranscriptContent(entry as ConversationTurn))
+      : [],
     last_question_key: (row?.last_question_key ?? null) as string | null,
     review_notes: normalizeReviewNotes((row as { review_notes?: unknown })?.review_notes),
     review_status: coerceReviewStatus((row as { review_status?: unknown })?.review_status),
@@ -410,6 +454,10 @@ export async function appendConversationTurn(
     ...entry,
     content: normalizeContent(entry.content),
   };
+  if (normalized.channel) {
+    const channel = normalized.channel.toLowerCase().trim();
+    normalized.channel = ['web', 'voice', 'sms', 'test'].includes(channel) ? channel : 'unknown';
+  }
 
   if (!normalized.content) {
     return loadConversationSession(normalizedSessionId);
@@ -482,6 +530,7 @@ export async function appendConversationTurn(
       mergedTranscript[mergedTranscript.length - 1] = {
         ...previous,
         content: normalized.content,
+        channel: normalized.channel,
         at: normalized.at || previous.at,
       };
       const mergedSession: ConversationSessionRecord = {

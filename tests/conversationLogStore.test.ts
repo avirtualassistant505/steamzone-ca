@@ -38,7 +38,8 @@ describe('conversationLogStore dedupe and channel normalization', () => {
 
     const session = await loadConversationSession(sessionId);
     expect(session.transcript.length).toBe(1);
-    expect(session.transcript[0]?.content).toMatch(/^\[voice\]\s+/i);
+    expect(session.transcript[0]?.content).toBe('Thanks for calling Steam Zone!');
+    expect(session.transcript[0]?.channel).toBe('voice');
   });
 
   it('dedupes near-identical user turns within dedupe window', async () => {
@@ -96,6 +97,7 @@ describe('conversationLogStore dedupe and channel normalization', () => {
 
     const session = await loadConversationSession(sessionId);
     expect(session.transcript.length).toBe(1);
-    expect(session.transcript[0]?.content).toMatch(/^\[voice\]\s+/i);
+    expect(session.transcript[0]?.content).toBe('Your estimate is ready.');
+    expect(session.transcript[0]?.channel).toBe('voice');
   });
 });
