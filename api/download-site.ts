@@ -28,6 +28,8 @@ type BackupManifest = {
   generatedAt: string;
   requestedBy: 'admin';
   includeDatabase: boolean;
+  candidateRoots: string[];
+  resolvedRoot: string;
   projectRoot: string;
   supabase: {
     configured: boolean;
@@ -44,8 +46,14 @@ type BackupManifest = {
   };
 };
 
+type DirectoryOptions = {
+  includeNodeModules: boolean;
+  includeOnly?: (relPath: string, absPath: string) => boolean;
+};
+
 type CollectTarget = {
   path: string;
+  options?: DirectoryOptions;
 };
 
 const DEFAULT_TABLES = [
@@ -56,22 +64,30 @@ const DEFAULT_TABLES = [
   'estimate_records',
 ] as const;
 
-const SOURCE_ROOT = process.cwd();
-const MAX_FILE_BYTES = 8 * 1024 * 1024;
+const PROJECT_MARKERS = ['package.json', 'api', 'src', 'server', 'public', 'index.html'];
+const MAX_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_PROJECT_SEARCH_DEPTH = 6;
 const DATABASE_FOLDER = 'database';
-const FILES_ROOTS: CollectTarget[] = [
-  { path: 'api' },
-  { path: 'src' },
-  { path: 'server' },
-  { path: 'public' },
-  { path: 'docs' },
-  { path: 'dist' },
-  { path: 'GHL/steamzone.ca/data/training' },
-];
+
+const PROJECT_ROOT_HINTS = [
+  process.env.SITE_BACKUP_SOURCE_ROOT,
+  process.env.STEAMZONE_BACKUP_SOURCE_ROOT,
+  process.env.REPOSITORY_ROOT,
+  process.env.PROJECT_ROOT,
+  process.env.VERCEL_PROJECT_PATH,
+  process.env.VERCEL_PATH,
+  process.env.VERCEL_PATH0,
+  '/var/task',
+  '/vercel/path0',
+  '/workspace/default',
+  '/workspace',
+  '/app',
+].filter((value): value is string => Boolean(value));
 
 const ROOT_FILES: string[] = [
   '.env.example',
   'AGENTS.md',
+  'README.md',
   'index.html',
   'eslint.config.js',
   'postcss.config.js',
@@ -82,10 +98,51 @@ const ROOT_FILES: string[] = [
   'tsconfig.node.json',
   'tsconfig.json',
   'vite.config.ts',
+  'playwright.config.ts',
+  'vitest.config.ts',
+  'vercel.json',
+  '.gitignore',
+  '.vercel/output/config.json',
+  '.vercel/output/builds.json',
 ];
 
-const SKIP_DIRECTORIES = new Set(['.git', '.github', 'node_modules', '.vercel', '.bolt']);
-const SKIP_ROOT_FILES = new Set(['steamzone-project.zip']);
+const CODE_ROOTS: CollectTarget[] = [
+  { path: 'api', options: { includeNodeModules: false } },
+  { path: 'src', options: { includeNodeModules: false } },
+  { path: 'server', options: { includeNodeModules: false } },
+  { path: 'public', options: { includeNodeModules: false } },
+  { path: 'docs', options: { includeNodeModules: false } },
+  { path: 'dist', options: { includeNodeModules: false } },
+  { path: 'tests', options: { includeNodeModules: false } },
+  { path: 'e2e', options: { includeNodeModules: false } },
+  { path: 'tmp', options: { includeNodeModules: false } },
+  { path: 'scripts', options: { includeNodeModules: false } },
+  { path: 'GHL', options: { includeNodeModules: false } },
+  { path: '.bolt', options: { includeNodeModules: false } },
+  {
+    path: '.vercel/output/functions',
+    options: {
+      includeNodeModules: false,
+      includeOnly: (relPath: string): boolean => {
+        return /\.(js|mjs|cjs|json|map|txt|md|ts|css|html)$/i.test(relPath);
+      },
+    },
+  },
+  {
+    path: '.vercel/output/diagnostics',
+    options: {
+      includeNodeModules: false,
+      includeOnly: (relPath: string): boolean => {
+        return /\.(log|txt|json|toml)$/i.test(relPath) || relPath.endsWith('/diagnostics');
+      },
+    },
+  },
+];
+
+const FILES_ROOTS: CollectTarget[] = [{ path: 'GHL/steamzone.ca/data/training' }];
+
+const SKIP_DIRECTORIES = new Set(['.git', 'node_modules']);
+const SKIP_ROOT_FILES = new Set(['steamzone-project.zip', '.DS_Store']);
 
 function normalizeDbMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -105,6 +162,91 @@ function isMissingTableError(message: string): boolean {
     lower.includes('schema cache') ||
     lower.includes('could not find')
   );
+}
+
+async function fileExists(entry: string): Promise<boolean> {
+  try {
+    await fs.access(entry);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isDirectory(entry: string): Promise<boolean> {
+  try {
+    const stats = await fs.stat(entry);
+    return stats.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function gatherCandidateRoots(baseRoot: string): string[] {
+  const candidates = new Set<string>([...PROJECT_ROOT_HINTS]);
+
+  let depthWalk = baseRoot;
+  for (let depth = 0; depth <= MAX_PROJECT_SEARCH_DEPTH; depth += 1) {
+    candidates.add(depthWalk);
+    const parent = path.dirname(depthWalk);
+    if (parent === depthWalk) {
+      break;
+    }
+    depthWalk = parent;
+  }
+
+  return Array.from(candidates).map((value) => path.resolve(value));
+}
+
+function hasProjectMarker(entry: string, marker: string): Promise<boolean> {
+  return fileExists(path.join(entry, marker));
+}
+
+async function looksLikeProjectRoot(entry: string): Promise<boolean> {
+  if (!(await hasProjectMarker(entry, 'package.json'))) {
+    return false;
+  }
+
+  let found = 0;
+  for (const marker of PROJECT_MARKERS) {
+    if (marker === 'package.json') {
+      continue;
+    }
+
+    if (await isDirectory(path.join(entry, marker))) {
+      found += 1;
+    }
+  }
+
+  if ((await fileExists(path.join(entry, 'index.html')))) {
+    found += 1;
+  }
+
+  return found >= 2;
+}
+
+async function resolveProjectRoot(): Promise<{ root: string; candidates: string[] }> {
+  const candidates = gatherCandidateRoots(process.cwd());
+
+  for (const candidate of candidates) {
+    if (await looksLikeProjectRoot(candidate)) {
+      return { root: candidate, candidates };
+    }
+  }
+
+  return { root: process.cwd(), candidates };
+}
+
+function shouldSkipByType(absPath: string, relPath: string): boolean {
+  if (SKIP_ROOT_FILES.has(path.basename(absPath))) {
+    return true;
+  }
+
+  if (relPath.includes('/.next/') || relPath.includes('/.output/') || relPath.includes('/.idea/')) {
+    return true;
+  }
+
+  return false;
 }
 
 async function exportDbTable(supabase: Awaited<ReturnType<typeof getSupabaseAdminClient>>, table: string): Promise<SourceTableResult> {
@@ -173,7 +315,8 @@ async function addDirectoryToZip(
   absRoot: string,
   relRoot: string,
   manifest: BackupManifest['includedFiles'],
-  fileCount: { total: number; skipped: number; bytes: number }
+  fileCount: { total: number; skipped: number; bytes: number },
+  options: DirectoryOptions = { includeNodeModules: false }
 ): Promise<void> {
   try {
     const entries = await fs.readdir(absRoot, { withFileTypes: true });
@@ -189,11 +332,29 @@ async function addDirectoryToZip(
         if (shouldSkipName(entry.name)) {
           continue;
         }
-        await addDirectoryToZip(zip, absPath, relPath, manifest, fileCount);
+        if (!options.includeNodeModules && entry.name === 'node_modules') {
+          manifest.skippedReasons.push(`Skipped directory by policy: ${relPath}`);
+          fileCount.skipped += 1;
+          continue;
+        }
+
+        await addDirectoryToZip(zip, absPath, relPath, manifest, fileCount, options);
         continue;
       }
 
       if (!entry.isFile()) {
+        continue;
+      }
+
+      if (options.includeOnly && !options.includeOnly(relPath, absPath)) {
+        manifest.skippedReasons.push(`Skipped by collector rule: ${relPath}`);
+        fileCount.skipped += 1;
+        continue;
+      }
+
+      if (shouldSkipByType(absPath, relPath)) {
+        manifest.skippedReasons.push(`Skipped by file type policy: ${relPath}`);
+        fileCount.skipped += 1;
         continue;
       }
 
@@ -258,11 +419,14 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     })() : req.body
   );
 
+  const { root: projectRoot, candidates } = await resolveProjectRoot();
   const manifest: BackupManifest = {
     generatedAt: new Date().toISOString(),
     requestedBy: 'admin',
     includeDatabase,
-    projectRoot: SOURCE_ROOT,
+    candidateRoots: candidates,
+    resolvedRoot: projectRoot,
+    projectRoot,
     supabase: {
       configured: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
       message: '',
@@ -280,9 +444,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
 
   const fileCount = { total: 0, skipped: 0, bytes: 0 };
   const zip = new JSZip();
+  const projectAwareFiles = FILES_ROOTS.concat(CODE_ROOTS).filter((entry) => Boolean(entry.path));
 
   for (const entry of ROOT_FILES) {
-    const abs = path.join(SOURCE_ROOT, entry);
+    const abs = path.join(projectRoot, entry);
     try {
       const stats = await fs.stat(abs);
       if (!stats.isFile()) {
@@ -309,18 +474,25 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     }
   }
 
-  for (const target of FILES_ROOTS) {
-    const absRoot = path.join(SOURCE_ROOT, target.path);
-    const initialReasonCount = manifest.includedFiles.skippedReasons.length;
-    await addDirectoryToZip(zip, absRoot, target.path, manifest.includedFiles, fileCount);
-    if (manifest.includedFiles.skippedReasons.length === initialReasonCount) {
-      // If directory doesn't exist, avoid failing backup by adding a message.
-      try {
-        await fs.access(absRoot);
-      } catch {
-        manifest.includedFiles.skippedReasons.push(`Directory not found: ${target.path}`);
+  for (const target of projectAwareFiles) {
+    const absRoot = path.join(projectRoot, target.path);
+    const targetOptions = target.options ? target.options : { includeNodeModules: false };
+    const options = {
+      includeNodeModules: targetOptions.includeNodeModules,
+      includeOnly: targetOptions.includeOnly,
+    };
+
+    try {
+      const stats = await fs.stat(absRoot);
+      if (!stats.isDirectory()) {
+        manifest.includedFiles.skippedReasons.push(`Path is not a directory: ${target.path}`);
         fileCount.skipped += 1;
+        continue;
       }
+      await addDirectoryToZip(zip, absRoot, target.path, manifest.includedFiles, fileCount, options);
+    } catch {
+      manifest.includedFiles.skippedReasons.push(`Directory not found: ${target.path}`);
+      fileCount.skipped += 1;
     }
   }
 
