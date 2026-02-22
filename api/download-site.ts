@@ -317,7 +317,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       // If directory doesn't exist, avoid failing backup by adding a message.
       try {
         await fs.access(absRoot);
-      } catch (error) {
+      } catch {
         manifest.includedFiles.skippedReasons.push(`Directory not found: ${target.path}`);
         fileCount.skipped += 1;
       }

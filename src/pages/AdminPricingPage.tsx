@@ -152,10 +152,267 @@ function parsePayloadError<T>(result: SafeJsonResult<T>): string {
 }
 
 const STORAGE_KEY = 'steamzone_training_admin_tab';
+type AdminTab = 'pricing' | 'training' | 'prompt' | 'logs' | 'download';
 
 const cardClass = 'rounded-2xl border border-gray-200 bg-white p-6 shadow-sm';
 const PROMPT_FALLBACK =
   'You can add your shared system prompt instructions here to control tone, style, and behavior for both web and voice estimate agents.';
+const ADMIN_CONVERSATION_VALUE_UNKNOWN = 'Not captured';
+
+const FIELD_LABELS: Record<string, string> = {
+  serviceType: 'Service Type',
+  postalCode: 'Postal Code',
+  zone: 'Travel Zone',
+  storey: 'House Type / Storeys',
+  sizeBracket: 'Square Footage Bracket',
+  scope: 'Cleaning Scope',
+  screens: 'Screens',
+  tracks: 'Tracks & Sills',
+  hardToReach: 'Hard-to-reach windows',
+  hardWaterRemoval: 'Hard water removal needed',
+  constructionDebris: 'Construction debris / paint on glass',
+  slidingRemoval: 'Sliding windows removal',
+  slidingQuantity: 'Sliding windows quantity',
+  patioDoors: 'Patio doors',
+  patioQuantity: 'Patio doors quantity',
+  skylights: 'Skylights',
+  skylightQuantity: 'Skylight quantity',
+  railingGlass: 'Railing glass',
+  frenchPanes: 'French panes',
+  sunroom: 'Sunroom',
+  walkoutBasement: 'Walkout basement access',
+  buildingType: 'Building type',
+  storeys: 'Storeys',
+  sizeMode: 'Glass size method',
+  paneCount: 'Pane count',
+  frontageFeet: 'Frontage (feet)',
+  glassDoors: 'Glass doors',
+  frequency: 'Service frequency',
+  liftRequired: 'Lift required',
+  afterHours: 'After-hours availability',
+  overspray: 'Overspray cleanup',
+  hardWater: 'Hard-water treatment',
+  estimateMode: 'Carpet estimate mode',
+  rooms: 'Room count',
+  sqftBracket: 'Square footage bracket',
+  condition: 'Carpet condition',
+  stairsSteps: 'Stairs',
+  hallways: 'Hallways',
+  advancedStainRemoval: 'Advanced stain removal',
+  odorElimination: 'Odor elimination',
+  petTreatment: 'Pet treatment',
+  stainProtector: 'Stain protection',
+  furnitureMoving: 'Furniture moving',
+  unusualCondition: 'Unusual condition',
+  projectType: 'Project type',
+  buildType: 'Build type',
+  floors: 'Floors',
+  stage: 'Cleaning stage',
+  dustLoad: 'Dust load',
+  interiorWindows: 'Interior windows',
+  scraping: 'Scraping',
+  floorDetailing: 'Floor detailing',
+  insideCabinets: 'Inside cabinets',
+  appliances: 'Appliances',
+  specialDetailing: 'Special detailing',
+  multiTenantAccess: 'Multi-tenant access',
+  schedule: 'Preferred schedule',
+  'contact.fullName': 'Contact name',
+  'contact.phone': 'Contact phone',
+  'contact.email': 'Contact email',
+  'contact.address': 'Contact address',
+  'contact.consentToContact': 'Consent to contact',
+  'contact.marketingOptIn': 'Marketing opt-in',
+};
+
+const ENUM_LABELS: Record<string, Record<string, string>> = {
+  serviceType: {
+    window: 'Residential Windows',
+    commercialWindow: 'Commercial Windows',
+    carpet: 'Carpet Cleaning',
+    postConstruction: 'Post-Construction Cleaning',
+  },
+  zone: {
+    zoneA: 'Zone A - Steinbach + 15km',
+    zoneB: 'Zone B - 15km to 35km',
+    zoneC: 'Zone C - Winnipeg trips',
+    zoneD: 'Zone D - Extended rural',
+  },
+  storey: {
+    bungalow: 'Bungalow',
+    oneHalf: '1.5 story',
+    two: '2 story',
+    twoHalf: '2.5 story',
+    three: '3 story',
+  },
+  sizeBracket: {
+    under1000: 'Under 1000 sq ft',
+    '1000to1500': '1000-1500 sq ft',
+    '1500to2000': '1500-2000 sq ft',
+    '2000to2500': '2000-2500 sq ft',
+    '2500to3000': '2500-3000 sq ft',
+    over3000: '3000+ sq ft',
+  },
+  scope: {
+    exterior: 'Exterior only',
+    interior: 'Interior only',
+    both: 'Interior + Exterior',
+  },
+  screens: { none: 'None', some: 'Some', all: 'All' },
+  tracks: { basic: 'Basic', detailed: 'Detailed' },
+  slidingRemoval: { none: 'No', threePanel: '3-panel', fivePanel: '5-panel' },
+  patioDoors: { none: 'No patio work', takeApart: 'Take-apart', slideOnly: 'Slide-only' },
+  skylights: { none: 'None', interior: 'Interior', exterior: 'Exterior', both: 'Both sides' },
+  railingGlass: { none: 'None', oneSide: 'One side', twoSides: 'Two sides' },
+  frenchPanes: { none: 'None', some: 'Some', lots: 'Lots' },
+  buildingType: {
+    storefront: 'Storefront',
+    lowRise: 'Low-rise',
+    midRise: 'Mid-rise',
+    highRise: 'High-rise',
+  },
+  storeys: {
+    ground: 'Ground floor',
+    twoToThree: '2-3 storeys',
+    fourToEight: '4-8 storeys',
+    ninePlus: '9+ storeys',
+  },
+  sizeMode: { paneCount: 'Pane count', frontageFeet: 'Frontage feet' },
+  frequency: {
+    oneTime: 'One-time',
+    monthly: 'Monthly',
+    biweekly: 'Bi-weekly',
+    weekly: 'Weekly',
+  },
+  condition: { light: 'Light', moderate: 'Moderate', heavy: 'Heavy' },
+  estimateMode: { rooms: 'By rooms', sqft: 'By square footage' },
+  sqftBracket: {
+    under500: 'Under 500 sq ft',
+    '500to1000': '500-1000 sq ft',
+    '1000to1500': '1000-1500 sq ft',
+    '1500to2000': '1500-2000 sq ft',
+    over2000: '2000+ sq ft',
+    under1000: 'Under 1000 sq ft',
+    '1000to2500': '1000-2500 sq ft',
+    '2500to5000': '2500-5000 sq ft',
+    over5000: '5000+ sq ft',
+  },
+  furnitureMoving: { none: 'None', light: 'Light', heavy: 'Heavy' },
+  projectType: { residential: 'Residential', commercial: 'Commercial' },
+  buildType: { renovation: 'Renovation', newBuild: 'New build' },
+  stage: { rough: 'Rough', light: 'Light', final: 'Final', touchUp: 'Touch-up' },
+  dustLoad: { light: 'Light', medium: 'Medium', heavy: 'Heavy' },
+  interiorWindows: {
+    none: 'None',
+    small: 'Small',
+    medium: 'Medium',
+    large: 'Large',
+  },
+  scraping: { none: 'None', some: 'Some', lots: 'Lots' },
+  floorDetailing: {
+    none: 'None',
+    small: 'Small',
+    medium: 'Medium',
+    large: 'Large',
+  },
+  schedule: { asap: 'ASAP', nextWeek: 'Next week', flexible: 'Flexible', tomorrow: 'Tomorrow' },
+};
+
+type ConversationFlowEntry = {
+  key: string;
+  label: string;
+  value: string;
+  answered: boolean;
+};
+
+function formatFlowLabel(key: string): string {
+  return FIELD_LABELS[key] ?? key.replace(/([A-Z])/g, ' $1').replace(/^./, (character) => character.toUpperCase());
+}
+
+function formatFlowValue(key: string, value: unknown): string {
+  if (value === undefined || value === null) {
+    return ADMIN_CONVERSATION_VALUE_UNKNOWN;
+  }
+
+  if (typeof value === 'boolean') {
+    return value ? 'Yes' : 'No';
+  }
+
+  if (typeof value === 'number') {
+    return String(value);
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return ADMIN_CONVERSATION_VALUE_UNKNOWN;
+    }
+
+    const map = ENUM_LABELS[key];
+    if (map && map[trimmed]) {
+      return map[trimmed];
+    }
+
+    return trimmed;
+  }
+
+  if (Array.isArray(value)) {
+    return value.length === 0 ? ADMIN_CONVERSATION_VALUE_UNKNOWN : value.join(', ');
+  }
+
+  if (typeof value === 'object') {
+    return JSON.stringify(value);
+  }
+
+  return String(value);
+}
+
+function getAnswerByPath(values: Record<string, unknown>, key: string): unknown {
+  const path = key.split('.');
+  let current: unknown = values;
+
+  for (const segment of path) {
+    if (!segment || current === null || current === undefined || typeof current !== 'object' || Array.isArray(current)) {
+      return undefined;
+    }
+
+    const record = current as Record<string, unknown>;
+    current = record[segment];
+  }
+
+  return current;
+}
+
+function buildConversationFlowEntries(session: ConversationDetail): ConversationFlowEntry[] {
+  const seen = new Set<string>();
+  const entries: ConversationFlowEntry[] = [];
+
+  const addKey = (key: string): void => {
+    if (seen.has(key)) {
+      return;
+    }
+
+    const value = getAnswerByPath(session.answers, key);
+    const answered = value !== undefined;
+    const formatted = formatFlowValue(key, value);
+    entries.push({ key, label: formatFlowLabel(key), value: formatted, answered });
+    seen.add(key);
+  };
+
+  session.asked_keys.forEach(addKey);
+
+  if (session.answers?.serviceType && !seen.has('serviceType')) {
+    addKey('serviceType');
+  }
+
+  if (session.answers?.contact && typeof session.answers.contact === 'object' && !Array.isArray(session.answers.contact)) {
+    addKey('contact.fullName');
+    addKey('contact.phone');
+    addKey('contact.email');
+  }
+
+  return entries;
+}
 
 function NumberField({
   label,
@@ -203,7 +460,7 @@ function ToggleField({
 }
 
 export default function AdminPricingPage({ pricingConfig, onPricingConfigChange, pricingStatus }: AdminPricingPageProps) {
-  const [activeTab, setActiveTab] = useState<'pricing' | 'training' | 'logs' | 'download'>('pricing');
+  const [activeTab, setActiveTab] = useState<AdminTab>('pricing');
   const [draftConfig, setDraftConfig] = useState<PricingConfig>(pricingConfig);
   const [saveMessage, setSaveMessage] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -261,7 +518,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
   useEffect(() => {
     const tab = localStorage.getItem(STORAGE_KEY);
-    if (tab === 'training' || tab === 'pricing' || tab === 'logs' || tab === 'download') {
+    if (tab === 'training' || tab === 'pricing' || tab === 'prompt' || tab === 'logs' || tab === 'download') {
       setActiveTab(tab);
     }
   }, []);
@@ -628,7 +885,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     }
   }
 
-  function setTab(nextTab: 'pricing' | 'training' | 'logs' | 'download'): void {
+  function setTab(nextTab: AdminTab): void {
     setActiveTab(nextTab);
     localStorage.setItem(STORAGE_KEY, nextTab);
 
@@ -969,6 +1226,11 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     }));
   }
 
+  const conversationFlow = useMemo(
+    () => (selectedConversation ? buildConversationFlowEntries(selectedConversation) : []),
+    [selectedConversation]
+  );
+
   return (
     <main className="bg-slate-50 pb-20 pt-28">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -978,25 +1240,55 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
             <p className="mt-3 max-w-3xl text-gray-600">
               {activeTab === 'pricing'
                 ? 'Full pricing control for Steinbach routes: travel zones, per-service base rates, multipliers, add-ons, red flags, and estimate range behavior.'
+                : activeTab === 'prompt'
+                  ? 'Adjust shared system prompt and agent model settings used by both web and voice estimate agents.'
                 : activeTab === 'training'
                   ? 'Update shared training questions/answers used by both web and voice agents.'
                   : activeTab === 'logs'
                     ? 'Browse saved conversation sessions and full voice/text transcripts.'
                     : 'Create and download a full site backup zip including local code and database snapshot data.'}
             </p>
-            <p className="mt-3">
+            <div className="mt-4 flex flex-wrap gap-3">
               <a
                 href="/estimate-bot-lab"
                 className="inline-flex rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
               >
-                Open Test Page
+                Open Text Test Page
               </a>
-            </p>
+              <a
+                href="/estimate-voice-lab"
+                className="inline-flex rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100"
+              >
+                Open Voice Test Page
+              </a>
+              <button
+                type="button"
+                onClick={() => setTab('logs')}
+                className="inline-flex rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
+              >
+                Go to Conversation Logs
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab('download')}
+                className="inline-flex rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
+              >
+                Go to Download Site
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab('prompt')}
+                className="inline-flex rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
+              >
+                Open Prompt Editor
+              </button>
+            </div>
             <p className="mt-2 text-sm text-gray-500">Last updated: {new Date(draftConfig.updatedAt).toLocaleString()}</p>
           </div>
         </div>
 
-        <section className={`${cardClass} mt-6`}>
+        {activeTab === 'prompt' && (
+          <section className={`${cardClass} mt-6`}>
           <h2 className="text-xl font-bold text-gray-900">Estimate Agent Model Settings</h2>
           <p className="mt-2 text-sm text-gray-600">Configure separate models for text and voice modes.</p>
           <p className="mt-2 text-sm text-gray-500">
@@ -1092,7 +1384,8 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
               <p className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">{agentPromptMessage}</p>
             )}
           </div>
-        </section>
+          </section>
+        )}
 
         <div className="mt-6 flex flex-wrap gap-3">
           <button
@@ -1101,8 +1394,17 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
             className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
               activeTab === 'pricing' ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-100'
             }`}
-          >
+            >
             Pricing Configuration
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('prompt')}
+            className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
+              activeTab === 'prompt' ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            Prompt &amp; Models
           </button>
           <button
             type="button"
@@ -2362,6 +2664,30 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                         <p><span className="font-semibold">Created:</span> {new Date(selectedConversation.created_at).toLocaleString()}</p>
                         <p><span className="font-semibold">Updated:</span> {new Date(selectedConversation.updated_at).toLocaleString()}</p>
                         <p><span className="font-semibold">Last Question Key:</span> {selectedConversation.last_question_key || 'none'}</p>
+                        <p>
+                          <span className="font-semibold">Channels:</span> {selectedConversation.transcript.length === 0
+                            ? 'No turns yet'
+                            : Array.from(new Set(selectedConversation.transcript.map((turn) => turn.channel)))
+                              .filter(Boolean)
+                              .join(', ') || 'unknown'}
+                        </p>
+                        <div className="mt-4 border-t border-gray-200 pt-3">
+                          <p className="font-semibold">Estimate Flow (asked order)</p>
+                          {conversationFlow.length === 0 ? (
+                            <p className="mt-1 text-xs text-gray-500">No estimate flow captured yet.</p>
+                          ) : (
+                            <ol className="mt-2 space-y-2">
+                              {conversationFlow.map((entry) => (
+                                <li key={`${selectedConversation.session_id}-${entry.key}`} className="rounded-md border border-gray-200 bg-slate-50 px-3 py-2 text-xs">
+                                  <span className="font-semibold">{entry.label}:</span>{' '}
+                                  <span className={entry.answered ? 'text-gray-800' : 'text-amber-700'}>
+                                    {entry.value}
+                                  </span>
+                                </li>
+                              ))}
+                            </ol>
+                          )}
+                        </div>
                         <div className="mt-3 grid gap-3 md:grid-cols-2">
                           <label className="block">
                             <span className="mb-1 block text-sm font-medium text-gray-700">Review status</span>
