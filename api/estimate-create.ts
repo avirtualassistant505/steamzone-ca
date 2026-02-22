@@ -621,7 +621,7 @@ async function fetchEstimateRecordByIdempotencyKey(idempotencyKey: string): Prom
       postalCode: row.postal_code,
       zone: row.zone,
       contact: row.contact,
-      answers: row.answers,
+      answers: row.answers as EstimateRecord['answers'],
       result: row.result,
       pricingVersion: row.pricing_version,
       utm: (row.utm ?? {}) as EstimateRecord['utm'],
@@ -1038,12 +1038,13 @@ async function postToGhlWebhook(record: EstimateRecord): Promise<GhlResult> {
     const serviceLabel = engine.formatServiceLabel(record.serviceType);
     const zoneLabel = engine.formatZoneLabel(record.zone as WindowZone);
 
+    const utm = (record.utm ?? {}) as Record<string, string>;
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         secret: secret || undefined,
-        source: record.utm?.source ?? record.utm?.utm_source ?? record.utm?.utmSource ?? 'website',
+        source: utm.source ?? utm.utm_source ?? utm.utmSource ?? 'website',
         event: 'estimate_received',
         locationId: process.env.GHL_LOCATION_ID ?? undefined,
         contact: {

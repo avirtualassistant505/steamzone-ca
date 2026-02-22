@@ -25,6 +25,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const supa = await import('@supabase/supabase-js');
     const supabase = supa.createClient(url, key, { auth: { persistSession: false } });
 
+    const versionFromConfig =
+      typeof (config as Record<string, unknown>).version === 'number'
+        ? (config as Record<string, number>).version
+        : 2;
+
     const saved = {
       ...(typeof config === 'object' && config ? (config as Record<string, unknown>) : {}),
       updatedAt: new Date().toISOString(),
@@ -34,7 +39,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       {
         id: 'active',
         config: saved,
-        version: typeof (saved as { version?: unknown }).version === 'number' ? (saved as { version: number }).version : 2,
+        version: versionFromConfig,
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'id' }

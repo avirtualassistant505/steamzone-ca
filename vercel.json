@@ -5,7 +5,11 @@
   "outputDirectory": "dist",
   "functions": {
     "api/**/*.ts": {
-      "includeFiles": "src/**/*"
+      "includeFiles": [
+        "src/**/*",
+        "GHL/steamzone.ca/data/training/*.json",
+        "GHL/steamzone.ca/data/training/**/*.json"
+      ]
     }
   },
   "rewrites": [
