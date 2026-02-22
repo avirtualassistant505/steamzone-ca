@@ -89,6 +89,7 @@ type ConversationTurn = {
   content: string;
   at: string;
   channel: string;
+  reasoning?: string;
 };
 
 type ConversationDetail = {
@@ -115,6 +116,13 @@ type TranscriptUpdatePayload = {
   review_status: ConversationReviewStatus;
   review_notes?: string;
   storage_mode?: 'database' | 'memory_fallback';
+  message?: string;
+};
+
+type TranscriptDeletePayload = {
+  session_id: string;
+  deleted: boolean;
+  storage_mode: 'database' | 'memory_fallback';
   message?: string;
 };
 
@@ -234,6 +242,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [reviewStatusDraft, setReviewStatusDraft] = useState<ConversationReviewStatus>('unprocessed');
   const [reviewNotesDraft, setReviewNotesDraft] = useState('');
   const [conversationDetailLoading, setConversationDetailLoading] = useState(false);
+  const [expandedReasoningTurns, setExpandedReasoningTurns] = useState<Set<string>>(new Set<string>());
   const [supabaseDiagLoading, setSupabaseDiagLoading] = useState(false);
   const [supabaseDiagError, setSupabaseDiagError] = useState('');
   const [supabaseDiagResult, setSupabaseDiagResult] = useState<SupabaseDiagnosticPayload | null>(null);
@@ -440,6 +449,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       setSelectedConversationId(normalized);
       setReviewStatusDraft(payload.session.review_status || 'unprocessed');
       setReviewNotesDraft(payload.session.review_notes || '');
+      setExpandedReasoningTurns(new Set());
     } catch {
       setConversationError('Unable to load conversation detail.');
     } finally {
@@ -542,6 +552,74 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       setConversationError('');
     } catch {
       setConversationError('Unable to save review state for this session.');
+    } finally {
+      setConversationDetailLoading(false);
+    }
+  }
+
+  function getConversationTurnKey(index: number, turn: ConversationTurn): string {
+    return `${turn.at}-${index}-${turn.role}`;
+  }
+
+  function toggleReasoning(turnKey: string): void {
+    setExpandedReasoningTurns((previous) => {
+      const next = new Set(previous);
+      if (next.has(turnKey)) {
+        next.delete(turnKey);
+      } else {
+        next.add(turnKey);
+      }
+      return next;
+    });
+  }
+
+  async function deleteConversation(sessionId?: string): Promise<void> {
+    const targetSessionId = (sessionId || selectedConversationId).trim();
+    if (!targetSessionId) {
+      setConversationError('Select a conversation before deleting.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete conversation ${targetSessionId}? This cannot be undone and will remove all transcript turns.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setConversationError('');
+    setConversationMessage('');
+    setConversationDetailLoading(true);
+
+    try {
+      const response = await parseJsonResponse<TranscriptDeletePayload>(
+        await fetch('/api/transcripts-delete', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ session_id: targetSessionId }),
+        })
+      );
+      const payload = response.payload;
+
+      if (!response.ok || !payload) {
+        setConversationError(payload?.message ?? parsePayloadError(response));
+        return;
+      }
+
+      setConversationStorageMode(payload.storage_mode);
+      setConversationMessage(payload.message ?? (payload.deleted ? 'Conversation deleted.' : 'Conversation not found.'));
+      setConversationSummaries((previous) => previous.filter((item) => item.session_id !== targetSessionId));
+      if (selectedConversationId === targetSessionId) {
+        setSelectedConversationId('');
+        setSelectedConversation(null);
+        setReviewStatusDraft('unprocessed');
+        setReviewNotesDraft('');
+      }
+      await loadConversationData();
+    } catch {
+      setConversationError('Unable to delete conversation.');
     } finally {
       setConversationDetailLoading(false);
     }
@@ -2139,29 +2217,43 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
                   <div className="space-y-2">
                     {conversationSummaries.map((item) => (
-                      <button
+                      <div
                         key={item.session_id}
-                        type="button"
-                        onClick={() => void loadConversationDetail(item.session_id)}
-                        className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                        className={`rounded-lg border px-3 py-2 transition ${
                           selectedConversationId === item.session_id
                             ? 'border-blue-300 bg-blue-50'
                             : 'border-gray-200 bg-white hover:bg-gray-100'
                         }`}
                       >
-                        <p className="truncate text-sm font-semibold text-gray-900">{item.session_id}</p>
-                        <p className="mt-1 text-xs text-gray-600">
-                          {item.turn_count} turns · {item.channels.join(', ') || 'unknown channel'}
-                        </p>
-                        <p className="mt-1 text-xs text-gray-700">
-                          Review status: <span className="font-semibold">{item.review_status}</span>
-                        </p>
-                        <p className="mt-1 text-xs text-gray-500">
-                          Updated {new Date(item.updated_at).toLocaleString()}
-                        </p>
-                        {item.review_notes && <p className="mt-1 text-xs text-gray-600">{item.review_notes}</p>}
-                        {item.preview && <p className="mt-2 line-clamp-2 text-xs text-gray-700">{item.preview}</p>}
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => void loadConversationDetail(item.session_id)}
+                          className="w-full text-left"
+                        >
+                          <p className="truncate text-sm font-semibold text-gray-900">{item.session_id}</p>
+                          <p className="mt-1 text-xs text-gray-600">
+                            {item.turn_count} turns · {item.channels.join(', ') || 'unknown channel'}
+                          </p>
+                          <p className="mt-1 text-xs text-gray-700">
+                            Review status: <span className="font-semibold">{item.review_status}</span>
+                          </p>
+                          <p className="mt-1 text-xs text-gray-500">
+                            Updated {new Date(item.updated_at).toLocaleString()}
+                          </p>
+                          {item.review_notes && <p className="mt-1 text-xs text-gray-600">{item.review_notes}</p>}
+                          {item.preview && <p className="mt-2 line-clamp-2 text-xs text-gray-700">{item.preview}</p>}
+                        </button>
+                        <div className="mt-2 flex justify-end">
+                          <button
+                            type="button"
+                            onClick={() => void deleteConversation(item.session_id)}
+                            className="inline-flex items-center rounded border border-red-200 px-2 py-1 text-xs text-red-700 transition hover:bg-red-50"
+                          >
+                            <Trash2 className="mr-1 h-3 w-3" />
+                            Delete
+                          </button>
+                        </div>
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -2220,6 +2312,13 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                         >
                           Save Review Notes
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => void deleteConversation(selectedConversation.session_id)}
+                          className="mt-3 ml-2 inline-flex rounded-lg border border-red-200 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-50"
+                        >
+                          Delete Conversation
+                        </button>
                       </div>
 
                       <div className="max-h-[500px] space-y-2 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
@@ -2227,23 +2326,71 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                           <p className="text-sm text-gray-600">No transcript turns in this session.</p>
                         )}
 
-                        {selectedConversation.transcript.map((turn, index) => (
-                          <div
-                            key={`${turn.at}-${index}`}
-                            className={`rounded-lg border px-3 py-2 text-sm ${
-                              turn.role === 'user'
-                                ? 'border-cyan-200 bg-cyan-50'
-                                : turn.role === 'assistant'
-                                  ? 'border-emerald-200 bg-emerald-50'
-                                  : 'border-amber-200 bg-amber-50'
-                            }`}
-                          >
-                            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-600">
-                              {turn.role} · {turn.channel} · {new Date(turn.at).toLocaleString()}
-                            </p>
-                            <p className="whitespace-pre-wrap text-gray-800">{turn.content}</p>
-                          </div>
-                        ))}
+                            {selectedConversation.transcript.map((turn, index) => {
+                          const turnKey = getConversationTurnKey(index, turn);
+                          const showReasoning = turn.role === 'assistant' && Boolean(turn.reasoning?.trim());
+                          const isExpanded = expandedReasoningTurns.has(turnKey);
+                          const reasoningLines = showReasoning ? (turn.reasoning ?? '').split('\n').map((line) => line.trim()).filter(Boolean) : [];
+
+                          return (
+                            <div
+                              key={turnKey}
+                              className={`rounded-lg border px-3 py-2 text-sm ${
+                                turn.role === 'user'
+                                  ? 'border-cyan-200 bg-cyan-50'
+                                  : turn.role === 'assistant'
+                                    ? 'border-emerald-200 bg-emerald-50'
+                                    : 'border-amber-200 bg-amber-50'
+                              } ${showReasoning ? 'cursor-pointer' : ''}`}
+                              role={showReasoning ? 'button' : undefined}
+                              tabIndex={showReasoning ? 0 : -1}
+                              onClick={() => {
+                                if (showReasoning) {
+                                  toggleReasoning(turnKey);
+                                }
+                              }}
+                              onKeyDown={(event) => {
+                                if (!showReasoning) {
+                                  return;
+                                }
+                                if (event.key === 'Enter' || event.key === ' ') {
+                                  event.preventDefault();
+                                  toggleReasoning(turnKey);
+                                }
+                              }}
+                            >
+                              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-600">
+                                {turn.role} · {turn.channel} · {new Date(turn.at).toLocaleString()}
+                                {showReasoning ? ' · Click to view breakdown' : ''}
+                              </p>
+                              <p className="whitespace-pre-wrap text-gray-800">{turn.content}</p>
+                              {showReasoning && (
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    toggleReasoning(turnKey);
+                                  }}
+                                  className="mt-1 inline-flex text-xs text-emerald-700 underline underline-offset-2"
+                                >
+                                  {isExpanded ? 'Hide how it reasoned' : 'Show how it reasoned'}
+                                </button>
+                              )}
+                              {isExpanded && showReasoning && (
+                                <div className="mt-2 rounded bg-white p-2 text-xs text-gray-700 border border-emerald-200">
+                                  <p className="mb-1 font-semibold">How the agent reasoned</p>
+                                  <ul className="list-disc space-y-1 pl-5">
+                                    {reasoningLines.length > 0 ? (
+                                      reasoningLines.map((line, lineIndex) => <li key={`${turnKey}-reason-${lineIndex}`}>{line}</li>)
+                                    ) : (
+                                      <li>No reasoning steps were captured for this message.</li>
+                                    )}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </>
                   )}

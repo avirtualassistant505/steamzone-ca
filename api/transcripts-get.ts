@@ -17,6 +17,7 @@ type ConversationTurn = {
   content: string;
   at: string;
   channel: string;
+  reasoning?: string;
 };
 
 type ReviewStatus = 'processed' | 'ready' | 'unprocessed';
@@ -68,7 +69,7 @@ function stripTrailingMetadata(content: string): string {
 }
 
 function toConversationTurns(
-  transcript: Array<{ role: Role; content: string; at: string }>
+  transcript: Array<{ role: Role; content: string; at: string; reasoning?: string }>
 ): ConversationTurn[] {
   return transcript.map((entry) => {
     const parsed = detectChannel(entry.content || '');
@@ -77,6 +78,7 @@ function toConversationTurns(
       content: parsed.stripped,
       at: entry.at,
       channel: parsed.channel,
+      reasoning: typeof entry.reasoning === 'string' ? entry.reasoning : undefined,
     };
   });
 }

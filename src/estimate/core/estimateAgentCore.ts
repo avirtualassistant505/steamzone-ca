@@ -34,6 +34,7 @@ export interface PostagentEstimateRequest {
 export interface PostagentEstimateResponse {
   session_id: string;
   assistant_message: string;
+  assistant_reasoning?: string[];
   state: {
     answers: Record<string, unknown>;
     asked_keys: string[];
@@ -1078,11 +1079,18 @@ async function appendDurableConversationTurn(
   sessionId: string,
   role: TranscriptRole,
   content: string,
-  at: string
+  at: string,
+  options?: { reasoning?: string[] }
 ): Promise<void> {
   try {
     const logs = await import('../../../server/conversationLogStore.js');
-    await logs.appendConversationTurn(sessionId, { role, content, at });
+    const reasoning = options?.reasoning;
+    await logs.appendConversationTurn(sessionId, {
+      role,
+      content,
+      at,
+      reasoning: Array.isArray(reasoning) && reasoning.length > 0 ? reasoning.join('\n') : undefined,
+    });
   } catch {
     // Keep primary chat flow working even if log persistence is unavailable.
   }
@@ -1130,6 +1138,124 @@ async function callTool(
   }
 
   throw new Error(`Unsupported tool: ${name}`);
+}
+
+function formatFieldLabel(fieldKey: string): string {
+  const spaced = String(fieldKey)
+    .replace(/[._]/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .trim();
+  return spaced.length ? spaced : fieldKey;
+}
+
+function safeDisplayValue(value: unknown): string {
+  if (value === null) {
+    return 'null';
+  }
+  if (Array.isArray(value)) {
+    return value.join(', ');
+  }
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value ?? '');
+}
+
+function asNumericText(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Number.isInteger(value) ? `${value}` : value.toFixed(2);
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value.replace(/[$,\s]/g, ''));
+    if (Number.isFinite(parsed)) {
+      return Number.isInteger(parsed) ? `${parsed}` : parsed.toFixed(2);
+    }
+  }
+  return null;
+}
+
+function summarizeToolExecution(name: string, args: Record<string, unknown>, result: unknown): string {
+  const typedResult = asRecord(result) ?? {};
+  const fieldKey = String(args.field_key ?? '').trim();
+  const queryText = String(args.user_question ?? args.query ?? '').trim();
+
+  if (name === 'get_schema') {
+    return 'I pulled the current estimate form and validation rules.';
+  }
+
+  if (name === 'get_state') {
+    const answers = asRecord(typedResult.answers);
+    const askedKeys = Array.isArray(typedResult.asked_keys) ? typedResult.asked_keys : [];
+    const answerCount = answers ? Object.keys(answers).length : 0;
+    return `I checked the active chat state: ${answerCount} answer${answerCount === 1 ? '' : 's'} already captured across ${askedKeys.length} question${askedKeys.length === 1 ? '' : 's'}.`;
+  }
+
+  if (name === 'search_faq') {
+    const matches = Array.isArray(typedResult.matches) ? typedResult.matches : [];
+    return queryText
+      ? `I searched the FAQ for “${queryText}” and found ${matches.length} relevant result${matches.length === 1 ? '' : 's'}.`
+      : 'I looked up help guidance from the FAQ.';
+  }
+
+  if (name === 'normalize_and_validate') {
+    const isOk = typedResult.ok === true;
+    const needsClarification = typedResult.needs_clarification === true;
+    const clarification = String(typedResult.clarification_question ?? '').trim();
+    const normalizedValue = typedResult.normalized_value;
+    if (isOk) {
+      return `I interpreted ${formatFieldLabel(fieldKey)} as ${safeDisplayValue(normalizedValue)} and marked it valid.`;
+    }
+    if (needsClarification && clarification) {
+      return `I need a quick clarification for ${formatFieldLabel(fieldKey)}: ${clarification}`;
+    }
+    return `I reviewed your value for ${formatFieldLabel(fieldKey)} and it needed a cleaner format.`;
+  }
+
+  if (name === 'set_answer') {
+    const value = typedResult.normalized_value === undefined ? args.normalized_value : typedResult.normalized_value;
+    return fieldKey
+      ? `I saved ${formatFieldLabel(fieldKey)} as ${safeDisplayValue(value)}.`
+      : 'I updated the conversation answers.';
+  }
+
+  if (name === 'next_question') {
+    const questionText = String(typedResult.question_text ?? '').trim();
+    return questionText
+      ? `I selected the next step as: “${questionText}”.`
+      : 'I selected the next question in the estimate flow.';
+  }
+
+  if (name === 'compute_quote') {
+    const quoteId = String(typedResult.quote_id ?? '').trim();
+    const total = asNumericText(typedResult.total);
+    return total
+      ? `I calculated the live estimate${quoteId ? ` (reference ${quoteId})` : ''}, totaling ${total}.`
+      : 'I calculated the estimate from all available answers.';
+  }
+
+  return `I used tool ${name} to move the conversation forward.`;
+}
+
+function buildReasoningText(raw: string[]): string[] {
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    const text = String(entry ?? '').trim();
+    if (!text) continue;
+    if (seen.has(text)) continue;
+    seen.add(text);
+    unique.push(text);
+  }
+
+  if (unique.length === 0) {
+    return ['I checked the context and prepared a direct response.'];
+  }
+
+  return unique;
 }
 
 export async function normalizeAndSetAnswersFromInput(
@@ -1234,7 +1360,7 @@ async function runAgentLoop(
   inputText: string,
   channel: PostagentChannel | undefined,
   estimateFlowActive: boolean
-): Promise<{ assistant_message: string; quote: unknown; next_hint: NextHint; done: boolean }> {
+): Promise<{ assistant_message: string; assistant_reasoning: string[]; quote: unknown; next_hint: NextHint; done: boolean }> {
   let sessionContext = await runtime.toolGetState(sessionId);
   const promptConfig = await getAgentSystemPromptConfig();
   const systemPrompt = promptConfig.prompt || CORE_PROMPT_PREFIX;
@@ -1271,6 +1397,15 @@ async function runAgentLoop(
 
   let assistantMessage = readAssistantText(response);
   let quote: unknown = null;
+  const reasoningSteps: string[] = [];
+  const normalizedInputPreview = (inputText || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  reasoningSteps.push(
+    `I reviewed your latest message: “${normalizedInputPreview || 'a follow-up prompt'}”.`
+  );
+  reasoningSteps.push(
+    `Current context: ${Math.max(0, Object.keys(sessionContext.answers ?? {}).length)} answer(s) already captured, ` +
+      `${sessionContext.asked_keys.length} question(s) asked, estimate mode ${estimateFlowActive ? 'active' : 'inactive'}.`
+  );
 
   for (let i = 0; i < MAX_TURNS; i += 1) {
     const calls = getFunctionCalls(response);
@@ -1280,6 +1415,7 @@ async function runAgentLoop(
     for (const call of calls) {
       const args = parseArgs(call.arguments);
       const result = await callTool(runtime, call.name, args, sessionId);
+      reasoningSteps.push(summarizeToolExecution(call.name, args, result));
       if (call.name === 'compute_quote') {
         quote = result;
       }
@@ -1301,6 +1437,10 @@ async function runAgentLoop(
     if (textOut) {
       assistantMessage = textOut;
     }
+  }
+
+  if (reasoningSteps.length === 2) {
+    reasoningSteps.push('I could answer this step from the current context without additional tool calls.');
   }
 
   const session = await runtime.getSession(sessionId);
@@ -1325,9 +1465,11 @@ async function runAgentLoop(
   }
 
   assistantMessage = applyResponseGuardrails(assistantMessage, inputText, faqMatches, hadPriorAssistantTurn);
+  const assistantReasoning = buildReasoningText(reasoningSteps);
 
   return {
     assistant_message: assistantMessage,
+    assistant_reasoning: assistantReasoning,
     quote: computedQuote,
     next_hint: done ? { done: true } : nextHint,
     done,
@@ -1352,6 +1494,7 @@ export async function decideNextAssistantTurn(
   const response: PostagentEstimateResponse = {
     session_id: sessionId,
     assistant_message: loopResult.assistant_message,
+    assistant_reasoning: loopResult.assistant_reasoning,
     state: summarizeStateForResponse(
       {
         answers: finalState.answers,
@@ -1425,11 +1568,14 @@ export async function runEstimateAgentCore(
     content: assistantTranscript,
     at: assistantTranscriptAt,
   });
-  await appendDurableConversationTurn(sessionId, 'assistant', assistantTranscript, assistantTranscriptAt);
+  await appendDurableConversationTurn(sessionId, 'assistant', assistantTranscript, assistantTranscriptAt, {
+    reasoning: loopResult.assistant_reasoning,
+  });
 
   const response: PostagentEstimateResponse = {
     session_id: sessionId,
     assistant_message: loopResult.assistant_message,
+    assistant_reasoning: loopResult.assistant_reasoning,
     state: finalStateSummary,
     quote: loopResult.quote,
     done,

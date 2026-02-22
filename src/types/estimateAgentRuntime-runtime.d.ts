@@ -65,6 +65,7 @@ declare module '*estimateAgentCoreRuntime.mjs' {
   export type PostagentEstimateResponse = {
     session_id: string;
     assistant_message: string;
+    assistant_reasoning?: string[];
     state: {
       answers: Record<string, unknown>;
       asked_keys: string[];

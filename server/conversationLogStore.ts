@@ -8,6 +8,7 @@ export interface ConversationTurn {
   role: ConversationRole;
   content: string;
   at: string;
+  reasoning?: string;
 }
 
 export interface ConversationSessionRecord {
@@ -576,5 +577,40 @@ export async function setConversationReviewState(
       return writeMemorySession(next);
     }
     throw new Error(mapSupabaseErrorMessage(error instanceof Error ? error.message : 'Supabase request failed.'));
+  }
+}
+
+export async function deleteConversationSession(sessionId: string): Promise<boolean> {
+  const normalizedSessionId = sessionId.trim();
+  if (!normalizedSessionId) {
+    throw new Error('session_id is required.');
+  }
+
+  memorySessions.delete(normalizedSessionId);
+  const supabase = await getSupabaseAdminClient();
+  if (!supabase || getConversationStorageMode() === 'memory_fallback') {
+    setStorageMode('memory_fallback');
+    return true;
+  }
+
+  try {
+    const { error } = await supabase.from(TABLE_NAME).delete().eq('session_id', normalizedSessionId);
+    if (error) {
+      if (shouldFallbackToMemory(error.message)) {
+        setStorageMode('memory_fallback');
+        return true;
+      }
+      throw error;
+    }
+
+    setStorageMode('database');
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Supabase request failed.';
+    if (shouldFallbackToMemory(message)) {
+      setStorageMode('memory_fallback');
+      return true;
+    }
+    throw new Error(mapSupabaseErrorMessage(message));
   }
 }
