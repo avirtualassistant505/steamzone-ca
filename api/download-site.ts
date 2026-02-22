@@ -161,6 +161,10 @@ const FILES_ROOTS: CollectTarget[] = [{ path: 'GHL/steamzone.ca/data/training' }
 const SKIP_DIRECTORIES = new Set(['.git', 'node_modules']);
 const SKIP_ROOT_FILES = new Set(['steamzone-project.zip', '.DS_Store']);
 const SKIP_PATH_FRAGMENTS = ['/dist/server/', '/.github/workflows/'];
+type RepoCandidate = {
+  owner: string;
+  repo: string;
+};
 
 function normalizeDbMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -192,52 +196,180 @@ function pickEnvToken(names: readonly string[]): string | undefined {
   return undefined;
 }
 
-function resolveGitHubSnapshotConfig(): GitHubSnapshotConfig | null {
+function parseRepoFromComposite(candidate: string): RepoCandidate | null {
+  const value = candidate.trim();
+  if (!value) {
+    return null;
+  }
+
+  if (value.includes('/')) {
+    const compact = value.replace(/\.git$/i, '').replace(/^git\+/, '');
+    if (/^https?:\/\//i.test(compact) || compact.startsWith('git@') || compact.startsWith('ssh://')) {
+      const normalized = compact
+        .replace(/^https?:\/\/[^/]+\/|^ssh:\/\/[^/]+\/|^git@[^:]+:/, 'https://placeholder/');
+      const parsed = new URL(normalized);
+      const parts = parsed.pathname.replace(/^\//, '').split('/').filter(Boolean);
+      if (parts.length >= 2) {
+        return { owner: parts[0], repo: parts[1] };
+      }
+    }
+
+    const rawParts = compact.split('/');
+    if (rawParts.length >= 2 && !rawParts[0].includes(':') && !rawParts[0].includes('@')) {
+      return {
+        owner: rawParts[0],
+        repo: rawParts.slice(1).join('/').replace(/\.git$/i, ''),
+      };
+    }
+  }
+
+  return null;
+}
+
+function parseGitRemoteUrl(url: string): RepoCandidate | null {
+  const normalized = url.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.startsWith('git@')) {
+    const atIndex = normalized.indexOf(':');
+    if (atIndex === -1) {
+      return null;
+    }
+
+    const path = normalized.slice(atIndex + 1).replace(/\.git$/i, '');
+    const parts = path.split('/').filter(Boolean);
+    if (parts.length >= 2) {
+      return { owner: parts[0], repo: parts[1] };
+    }
+
+    return null;
+  }
+
+  if (/^https?:\/\//i.test(normalized)) {
+    try {
+      const parsed = new URL(normalized);
+      if (parsed.hostname.endsWith('github.com')) {
+        const parts = parsed.pathname.replace(/^\//, '').replace(/\.git$/i, '').split('/').filter(Boolean);
+        if (parts.length >= 2) {
+          return { owner: parts[0], repo: parts[1] };
+        }
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+async function resolveRepoFromGitConfig(projectRoot: string): Promise<RepoCandidate | null> {
+  const configPathCandidates = [
+    path.join(projectRoot, '.git', 'config'),
+    path.join(process.cwd(), '.git', 'config'),
+    '/workspace/default/.git/config',
+    '/var/task/.git/config',
+  ];
+
+  for (const configPath of configPathCandidates) {
+    try {
+      const contents = await fs.readFile(configPath, 'utf8');
+      const remoteBlocks = contents.split(/^\[remote /m);
+      for (const block of remoteBlocks) {
+        if (!/\"origin\"/.test(block)) {
+          continue;
+        }
+
+        const urlMatch = block.match(/^\s*url\s*=\s*([^\r\n]+)/m);
+        if (urlMatch) {
+          const parsed = parseGitRemoteUrl(urlMatch[1]);
+          if (parsed) {
+            return parsed;
+          }
+        }
+
+        const githubRepo = block.match(/^\s*github\.com[:/](.+)$/m);
+        if (githubRepo) {
+          const parsed = parseRepoFromComposite(githubRepo[0]);
+          if (parsed) {
+            return parsed;
+          }
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+async function resolveGitHubSnapshotConfig(projectRoot: string): Promise<GitHubSnapshotConfig | null> {
   const provider = process.env.VERCEL_GIT_PROVIDER || process.env.GIT_PROVIDER || '';
   if (provider && provider.toLowerCase() !== 'github') {
     return null;
   }
-
   const owner = getNormalizedCandidateValues(
     process.env.VERCEL_GIT_REPO_OWNER,
+    process.env.VERCEL_GIT_ORG,
     process.env.GIT_OWNER,
+    process.env.GIT_OWNER_NAME,
     process.env.GITHUB_OWNER,
-    process.env.GITHUB_REPOSITORY_OWNER
+    process.env.GITHUB_REPOSITORY_OWNER,
+    process.env.SITE_BACKUP_GITHUB_OWNER
   )[0];
-  const repo = getNormalizedCandidateValues(
+  const repoFromEnv = getNormalizedCandidateValues(
     process.env.VERCEL_GIT_REPO_SLUG,
     process.env.VERCEL_GIT_REPO_NAME,
-    process.env.GITHUB_REPOSITORY_SLUG
+    process.env.VERCEL_GIT_REPOSITORY_SLUG,
+    process.env.GITHUB_REPOSITORY_NAME,
+    process.env.GITHUB_REPO,
+    process.env.SITE_BACKUP_GITHUB_REPO,
+    process.env.SITE_BACKUP_GITHUB_REPOSITORY
   )[0];
-  const ref = getNormalizedCandidateValues(
+  const repoFromComposite = getNormalizedCandidateValues(
+    process.env.GITHUB_REPOSITORY_URL,
+    process.env.GIT_URL,
+    process.env.SITE_BACKUP_GITHUB_URL,
+    process.env.GITHUB_REPOSITORY,
+    process.env.SITE_BACKUP_GITHUB_REPOSITORY_ID
+  )[0];
+  const gitRef = getNormalizedCandidateValues(
     process.env.VERCEL_GIT_COMMIT_SHA,
+    process.env.VERCEL_GIT_COMMIT_REF,
     process.env.GITHUB_SHA,
     process.env.REPO_REF,
+    process.env.SITE_BACKUP_GITHUB_REF,
+    process.env.SITE_BACKUP_GIT_REF,
     'main'
   )[0] ?? 'main';
 
-  if (!owner || !repo) {
-    const repoFromComposite = getNormalizedCandidateValues(process.env.GITHUB_REPOSITORY)[0];
-    if (!repoFromComposite || !repoFromComposite.includes('/')) {
-      return null;
-    }
+  let resolvedRepo: RepoCandidate | null = null;
+  if (owner && repoFromEnv) {
+    resolvedRepo = { owner, repo: repoFromEnv };
+  } else if (repoFromComposite) {
+    resolvedRepo = parseRepoFromComposite(repoFromComposite);
+  }
 
-    const [fallbackOwner, fallbackRepo] = repoFromComposite.split('/');
-    return {
-      owner: fallbackOwner,
-      repo: fallbackRepo,
-      ref,
-      token: pickEnvToken(GITHUB_TOKEN_ENV_NAMES),
-      fallbackUrl: `https://api.github.com/repos/${encodeURIComponent(fallbackOwner)}/${encodeURIComponent(fallbackRepo)}/zipball/${encodeURIComponent(ref)}`,
-    };
+  if (!resolvedRepo) {
+    // Best-effort fallback to local git config (works on environments where this is available).
+    // Useful when env vars are trimmed and remote checkout metadata is preserved.
+    resolvedRepo = await resolveRepoFromGitConfig(projectRoot);
+  }
+
+  if (!resolvedRepo) {
+    return null;
   }
 
   return {
-    owner,
-    repo,
-    ref,
+    owner: resolvedRepo.owner,
+    repo: resolvedRepo.repo,
+    ref: gitRef,
     token: pickEnvToken(GITHUB_TOKEN_ENV_NAMES),
-    fallbackUrl: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball/${encodeURIComponent(ref)}`,
+    fallbackUrl: `https://api.github.com/repos/${encodeURIComponent(resolvedRepo.owner)}/${encodeURIComponent(
+      resolvedRepo.repo
+    )}/zipball/${encodeURIComponent(gitRef)}`,
   };
 }
 
@@ -644,7 +776,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   const recordedPaths = new Set<string>();
   const projectAwareFiles = FILES_ROOTS.concat(CODE_ROOTS).filter((entry) => Boolean(entry.path));
   const foundTargets = new Set<string>();
-  const remoteConfig = resolveGitHubSnapshotConfig();
+  const remoteConfig = await resolveGitHubSnapshotConfig(projectRoot);
   let usedRemoteFallback = false;
   let remoteFallbackError: string | null = null;
 
