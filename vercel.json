@@ -3,28 +3,6 @@
   "installCommand": "npm ci",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "functions": {
-    "api/**/*.ts": {
-      "includeFiles": [
-        "api/**/*.ts",
-        "src/**/*",
-        "server/**/*",
-        "public/**/*",
-        "docs/**/*",
-        "dist/**/*",
-        "GHL/steamzone.ca/data/training/**/*",
-        "AGENTS.md",
-        "index.html",
-        "package*.json",
-        "tsconfig*.json",
-        "vite.config.ts",
-        "tailwind.config.js",
-        "postcss.config.js",
-        "eslint.config.js",
-        ".env.example"
-      ]
-    }
-  },
   "rewrites": [
     {
       "source": "/api/(.*)",
