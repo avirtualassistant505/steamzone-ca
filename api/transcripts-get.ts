@@ -16,7 +16,7 @@ type ConversationTurn = {
   role: Role;
   content: string;
   at: string;
-  channel: string;
+  channel?: string;
   reasoning?: string;
 };
 
@@ -41,15 +41,22 @@ function asText(value: string | string[] | undefined): string {
   return value?.trim() ?? '';
 }
 
-function detectChannel(content: string): { channel: string; stripped: string } {
-  const match = content.match(/^\[(web|voice|sms|test)\]\s*/i);
+function detectChannel(entry: { content: string; channel?: string }): { channel: string; stripped: string } {
+  if (entry.channel) {
+    const trimmed = entry.channel.trim().toLowerCase();
+    if (trimmed === 'web' || trimmed === 'voice' || trimmed === 'sms' || trimmed === 'test') {
+      return { channel: trimmed, stripped: stripTrailingMetadata(entry.content.trim()) };
+    }
+  }
+
+  const match = entry.content.match(/^\[(web|voice|sms|test)\]\s*/i);
   if (!match) {
-    return { channel: 'unknown', stripped: stripTrailingMetadata(content.trim()) };
+    return { channel: 'unknown', stripped: stripTrailingMetadata(entry.content.trim()) };
   }
 
   return {
     channel: match[1].toLowerCase(),
-    stripped: stripTrailingMetadata(content.slice(match[0].length).trim()),
+    stripped: stripTrailingMetadata(entry.content.slice(match[0].length).trim()),
   };
 }
 
@@ -69,10 +76,10 @@ function stripTrailingMetadata(content: string): string {
 }
 
 function toConversationTurns(
-  transcript: Array<{ role: Role; content: string; at: string; reasoning?: string }>
+  transcript: Array<{ role: Role; content: string; at: string; reasoning?: string; channel?: string }>
 ): ConversationTurn[] {
   return transcript.map((entry) => {
-    const parsed = detectChannel(entry.content || '');
+    const parsed = detectChannel({ content: entry.content || '', channel: entry.channel });
     return {
       role: entry.role,
       content: parsed.stripped,

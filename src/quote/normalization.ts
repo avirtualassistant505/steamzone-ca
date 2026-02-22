@@ -65,9 +65,6 @@ const numberWordAliases: Record<string, string> = {
   for: 'four',
   fore: 'four',
   ate: 'eight',
-  o: 'one',
-  e: 'one',
-  oh: 'one',
   touchdown: 'two',
 };
 
@@ -132,6 +129,11 @@ function parseNumberWords(input: string): number | null {
     .replace(/[-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+
+  // Some speech engines transcribe "one" as "O and E" or "O E".
+  if (/\b(?:o\s*(?:and\s*)?e|e\s*(?:and\s*)?o|o[e-]e|o\s*e)\b/i.test(compactNoPunctuation)) {
+    return 1;
+  }
 
   if (!compactNoPunctuation) return null;
 
