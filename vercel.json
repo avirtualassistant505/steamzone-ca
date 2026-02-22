@@ -6,9 +6,22 @@
   "functions": {
     "api/**/*.ts": {
       "includeFiles": [
+        "api/**/*.ts",
         "src/**/*",
-        "GHL/steamzone.ca/data/training/*.json",
-        "GHL/steamzone.ca/data/training/**/*.json"
+        "server/**/*",
+        "public/**/*",
+        "docs/**/*",
+        "dist/**/*",
+        "GHL/steamzone.ca/data/training/**/*",
+        "AGENTS.md",
+        "index.html",
+        "package*.json",
+        "tsconfig*.json",
+        "vite.config.ts",
+        "tailwind.config.js",
+        "postcss.config.js",
+        "eslint.config.js",
+        ".env.example"
       ]
     }
   },

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Clock3, Database, Plus, Save, Trash2 } from 'lucide-react';
+import { Clock3, Database, Download, Plus, Save, Trash2 } from 'lucide-react';
 import {
   createDefaultPricingConfig,
   formatBookingMode,
@@ -203,7 +203,7 @@ function ToggleField({
 }
 
 export default function AdminPricingPage({ pricingConfig, onPricingConfigChange, pricingStatus }: AdminPricingPageProps) {
-  const [activeTab, setActiveTab] = useState<'pricing' | 'training' | 'logs'>('pricing');
+  const [activeTab, setActiveTab] = useState<'pricing' | 'training' | 'logs' | 'download'>('pricing');
   const [draftConfig, setDraftConfig] = useState<PricingConfig>(pricingConfig);
   const [saveMessage, setSaveMessage] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -251,6 +251,9 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [newTopic, setNewTopic] = useState('');
   const [newSubtopic, setNewSubtopic] = useState('');
   const [newStatus, setNewStatus] = useState('READY');
+  const [downloadLoading, setDownloadLoading] = useState(false);
+  const [downloadMessage, setDownloadMessage] = useState('');
+  const [downloadError, setDownloadError] = useState('');
 
   useEffect(() => {
     setDraftConfig(pricingConfig);
@@ -258,7 +261,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
   useEffect(() => {
     const tab = localStorage.getItem(STORAGE_KEY);
-    if (tab === 'training' || tab === 'pricing' || tab === 'logs') {
+    if (tab === 'training' || tab === 'pricing' || tab === 'logs' || tab === 'download') {
       setActiveTab(tab);
     }
   }, []);
@@ -625,7 +628,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     }
   }
 
-  function setTab(nextTab: 'pricing' | 'training' | 'logs'): void {
+  function setTab(nextTab: 'pricing' | 'training' | 'logs' | 'download'): void {
     setActiveTab(nextTab);
     localStorage.setItem(STORAGE_KEY, nextTab);
 
@@ -634,6 +637,79 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     }
     if (nextTab === 'logs' && !conversationLoaded && !conversationLoading) {
       void loadConversationData();
+    }
+  }
+
+  function parseDownloadFilename(contentDisposition: string | null): string | null {
+    if (!contentDisposition) {
+      return null;
+    }
+
+    const encoded = /filename\*=UTF-8''([^;]+)/i.exec(contentDisposition);
+    if (encoded?.[1]) {
+      try {
+        return decodeURIComponent(encoded[1].replace(/"/g, ''));
+      } catch {
+        return encoded[1].replace(/"/g, '');
+      }
+    }
+
+    const simple = /filename="?([^";]+)"?/i.exec(contentDisposition);
+    if (simple?.[1]) {
+      return simple[1];
+    }
+
+    return null;
+  }
+
+  async function downloadSiteArchive(): Promise<void> {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const defaultName = `steamzone-site-backup-${timestamp}.zip`;
+    setDownloadLoading(true);
+    setDownloadMessage('Generating backup archive...');
+    setDownloadError('');
+
+    try {
+      const response = await fetch('/api/download-site', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ includeDatabase: true }),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        const message = text ? `Backup endpoint returned ${response.status}: ${text.slice(0, 140)}` : `Backup endpoint returned ${response.status}`;
+        setDownloadError(message);
+        setDownloadMessage('');
+        return;
+      }
+
+      const contentType = response.headers.get('content-type') ?? '';
+      if (!contentType.includes('application/zip')) {
+        const text = await response.text();
+        setDownloadError(`Unexpected backup response content type "${contentType || 'unknown'}". ${text.slice(0, 200)}`);
+        setDownloadMessage('');
+        return;
+      }
+
+      const blob = await response.blob();
+      const filename = parseDownloadFilename(response.headers.get('content-disposition')) ?? defaultName;
+      const objectUrl = window.URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = filename;
+      anchor.rel = 'noopener';
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      window.URL.revokeObjectURL(objectUrl);
+      setDownloadMessage(`Backup ready: ${filename}`);
+      setDownloadError('');
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : 'Unable to download backup.');
+      setDownloadMessage('');
+    } finally {
+      setDownloadLoading(false);
     }
   }
 
@@ -904,7 +980,9 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                 ? 'Full pricing control for Steinbach routes: travel zones, per-service base rates, multipliers, add-ons, red flags, and estimate range behavior.'
                 : activeTab === 'training'
                   ? 'Update shared training questions/answers used by both web and voice agents.'
-                  : 'Browse saved conversation sessions and full voice/text transcripts.'}
+                  : activeTab === 'logs'
+                    ? 'Browse saved conversation sessions and full voice/text transcripts.'
+                    : 'Create and download a full site backup zip including local code and database snapshot data.'}
             </p>
             <p className="mt-3">
               <a
@@ -1043,6 +1121,16 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
             }`}
           >
             Conversation Logs
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('download')}
+            className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
+              activeTab === 'download' ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            <Download className="mr-2 inline h-4 w-4" />
+            Download Site
           </button>
         </div>
 
@@ -2399,6 +2487,31 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
             </section>
             )}
           </>
+        )}
+        {activeTab === 'download' && (
+          <section className={`${cardClass} mt-6`}>
+            <h2 className="text-xl font-bold text-gray-900">Download Site Backup</h2>
+            <p className="mt-2 text-sm text-gray-600">
+              Create a ZIP of your site files and a database snapshot for local archival.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => void downloadSiteArchive()}
+                disabled={downloadLoading}
+                className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Download className="mr-2 h-4 w-4" />
+                {downloadLoading ? 'Preparing Download...' : 'Generate Download'}
+              </button>
+            </div>
+            {downloadMessage && (
+              <p className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">{downloadMessage}</p>
+            )}
+            {downloadError && (
+              <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{downloadError}</p>
+            )}
+          </section>
         )}
       </div>
     </main>
