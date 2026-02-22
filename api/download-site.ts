@@ -31,6 +31,7 @@ type BackupManifest = {
   candidateRoots: string[];
   resolvedRoot: string;
   projectRoot: string;
+  sourceMode: 'local' | 'local-and-remote-fallback';
   supabase: {
     configured: boolean;
     message: string;
@@ -54,6 +55,14 @@ type DirectoryOptions = {
 type CollectTarget = {
   path: string;
   options?: DirectoryOptions;
+};
+
+type GitHubSnapshotConfig = {
+  owner: string;
+  repo: string;
+  ref: string;
+  token?: string;
+  fallbackUrl: string;
 };
 
 const DEFAULT_TABLES = [
@@ -83,6 +92,14 @@ const PROJECT_ROOT_HINTS = [
   '/workspace',
   '/app',
 ].filter((value): value is string => Boolean(value));
+
+const REQUIRED_LOCAL_PATHS = ['src', 'api', 'server', 'public', 'index.html'];
+const GITHUB_TOKEN_ENV_NAMES = [
+  'SITE_BACKUP_GITHUB_TOKEN',
+  'GITHUB_TOKEN',
+  'GITHUB_PAT',
+  'VERCEL_OIDC_TOKEN',
+] as const;
 
 const ROOT_FILES: string[] = [
   '.env.example',
@@ -143,6 +160,7 @@ const FILES_ROOTS: CollectTarget[] = [{ path: 'GHL/steamzone.ca/data/training' }
 
 const SKIP_DIRECTORIES = new Set(['.git', 'node_modules']);
 const SKIP_ROOT_FILES = new Set(['steamzone-project.zip', '.DS_Store']);
+const SKIP_PATH_FRAGMENTS = ['/dist/server/', '/.github/workflows/'];
 
 function normalizeDbMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -152,6 +170,75 @@ function normalizeDbMessage(error: unknown): string {
     return error;
   }
   return 'Unknown database error.';
+}
+
+function shouldSkipRelativePath(relPath: string): boolean {
+  const normalized = relPath.replace(/\\/g, '/');
+  return SKIP_PATH_FRAGMENTS.some((fragment) => normalized.includes(fragment));
+}
+
+function getNormalizedCandidateValues(...values: Array<string | undefined | null>): string[] {
+  return values.filter((value): value is string => Boolean(value && value.trim()));
+}
+
+function pickEnvToken(names: readonly string[]): string | undefined {
+  for (const name of names) {
+    const value = process.env[name];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return undefined;
+}
+
+function resolveGitHubSnapshotConfig(): GitHubSnapshotConfig | null {
+  const provider = process.env.VERCEL_GIT_PROVIDER || process.env.GIT_PROVIDER || '';
+  if (provider && provider.toLowerCase() !== 'github') {
+    return null;
+  }
+
+  const owner = getNormalizedCandidateValues(
+    process.env.VERCEL_GIT_REPO_OWNER,
+    process.env.GIT_OWNER,
+    process.env.GITHUB_OWNER,
+    process.env.GITHUB_REPOSITORY_OWNER
+  )[0];
+  const repo = getNormalizedCandidateValues(
+    process.env.VERCEL_GIT_REPO_SLUG,
+    process.env.VERCEL_GIT_REPO_NAME,
+    process.env.GITHUB_REPOSITORY_SLUG
+  )[0];
+  const ref = getNormalizedCandidateValues(
+    process.env.VERCEL_GIT_COMMIT_SHA,
+    process.env.GITHUB_SHA,
+    process.env.REPO_REF,
+    'main'
+  )[0] ?? 'main';
+
+  if (!owner || !repo) {
+    const repoFromComposite = getNormalizedCandidateValues(process.env.GITHUB_REPOSITORY)[0];
+    if (!repoFromComposite || !repoFromComposite.includes('/')) {
+      return null;
+    }
+
+    const [fallbackOwner, fallbackRepo] = repoFromComposite.split('/');
+    return {
+      owner: fallbackOwner,
+      repo: fallbackRepo,
+      ref,
+      token: pickEnvToken(GITHUB_TOKEN_ENV_NAMES),
+      fallbackUrl: `https://api.github.com/repos/${encodeURIComponent(fallbackOwner)}/${encodeURIComponent(fallbackRepo)}/zipball/${encodeURIComponent(ref)}`,
+    };
+  }
+
+  return {
+    owner,
+    repo,
+    ref,
+    token: pickEnvToken(GITHUB_TOKEN_ENV_NAMES),
+    fallbackUrl: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball/${encodeURIComponent(ref)}`,
+  };
 }
 
 function isMissingTableError(message: string): boolean {
@@ -310,12 +397,130 @@ function normalizeZipPath(raw: string): string {
   return raw.replace(/\\/g, '/');
 }
 
+function buildRemoteFallbackError(code: string, message: string): string {
+  return `${code}: ${message}`;
+}
+
+async function addFileToZip(
+  zip: JSZip,
+  relPath: string,
+  data: Buffer,
+  manifest: BackupManifest['includedFiles'],
+  fileCount: { total: number; skipped: number; bytes: number },
+  recordedPaths: Set<string>,
+  source: 'local' | 'remote'
+): Promise<void> {
+  const normalized = normalizeZipPath(relPath);
+  if (shouldSkipRelativePath(normalized) || shouldSkipByType(normalized, normalized)) {
+    manifest.skippedReasons.push(`Skipped by path policy (${source}): ${normalized}`);
+    fileCount.skipped += 1;
+    return;
+  }
+
+  if (recordedPaths.has(normalized)) {
+    manifest.skippedReasons.push(`Skipped duplicate file (${source}): ${normalized}`);
+    fileCount.skipped += 1;
+    return;
+  }
+
+  if (data.byteLength > MAX_FILE_BYTES) {
+    manifest.skippedReasons.push(`Skipped large file (${data.byteLength} bytes) (${source}): ${normalized}`);
+    fileCount.skipped += 1;
+    return;
+  }
+
+  zip.file(`site/${normalized}`, data);
+  recordedPaths.add(normalized);
+  fileCount.total += 1;
+  fileCount.bytes += data.byteLength;
+}
+
+async function addRemoteArchiveToZip(
+  zip: JSZip,
+  config: GitHubSnapshotConfig,
+  manifest: BackupManifest['includedFiles'],
+  fileCount: { total: number; skipped: number; bytes: number },
+  recordedPaths: Set<string>
+): Promise<string | null> {
+  const headers: Record<string, string> = {
+    'User-Agent': 'steamzone-backup/1.0',
+    Accept: 'application/vnd.github+json',
+  };
+
+  if (config.token) {
+    headers.Authorization = `Bearer ${config.token}`;
+    headers['X-GitHub-Api-Version'] = '2022-11-28';
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(config.fallbackUrl, { headers });
+  } catch (error) {
+    return buildRemoteFallbackError('FETCH_ERROR', `Unable to fetch remote archive: ${normalizeDbMessage(error)}`);
+  }
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => 'unknown response body');
+    return buildRemoteFallbackError(
+      'REMOTE_HTTP_ERROR',
+      `GitHub returned ${response.status} ${response.statusText}: ${detail.slice(0, 200)}`
+    );
+  }
+
+  const remoteBytes = Buffer.from(await response.arrayBuffer());
+  let remoteZip: JSZip;
+  try {
+    remoteZip = await JSZip.loadAsync(remoteBytes);
+  } catch (error) {
+    return buildRemoteFallbackError('ZIP_PARSE_ERROR', `Unable to read remote archive: ${normalizeDbMessage(error)}`);
+  }
+
+  const entryNames = Object.keys(remoteZip.files).filter((name) => !remoteZip.files[name].dir);
+  if (entryNames.length === 0) {
+    return buildRemoteFallbackError('EMPTY_REMOTE_ARCHIVE', 'Remote zip had no files to process.');
+  }
+
+  const firstName = entryNames[0];
+  const firstSlashIndex = firstName.indexOf('/');
+  const rootPrefix = firstSlashIndex > 0 ? firstName.slice(0, firstSlashIndex + 1) : '';
+
+  for (const entryName of entryNames) {
+    let relativePath = normalizeZipPath(entryName);
+    if (rootPrefix && relativePath.startsWith(rootPrefix)) {
+      relativePath = relativePath.slice(rootPrefix.length);
+    }
+
+    if (!relativePath || relativePath.startsWith('.git/') || relativePath.startsWith('__MACOSX/')) {
+      manifest.skippedReasons.push(`Skipped remote metadata/path: ${relativePath || entryName}`);
+      fileCount.skipped += 1;
+      continue;
+    }
+
+    if (relativePath.startsWith('.github/workflows/')) {
+      manifest.skippedReasons.push(`Skipped remote workflow path: ${relativePath}`);
+      fileCount.skipped += 1;
+      continue;
+    }
+
+    try {
+      const data = await remoteZip.files[entryName].async('nodebuffer');
+      await addFileToZip(zip, relativePath, data, manifest, fileCount, recordedPaths, 'remote');
+    } catch (error) {
+      fileCount.skipped += 1;
+      manifest.skippedReasons.push(`Unable to read remote file ${relativePath}: ${normalizeDbMessage(error)}`);
+    }
+  }
+
+  return null;
+}
+
 async function addDirectoryToZip(
   zip: JSZip,
   absRoot: string,
   relRoot: string,
   manifest: BackupManifest['includedFiles'],
   fileCount: { total: number; skipped: number; bytes: number },
+  recordedPaths: Set<string>,
   options: DirectoryOptions = { includeNodeModules: false }
 ): Promise<void> {
   try {
@@ -338,7 +543,7 @@ async function addDirectoryToZip(
           continue;
         }
 
-        await addDirectoryToZip(zip, absPath, relPath, manifest, fileCount, options);
+        await addDirectoryToZip(zip, absPath, relPath, manifest, fileCount, recordedPaths, options);
         continue;
       }
 
@@ -365,17 +570,8 @@ async function addDirectoryToZip(
       }
 
       try {
-        const stats = await fs.stat(absPath);
-        if (stats.size > MAX_FILE_BYTES) {
-          fileCount.skipped += 1;
-          manifest.skippedReasons.push(`Skipped large file (${stats.size} bytes): ${relPath}`);
-          continue;
-        }
-
         const data = await fs.readFile(absPath);
-        zip.file(`site/${relPath}`, data);
-        fileCount.total += 1;
-        fileCount.bytes += data.byteLength;
+        await addFileToZip(zip, relPath, data, manifest, fileCount, recordedPaths, 'local');
       } catch (error) {
         fileCount.skipped += 1;
         manifest.skippedReasons.push(`Unable to read ${relPath}: ${normalizeDbMessage(error)}`);
@@ -427,6 +623,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     candidateRoots: candidates,
     resolvedRoot: projectRoot,
     projectRoot,
+    sourceMode: 'local',
     supabase: {
       configured: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
       message: '',
@@ -444,7 +641,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
 
   const fileCount = { total: 0, skipped: 0, bytes: 0 };
   const zip = new JSZip();
+  const recordedPaths = new Set<string>();
   const projectAwareFiles = FILES_ROOTS.concat(CODE_ROOTS).filter((entry) => Boolean(entry.path));
+  const foundTargets = new Set<string>();
+  const remoteConfig = resolveGitHubSnapshotConfig();
+  let usedRemoteFallback = false;
+  let remoteFallbackError: string | null = null;
 
   for (const entry of ROOT_FILES) {
     const abs = path.join(projectRoot, entry);
@@ -463,9 +665,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       }
 
       const data = await fs.readFile(abs);
-      zip.file(`site/${entry}`, data);
-      fileCount.total += 1;
-      fileCount.bytes += data.byteLength;
+      if (REQUIRED_LOCAL_PATHS.includes(entry)) {
+        foundTargets.add(entry);
+      }
+      await addFileToZip(zip, entry, data, manifest.includedFiles, fileCount, recordedPaths, 'local');
     } catch (error) {
       if ((error as { code?: string }).code !== 'ENOENT') {
         manifest.includedFiles.skippedReasons.push(`Root file read error ${entry}: ${normalizeDbMessage(error)}`);
@@ -489,11 +692,37 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
         fileCount.skipped += 1;
         continue;
       }
-      await addDirectoryToZip(zip, absRoot, target.path, manifest.includedFiles, fileCount, options);
+      foundTargets.add(target.path);
+      await addDirectoryToZip(zip, absRoot, target.path, manifest.includedFiles, fileCount, recordedPaths, options);
     } catch {
       manifest.includedFiles.skippedReasons.push(`Directory not found: ${target.path}`);
       fileCount.skipped += 1;
     }
+  }
+
+  const missingExpectedPaths = REQUIRED_LOCAL_PATHS.filter((pathName) => !foundTargets.has(pathName));
+  if (missingExpectedPaths.length > 0) {
+    if (remoteConfig) {
+      manifest.includedFiles.skippedReasons.push(
+        `Local snapshot appears partial; attempting remote fallback for missing: ${missingExpectedPaths.join(', ')}`
+      );
+      const error = await addRemoteArchiveToZip(zip, remoteConfig, manifest.includedFiles, fileCount, recordedPaths);
+      if (error) {
+        remoteFallbackError = error;
+        manifest.includedFiles.skippedReasons.push(`Remote fallback failed: ${error}`);
+      } else {
+        usedRemoteFallback = true;
+      }
+    } else {
+      manifest.includedFiles.skippedReasons.push(
+        `Local snapshot appears partial: missing ${missingExpectedPaths.join(', ')}. Set SITE_BACKUP_SOURCE_ROOT to a full repo path.`
+      );
+    }
+  }
+
+  manifest.sourceMode = usedRemoteFallback ? 'local-and-remote-fallback' : 'local';
+  if (remoteFallbackError) {
+    manifest.includedFiles.skippedReasons.push(`Remote fallback warning: ${remoteFallbackError}`);
   }
 
   if (includeDatabase) {
