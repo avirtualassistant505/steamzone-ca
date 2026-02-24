@@ -46,6 +46,15 @@ interface AgentResponse {
   state: AgentState;
   quote?: QuotePayload;
   done: boolean;
+  finalize?: {
+    done: boolean;
+    already_finalized: boolean;
+    quote_hash: string | null;
+    quote_number: string | null;
+    record_id: string | null;
+    email_message: string | null;
+    email_success: boolean | null;
+  };
   next_question?: {
     key?: string;
     question_text?: string;
@@ -262,6 +271,9 @@ export default function EstimateBotLabPage() {
   const [isVoiceCallActive, setIsVoiceCallActive] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const requestSequenceRef = useRef(0);
+  const sessionIdRef = useRef(sessionId);
+  const activeRequestRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const voiceSessionIdRef = useRef<string>(readSessionId(VOICE_SESSION_STORAGE_KEY));
@@ -281,6 +293,10 @@ export default function EstimateBotLabPage() {
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, isBusy, typingTick]);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   useEffect(() => {
     if (!isThinking) {
@@ -464,6 +480,7 @@ export default function EstimateBotLabPage() {
     userText: string,
     options?: SendMessageOptions
   ): Promise<void> {
+    const requestId = ++requestSequenceRef.current;
     const trimmed = userText.trim();
     if (!trimmed && !options?.silentUserBubble) {
       return;
@@ -473,6 +490,11 @@ export default function EstimateBotLabPage() {
     setIsBusy(true);
     stopSpeaking();
     stopListening();
+    if (activeRequestRef.current) {
+      activeRequestRef.current.abort();
+    }
+    const requestController = new AbortController();
+    activeRequestRef.current = requestController;
     const startedAt = Date.now();
     const requestedChannel =
       options?.channel === 'voice' || options?.channel === 'test' || options?.channel === 'sms'
@@ -481,7 +503,7 @@ export default function EstimateBotLabPage() {
     const isVoiceTurn = requestedChannel === 'voice' || requestedChannel === 'test';
     const preThinkingMs = getPreThinkingDelayMs(trimmed, isVoiceTurn);
     const explicitSessionId = typeof options?.sessionId === 'string' ? options.sessionId.trim() : '';
-    const effectiveSessionId = explicitSessionId || (isVoiceTurn ? voiceSessionIdRef.current : sessionId);
+    const effectiveSessionId = explicitSessionId || (isVoiceTurn ? voiceSessionIdRef.current : sessionIdRef.current);
     if (!effectiveSessionId) {
       throw new Error('Missing session id for message.');
     }
@@ -505,7 +527,11 @@ export default function EstimateBotLabPage() {
           input_text: trimmed || WARM_OPENER,
           channel: requestedChannel,
           turn_id: newMessageId(),
+          metadata: {
+            request_id: requestId,
+          },
         }),
+        signal: requestController.signal,
       });
 
       if (preThinkingMs > 0) {
@@ -518,6 +544,16 @@ export default function EstimateBotLabPage() {
       const payload = parsed.payload;
       if (!parsed.ok || !response.ok || !payload) {
         throw new Error(parsed.textError ?? payload?.message ?? 'Unable to reach estimate agent.');
+      }
+
+      if (requestId !== requestSequenceRef.current || requestController.signal.aborted) {
+        return;
+      }
+
+      const expectedSessionId = isVoiceTurn ? voiceSessionIdRef.current : sessionIdRef.current;
+      if (payload.session_id && payload.session_id !== expectedSessionId) {
+        setSessionId(payload.session_id);
+        saveSessionId(SESSION_STORAGE_KEY, payload.session_id);
       }
 
       const assistantText = normalizeAssistantText(payload.assistant_message);
@@ -538,12 +574,22 @@ export default function EstimateBotLabPage() {
         setEstimateEngaged(true);
       }
 
+      if (payload.finalize) {
+        setFinalizeStatus(
+          payload.finalize.email_message
+            ? payload.finalize.email_message
+            : payload.finalize.done
+              ? 'Estimate finalized.'
+              : 'Estimate is ready. Finalization is pending.'
+        );
+      }
+
       if (isVoiceTurn && payload?.session_id) {
         voiceSessionIdRef.current = payload.session_id;
         saveSessionId(VOICE_SESSION_STORAGE_KEY, payload.session_id);
       }
 
-      if (!isVoiceTurn && payload?.session_id && payload.session_id !== sessionId) {
+      if (!isVoiceTurn && payload?.session_id && payload.session_id !== sessionIdRef.current) {
         setSessionId(payload.session_id);
         saveSessionId(SESSION_STORAGE_KEY, payload.session_id);
       }
@@ -557,13 +603,21 @@ export default function EstimateBotLabPage() {
         }
       }
 
-      if (!isVoiceTurn && payload.done && payload.quote && payload.session_id) {
+      if (!isVoiceTurn && payload.done && payload.quote && payload.session_id && !payload.finalize) {
         if (!finalizedSessionRef.current.has(payload.session_id)) {
           finalizedSessionRef.current.add(payload.session_id);
           void finalizeQuoteEmail(payload.quote, payload.session_id);
         }
       }
+
+      if (requestId !== requestSequenceRef.current || requestController.signal.aborted) {
+        return;
+      }
     } catch (error) {
+      if (error instanceof DOMException || requestController.signal.aborted) {
+        return;
+      }
+
       const fallback =
         error instanceof Error
           ? error.message
@@ -581,29 +635,9 @@ export default function EstimateBotLabPage() {
     } finally {
       setIsThinking(false);
       setIsBusy(false);
-    }
-  }
-
-  async function clearSessionFromLogs(targetSessionId: string): Promise<void> {
-    if (!targetSessionId) {
-      return;
-    }
-
-    try {
-      const response = await fetch('/api/transcripts-delete', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ session_id: targetSessionId }),
-      });
-
-      if (!response.ok) {
-        return;
+      if (activeRequestRef.current === requestController) {
+        activeRequestRef.current = null;
       }
-      await response.json();
-    } catch {
-      // Keep UI behavior resilient; storage mode fallback is surfaced elsewhere.
     }
   }
 
@@ -623,8 +657,11 @@ export default function EstimateBotLabPage() {
   }
 
   function startOver(): void {
-    const previousSessionId = sessionId;
-    const previousVoiceSessionId = voiceSessionIdRef.current;
+    requestSequenceRef.current += 1;
+    if (activeRequestRef.current) {
+      activeRequestRef.current.abort();
+      activeRequestRef.current = null;
+    }
 
     const id = newSessionId();
     const voiceId = newSessionId();
@@ -653,13 +690,6 @@ export default function EstimateBotLabPage() {
     setIsVoiceCallActive(false);
     stopListening();
     stopSpeaking();
-
-    if (previousSessionId) {
-      void clearSessionFromLogs(previousSessionId);
-    }
-    if (previousVoiceSessionId) {
-      void clearSessionFromLogs(previousVoiceSessionId);
-    }
   }
 
   async function copyQuoteSummary(): Promise<void> {
