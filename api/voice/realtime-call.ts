@@ -139,16 +139,25 @@ function buildSessionConfig(model: string, voice: string, includeTranscription: 
 
 function buildRequestBody(attempt: RealtimeAttempt): BodyInit {
   const config = buildSessionConfig(attempt.model, attempt.voice, attempt.includeTranscription);
-  const wrapped = {
+  const payload = {
     sdp: attempt.sdp,
-    session: config,
+    ...config,
   };
+
   if (attempt.transport === 'json') {
-    return JSON.stringify(wrapped);
+    return JSON.stringify(payload);
   }
+
   const form = new FormData();
-  form.set('sdp', attempt.sdp);
-  form.set('session', JSON.stringify(config));
+  for (const [name, value] of Object.entries(payload)) {
+    if (value === undefined) continue;
+    if (typeof value === 'string') {
+      form.set(name, value);
+      continue;
+    }
+    form.set(name, JSON.stringify(value));
+  }
+
   return form;
 }
 
@@ -169,7 +178,7 @@ function buildAttempts(sdp: string, voice: string, rawModels: string[]): Realtim
     }
   }
 
-  // Form-based fallback for legacy wrapped payload.
+  // Form-based fallback for compatibility; send top-level keys.
   for (const model of rawModels) {
     attempts.push({
       id: `${model}-withTranscription-form`,

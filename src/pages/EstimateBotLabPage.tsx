@@ -740,6 +740,9 @@ export default function EstimateBotLabPage() {
     setIsVoiceCallActive(false);
     stopListening();
     stopSpeaking();
+
+    greetedSessionRef.current.add(id);
+    void sendMessage(WARM_OPENER, { silentUserBubble: true, channel: 'web', sessionId: id });
   }
 
   async function copyQuoteSummary(): Promise<void> {

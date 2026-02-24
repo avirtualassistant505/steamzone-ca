@@ -665,14 +665,31 @@ function latestAssistantText(transcript: unknown[] | undefined): string {
   return '';
 }
 
-function isEstimateCancellationIntent(inputText: string): boolean {
-  return /\b(cancel|stop|never mind|nevermind|not now|exit estimate)\b/i.test(inputText);
+function buildDuplicateTurnMessage(args: {
+  mode: SessionMode;
+  done: boolean;
+  nextHint: NextHint;
+  quote: unknown;
+  state: SessionRecord;
+}): string {
+  if (args.mode === 'estimate') {
+    if (args.done && args.quote) {
+      return 'I already have that information and your estimate is complete.';
+    }
+
+    if (!args.nextHint.done && args.nextHint.question_text) {
+      return `I already got that. ${args.nextHint.question_text}`;
+    }
+
+    return 'I already have that update. Please tell me the next detail when you are ready.';
+  }
+
+  const recentAssistant = latestAssistantText(args.state.transcript);
+  return recentAssistant || 'That message was already processed. What would you like to do next?';
 }
 
-function hasStructuredEstimateInput(inputText: string): boolean {
-  return /\b(zone[abcd]|postal|storey|rooms?|sq\s*ft|square\s*foot|scope|screens?|tracks?|sliding|patio|skylight)\b/i.test(
-    inputText
-  );
+function isEstimateCancellationIntent(inputText: string): boolean {
+  return /\b(cancel|stop|never mind|nevermind|not now|exit estimate)\b/i.test(inputText);
 }
 
 function isLikelyInfoQuestion(inputText: string): boolean {
@@ -1590,7 +1607,13 @@ export async function runEstimateAgentCore(
     const quote = done ? await maybeComputeQuote(runtime, sessionId, true) : null;
     const dedupedResponse: PostagentEstimateResponse = {
       session_id: sessionId,
-      assistant_message: latestAssistantText(initialSession.transcript) || 'That step is already processed.',
+      assistant_message: buildDuplicateTurnMessage({
+        mode,
+        done,
+        nextHint,
+        quote,
+        state: initialSession,
+      }),
       assistant_reasoning: ['Duplicate turn ignored by turn_id idempotency.'],
       state: summarizeStateForResponse(
         {
@@ -1615,7 +1638,7 @@ export async function runEstimateAgentCore(
 
   if (mode === 'estimate' && isEstimateCancellationIntent(inputText)) {
     mode = 'support';
-  } else if (mode === 'support' && (hasEstimateIntent(inputText) || hasStructuredEstimateInput(inputText))) {
+  } else if (mode === 'support' && hasEstimateIntent(inputText)) {
     mode = 'estimate';
   }
 
