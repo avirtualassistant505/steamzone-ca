@@ -28,6 +28,7 @@ type BackupManifest = {
   generatedAt: string;
   requestedBy: 'admin';
   includeDatabase: boolean;
+  includeBuildArtifacts: boolean;
   candidateRoots: string[];
   resolvedRoot: string;
   projectRoot: string;
@@ -77,6 +78,8 @@ const PROJECT_MARKERS = ['package.json', 'api', 'src', 'server', 'public', 'inde
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_PROJECT_SEARCH_DEPTH = 6;
 const DATABASE_FOLDER = 'database';
+const DEFAULT_REMOTE_TIMEOUT_MS = 15_000;
+const DEFAULT_DB_TABLE_TIMEOUT_MS = 10_000;
 
 const PROJECT_ROOT_HINTS = [
   process.env.SITE_BACKUP_SOURCE_ROOT,
@@ -129,13 +132,16 @@ const CODE_ROOTS: CollectTarget[] = [
   { path: 'server', options: { includeNodeModules: false } },
   { path: 'public', options: { includeNodeModules: false } },
   { path: 'docs', options: { includeNodeModules: false } },
-  { path: 'dist', options: { includeNodeModules: false } },
   { path: 'tests', options: { includeNodeModules: false } },
   { path: 'e2e', options: { includeNodeModules: false } },
-  { path: 'tmp', options: { includeNodeModules: false } },
   { path: 'scripts', options: { includeNodeModules: false } },
   { path: 'GHL', options: { includeNodeModules: false } },
   { path: '.bolt', options: { includeNodeModules: false } },
+];
+
+const BUILD_ARTIFACT_ROOTS: CollectTarget[] = [
+  { path: 'dist', options: { includeNodeModules: false } },
+  { path: 'tmp', options: { includeNodeModules: false } },
   {
     path: '.vercel/output/functions',
     options: {
@@ -183,6 +189,31 @@ function shouldSkipRelativePath(relPath: string): boolean {
 
 function getNormalizedCandidateValues(...values: Array<string | undefined | null>): string[] {
   return values.filter((value): value is string => Boolean(value && value.trim()));
+}
+
+function getPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 function pickEnvToken(names: readonly string[]): string | undefined {
@@ -277,7 +308,7 @@ async function resolveRepoFromGitConfig(projectRoot: string): Promise<RepoCandid
       const contents = await fs.readFile(configPath, 'utf8');
       const remoteBlocks = contents.split(/^\[remote /m);
       for (const block of remoteBlocks) {
-        if (!/\"origin\"/.test(block)) {
+        if (!/"origin"/.test(block)) {
           continue;
         }
 
@@ -480,9 +511,12 @@ async function exportDbTable(supabase: Awaited<ReturnType<typeof getSupabaseAdmi
   }
 
   try {
-    const result = await supabase
-      .from(table)
-      .select('*', { count: 'exact' });
+    const dbTableTimeoutMs = getPositiveIntEnv('SITE_BACKUP_DB_TABLE_TIMEOUT_MS', DEFAULT_DB_TABLE_TIMEOUT_MS);
+    const result = await withTimeout(
+      supabase.from(table).select('*'),
+      dbTableTimeoutMs,
+      `Timed out reading table "${table}" after ${dbTableTimeoutMs}ms.`
+    );
     const error = result.error;
 
     if (error) {
@@ -495,12 +529,11 @@ async function exportDbTable(supabase: Awaited<ReturnType<typeof getSupabaseAdmi
     }
 
     const rows = Array.isArray(result.data) ? result.data : [];
-    const count = typeof result.count === 'number' ? result.count : rows.length;
     return {
       table,
-      status: rows.length > 0 || count > 0 ? 'included' : 'empty',
+      status: rows.length > 0 ? 'included' : 'empty',
       rows,
-      rowCount: count,
+      rowCount: rows.length,
     };
   } catch (error) {
     return {
@@ -584,12 +617,20 @@ async function addRemoteArchiveToZip(
     headers['X-GitHub-Api-Version'] = '2022-11-28';
   }
 
+  const remoteTimeoutMs = getPositiveIntEnv('SITE_BACKUP_REMOTE_TIMEOUT_MS', DEFAULT_REMOTE_TIMEOUT_MS);
+  const controller = new AbortController();
+  const remoteTimeoutId = setTimeout(() => controller.abort(), remoteTimeoutMs);
   let response: Response;
   try {
-    response = await fetch(config.fallbackUrl, { headers });
+    response = await fetch(config.fallbackUrl, { headers, signal: controller.signal });
   } catch (error) {
+    clearTimeout(remoteTimeoutId);
+    if (error instanceof Error && error.name === 'AbortError') {
+      return buildRemoteFallbackError('FETCH_TIMEOUT', `Remote archive fetch exceeded ${remoteTimeoutMs}ms.`);
+    }
     return buildRemoteFallbackError('FETCH_ERROR', `Unable to fetch remote archive: ${normalizeDbMessage(error)}`);
   }
+  clearTimeout(remoteTimeoutId);
 
   if (!response.ok) {
     const detail = await response.text().catch(() => 'unknown response body');
@@ -714,17 +755,16 @@ async function addDirectoryToZip(
   }
 }
 
-function parseBackupBody(body: unknown): { includeDatabase: boolean } {
+function parseBackupBody(body: unknown): { includeDatabase: boolean; includeBuildArtifacts: boolean } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return { includeDatabase: true };
+    return { includeDatabase: true, includeBuildArtifacts: false };
   }
 
-  const requested = body as { includeDatabase?: unknown };
-  if (requested.includeDatabase === false) {
-    return { includeDatabase: false };
-  }
-
-  return { includeDatabase: true };
+  const requested = body as { includeDatabase?: unknown; includeBuildArtifacts?: unknown };
+  return {
+    includeDatabase: requested.includeDatabase !== false,
+    includeBuildArtifacts: requested.includeBuildArtifacts === true,
+  };
 }
 
 function isTextMethod(req: ApiRequest): boolean {
@@ -737,7 +777,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
-  const { includeDatabase } = parseBackupBody(
+  const { includeDatabase, includeBuildArtifacts } = parseBackupBody(
     typeof req.body === 'string' ? (() => {
       try {
         return JSON.parse(req.body);
@@ -752,6 +792,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     generatedAt: new Date().toISOString(),
     requestedBy: 'admin',
     includeDatabase,
+    includeBuildArtifacts,
     candidateRoots: candidates,
     resolvedRoot: projectRoot,
     projectRoot,
@@ -774,7 +815,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   const fileCount = { total: 0, skipped: 0, bytes: 0 };
   const zip = new JSZip();
   const recordedPaths = new Set<string>();
-  const projectAwareFiles = FILES_ROOTS.concat(CODE_ROOTS).filter((entry) => Boolean(entry.path));
+  const projectAwareFiles = FILES_ROOTS.concat(CODE_ROOTS, includeBuildArtifacts ? BUILD_ARTIFACT_ROOTS : []).filter(
+    (entry) => Boolean(entry.path)
+  );
   const foundTargets = new Set<string>();
   const remoteConfig = await resolveGitHubSnapshotConfig(projectRoot);
   let usedRemoteFallback = false;

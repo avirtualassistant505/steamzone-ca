@@ -922,15 +922,19 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   async function downloadSiteArchive(): Promise<void> {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const defaultName = `steamzone-site-backup-${timestamp}.zip`;
+    const requestTimeoutMs = 120_000;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), requestTimeoutMs);
     setDownloadLoading(true);
-    setDownloadMessage('Generating backup archive...');
+    setDownloadMessage('Generating backup archive (this can take up to 2 minutes)...');
     setDownloadError('');
 
     try {
       const response = await fetch('/api/download-site', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ includeDatabase: true }),
+        body: JSON.stringify({ includeDatabase: true, includeBuildArtifacts: false }),
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -963,9 +967,16 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       setDownloadMessage(`Backup ready: ${filename}`);
       setDownloadError('');
     } catch (error) {
-      setDownloadError(error instanceof Error ? error.message : 'Unable to download backup.');
+      const message =
+        error instanceof DOMException && error.name === 'AbortError'
+          ? `Backup generation timed out after ${Math.round(requestTimeoutMs / 1000)} seconds. Try again.`
+          : error instanceof Error
+            ? error.message
+            : 'Unable to download backup.';
+      setDownloadError(message);
       setDownloadMessage('');
     } finally {
+      window.clearTimeout(timeoutId);
       setDownloadLoading(false);
     }
   }
