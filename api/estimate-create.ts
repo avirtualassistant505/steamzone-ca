@@ -46,8 +46,13 @@ type MailerModule = {
   buildQuotePdf: (input: unknown) => Promise<Uint8Array>;
 };
 
+type QuoteRuntimeModule = {
+  validateRequiredAnswers: (answers: Record<string, unknown>) => string[];
+};
+
 let enginePromise: Promise<EngineModule> | null = null;
 let mailerPromise: Promise<MailerModule> | null = null;
+let quoteRuntimePromise: Promise<QuoteRuntimeModule> | null = null;
 
 async function getEngine(): Promise<EngineModule> {
   if (!enginePromise) {
@@ -63,6 +68,13 @@ async function getMailer(): Promise<MailerModule> {
   return mailerPromise;
 }
 
+async function getQuoteRuntime(): Promise<QuoteRuntimeModule> {
+  if (!quoteRuntimePromise) {
+    quoteRuntimePromise = import('../server/quoteRuntime.mjs').then((mod) => mod as unknown as QuoteRuntimeModule);
+  }
+  return quoteRuntimePromise;
+}
+
 function safeString(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback;
 }
@@ -76,6 +88,34 @@ function env(name: string): string | null {
 function finiteNumber(value: unknown): number {
   const num = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(num) ? num : 0;
+}
+
+function assertFiniteNumber(value: unknown, label: string): number {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    throw new Error(`Non-finite number for ${label}.`);
+  }
+  return num;
+}
+
+function assertEstimateResultSafe(result: EstimateRecord['result']): void {
+  assertFiniteNumber(result.subtotal, 'result.subtotal');
+  assertFiniteNumber(result.estimateLow, 'result.estimateLow');
+  assertFiniteNumber(result.estimateHigh, 'result.estimateHigh');
+  assertFiniteNumber(result.durationLowHours, 'result.durationLowHours');
+  assertFiniteNumber(result.durationHighHours, 'result.durationHighHours');
+  assertFiniteNumber(result.complexityScore, 'result.complexityScore');
+  assertFiniteNumber(result.estimatedSqft, 'result.estimatedSqft');
+
+  for (const item of result.includedItems ?? []) {
+    const normalized = String(item ?? '').toLowerCase();
+    if (!normalized) {
+      continue;
+    }
+    if (normalized.includes('undefined')) {
+      throw new Error('Estimate includes invalid undefined line-item text.');
+    }
+  }
 }
 
 function normalizeKey(value: string): string {
@@ -1246,6 +1286,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const sendEmailRequested = asBool((asRecord(body)?.send_email ?? true) as unknown, true);
 
     // Idempotency: prefer header (best practice), but allow body for tools that can't set headers.
     const idempotencyKeyRaw =
@@ -1330,13 +1371,49 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       return;
     }
 
+    const engine = await getEngine();
+    const strictMode = asBool((asRecord(body)?.strict ?? true) as unknown, true);
+    const detectedZone = engine.detectZoneFromPostalCode(postalCode);
+    const zone = pickEnum(answersRec.zone, ['zoneA', 'zoneB', 'zoneC', 'zoneD'] as const, detectedZone);
+
+    if (strictMode) {
+      const quoteRuntime = await getQuoteRuntime();
+      const strictAnswers: Record<string, unknown> = {
+        ...answersRec,
+        serviceType,
+        postalCode,
+        zone,
+        contact: {
+          ...(asRecord(answersRec.contact) ?? {}),
+          ...contact,
+        },
+      };
+      const errors = quoteRuntime.validateRequiredAnswers(strictAnswers);
+      if (errors.length > 0) {
+        res.status(400).json({
+          message: 'Validation failed for final estimate.',
+          errors,
+        });
+        return;
+      }
+    }
+
     // If we already created a record for this idempotency key, return it (and skip duplicate emails),
     // unless the client explicitly asks for a resend after configuration fixes.
     if (idempotencyKey) {
       const existing = await fetchEstimateRecordByIdempotencyKey(idempotencyKey);
       if (existing) {
         if (wantsResend) {
-          const [email, ghl] = await Promise.all([sendEstimateEmail(existing), syncToGhl(existing)]);
+          const [email, ghl] = await Promise.all([
+            sendEmailRequested
+              ? sendEstimateEmail(existing)
+              : Promise.resolve({
+                  success: true,
+                  message: 'Email delivery skipped by request.',
+                  deliveryMode: currentDeliveryMode(),
+                }),
+            syncToGhl(existing),
+          ]);
           res.status(200).json({
             record: existing,
             email: { ...email, idempotent: true, resent: true, deliveryMode: email.deliveryMode ?? currentDeliveryMode() },
@@ -1363,12 +1440,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       }
     }
 
-    const engine = await getEngine();
-    const zone = engine.detectZoneFromPostalCode(postalCode);
     const normalizedAnswers = normalizeEstimateAnswers(serviceType, answers, postalCode, zone, contact);
 
     const { config: pricingConfig, source: pricingSource } = await loadPricingConfigForEstimate();
     const estimate = engine.calculateEstimate(serviceType, normalizedAnswers, pricingConfig);
+    assertEstimateResultSafe(estimate);
 
     const createdAt = nowIso();
     const quoteNumber = generateQuoteNumber();
@@ -1410,7 +1486,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         record.id = stored.recordId;
       }
 
-      const [email, ghl] = await Promise.all([sendEstimateEmail(record), syncToGhl(record)]);
+      const [email, ghl] = await Promise.all([
+        sendEmailRequested
+          ? sendEstimateEmail(record)
+          : Promise.resolve({
+              success: true,
+              message: 'Email delivery skipped by request.',
+              deliveryMode: currentDeliveryMode(),
+            }),
+        syncToGhl(record),
+      ]);
       const sms =
         ghl?.posted && ghl?.mode === 'api' && ghl?.contactId
           ? await sendEstimateSmsViaGhlApi(record, String(ghl.contactId))

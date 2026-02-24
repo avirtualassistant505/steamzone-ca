@@ -365,6 +365,34 @@ function roundHours(value: number): number {
   return Math.max(0.5, Math.round(value * 10) / 10);
 }
 
+function assertFiniteNumber(value: number, label: string): number {
+  if (!Number.isFinite(value)) {
+    throw new Error(`Non-finite number for ${label}.`);
+  }
+  return value;
+}
+
+function assertSafeIncludedItems(items: string[]): void {
+  for (const item of items) {
+    const normalized = String(item ?? '').toLowerCase();
+    if (normalized.includes('undefined')) {
+      throw new Error('Estimate includedItems contains undefined text.');
+    }
+  }
+}
+
+function assertEstimateResultSafety(result: EstimateResult): EstimateResult {
+  assertFiniteNumber(result.subtotal, 'subtotal');
+  assertFiniteNumber(result.estimateLow, 'estimateLow');
+  assertFiniteNumber(result.estimateHigh, 'estimateHigh');
+  assertFiniteNumber(result.durationLowHours, 'durationLowHours');
+  assertFiniteNumber(result.durationHighHours, 'durationHighHours');
+  assertFiniteNumber(result.complexityScore, 'complexityScore');
+  assertFiniteNumber(result.estimatedSqft, 'estimatedSqft');
+  assertSafeIncludedItems(result.includedItems);
+  return result;
+}
+
 function withRange(total: number, lowMultiplier: number, highMultiplier: number): { low: number; high: number } {
   return {
     low: roundCurrency(total * lowMultiplier),
@@ -452,6 +480,11 @@ function getUtmParams(): EstimateRecord['utm'] {
 }
 
 function computeWindowEstimate(input: WindowEstimateInput, config: PricingConfig): EstimateResult {
+  const scopeLabel: Record<WindowScope, string> = {
+    exterior: 'Exterior glass cleaning',
+    interior: 'Interior glass cleaning',
+    both: 'Interior and exterior glass cleaning',
+  };
   const paneEstimate = config.window.estimatedPanes[input.sizeBracket];
   const storeyMultiplier = config.window.storeyMultipliers[input.storey];
   const scopeMultiplier = config.window.scopeMultipliers[input.scope];
@@ -577,7 +610,7 @@ function computeWindowEstimate(input: WindowEstimateInput, config: PricingConfig
     redFlags,
     includedItems: [
       'Residential window detailing',
-      input.scope === 'both' ? 'Interior and exterior glass cleaning' : `${input.scope} glass cleaning`,
+      scopeLabel[input.scope],
       input.tracks === 'detailed' ? 'Detailed track and sill cleaning' : 'Standard frame wipe-down',
     ],
     notes: [
@@ -917,19 +950,24 @@ export function calculateEstimate(
     | PostConstructionEstimateInput,
   config: PricingConfig
 ): EstimateResult {
+  let result: EstimateResult;
   if (serviceType === 'window') {
-    return computeWindowEstimate(input as WindowEstimateInput, config);
+    result = computeWindowEstimate(input as WindowEstimateInput, config);
+    return assertEstimateResultSafety(result);
   }
 
   if (serviceType === 'commercialWindow') {
-    return computeCommercialWindowEstimate(input as CommercialWindowEstimateInput, config);
+    result = computeCommercialWindowEstimate(input as CommercialWindowEstimateInput, config);
+    return assertEstimateResultSafety(result);
   }
 
   if (serviceType === 'carpet') {
-    return computeCarpetEstimate(input as CarpetEstimateInput, config);
+    result = computeCarpetEstimate(input as CarpetEstimateInput, config);
+    return assertEstimateResultSafety(result);
   }
 
-  return computePostConstructionEstimate(input as PostConstructionEstimateInput, config);
+  result = computePostConstructionEstimate(input as PostConstructionEstimateInput, config);
+  return assertEstimateResultSafety(result);
 }
 
 export function createDefaultLeadContact(): LeadContact {

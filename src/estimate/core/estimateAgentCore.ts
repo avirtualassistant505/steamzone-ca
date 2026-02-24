@@ -1,9 +1,7 @@
 import {
   getFieldOptions,
   getRequiredVisibleFieldsInOrder,
-  getEstimateSchema,
   isAnswered,
-  getAnswerValue,
   type EstimateFormSchema,
   type SchemaField,
   type SchemaOption,
@@ -28,6 +26,7 @@ export interface PostagentEstimateRequest {
   session_id?: string;
   input_text: string;
   channel?: PostagentChannel;
+  turn_id?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -72,6 +71,8 @@ interface SessionRecord {
   asked_keys: string[];
   transcript?: unknown[];
   last_question_key: string | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 interface NextHint {
@@ -129,11 +130,35 @@ type EstimateAgentRuntimeModule = {
   toolComputeQuote: (sessionId: string) => Promise<unknown>;
   appendTranscript: (
     sessionId: string,
-    entry: { role: TranscriptRole; content: string; at: string; channel?: PostagentChannel }
+    entry: {
+      role: TranscriptRole;
+      content: string;
+      at: string;
+      channel?: PostagentChannel;
+      reasoning?: string;
+      meta?: Record<string, unknown>;
+    }
   ) => Promise<{
     session_id: string;
     answers: Record<string, unknown>;
     asked_keys: string[];
+    last_question_key: string | null;
+    created_at?: string;
+    updated_at?: string;
+  }>;
+  saveSession: (session: {
+    session_id: string;
+    answers: Record<string, unknown>;
+    asked_keys: string[];
+    transcript?: unknown[];
+    last_question_key: string | null;
+    created_at?: string;
+    updated_at?: string;
+  }) => Promise<{
+    session_id: string;
+    answers: Record<string, unknown>;
+    asked_keys: string[];
+    transcript?: unknown[];
     last_question_key: string | null;
     created_at?: string;
     updated_at?: string;
@@ -327,68 +352,6 @@ const TOOL_DEFS_INFO_ONLY = [
 const CORE_PROMPT_PREFIX = DEFAULT_AGENT_SYSTEM_PROMPT;
 
 const DEFAULT_USER_START = 'Hi, how are you? What can I help you with today?';
-const ESTIMATE_FLOW_FIELD_HINTS = new Set([
-  'serviceType',
-  'postalCode',
-  'zone',
-  'storey',
-  'sizeBracket',
-  'scope',
-  'screens',
-  'tracks',
-  'hardToReach',
-  'hardWaterRemoval',
-  'constructionDebris',
-  'slidingRemoval',
-  'slidingQuantity',
-  'patioDoors',
-  'patioQuantity',
-  'skylights',
-  'skylightQuantity',
-  'railingGlass',
-  'frenchPanes',
-  'sunroom',
-  'walkoutBasement',
-  'buildingType',
-  'storeys',
-  'sizeMode',
-  'paneCount',
-  'frontageFeet',
-  'rooms',
-  'sqftBracket',
-  'condition',
-  'estimateMode',
-  'stairsSteps',
-  'hallways',
-  'furnitureMoving',
-  'advancedStainRemoval',
-  'odorElimination',
-  'petTreatment',
-  'stainProtector',
-  'unusualCondition',
-  'projectType',
-  'buildType',
-  'floors',
-  'stage',
-  'dustLoad',
-  'interiorWindows',
-  'scraping',
-  'floorDetailing',
-  'insideCabinets',
-  'appliances',
-  'specialDetailing',
-  'multiTenantAccess',
-  'schedule',
-  'contact.fullName',
-  'contact.phone',
-  'contact.email',
-  'contact.address',
-  'contact.consentToContact',
-  'contact.marketingOptIn',
-]);
-
-const ESTIMATE_FLOW_CONTEXT_RE = /\b(estimate|quote|price|pricing|cost)\b/i;
-
 const CORRECTION_CUES = /\b(actually|instead|change|replace|correction|corrections|update|correct|correcting)\b/i;
 
 function nowIso(): string {
@@ -557,6 +520,111 @@ async function resolveModelProviderConfig(channel?: PostagentChannel): Promise<A
 
 const ESTIMATE_INTENT_CUES = /\b(estimate|quote|pricing|price|cost|book|booking|schedule|appointment)\b/i;
 const INFO_QUESTION_CUES = /\?|\b(what|where|who|when|why|how|do|does|can|could|is|are|tell me|i want to know|would you)\b/i;
+const SESSION_MODE_KEY = '__session_mode';
+const SESSION_PROCESSED_TURNS_KEY = '__processed_turn_ids';
+
+type SessionMode = 'support' | 'estimate' | 'handoff';
+
+function stripInternalAnswerKeys(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => stripInternalAnswerKeys(entry));
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return value;
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(record)) {
+    if (key.startsWith('__')) {
+      continue;
+    }
+    out[key] = stripInternalAnswerKeys(nested);
+  }
+  return out;
+}
+
+function sanitizedAnswersForClient(answers: Record<string, unknown>): Record<string, unknown> {
+  return stripInternalAnswerKeys(answers) as Record<string, unknown>;
+}
+
+function getSessionMode(answers: Record<string, unknown>): SessionMode {
+  const mode = String(answers[SESSION_MODE_KEY] ?? '').trim().toLowerCase();
+  if (mode === 'estimate' || mode === 'handoff') {
+    return mode;
+  }
+  return 'support';
+}
+
+function withSessionMode(
+  answers: Record<string, unknown>,
+  mode: SessionMode
+): Record<string, unknown> {
+  return {
+    ...answers,
+    [SESSION_MODE_KEY]: mode,
+  };
+}
+
+function readProcessedTurnIds(answers: Record<string, unknown>): string[] {
+  const raw = answers[SESSION_PROCESSED_TURNS_KEY];
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((entry) => String(entry ?? '').trim())
+    .filter((entry, index, list) => entry.length > 0 && list.indexOf(entry) === index)
+    .slice(-50);
+}
+
+function withProcessedTurn(
+  answers: Record<string, unknown>,
+  turnId: string
+): Record<string, unknown> {
+  const normalized = turnId.trim();
+  if (!normalized) {
+    return answers;
+  }
+  const next = [...readProcessedTurnIds(answers), normalized];
+  return {
+    ...answers,
+    [SESSION_PROCESSED_TURNS_KEY]: next.slice(-50),
+  };
+}
+
+function readTurnId(request: PostagentEstimateRequest): string {
+  const direct = String(request.turn_id ?? '').trim();
+  if (direct) {
+    return direct;
+  }
+  const metadata = asRecord(request.metadata) ?? {};
+  return String(metadata.turn_id ?? metadata.turnId ?? metadata.message_id ?? metadata.messageId ?? '').trim();
+}
+
+function latestAssistantText(transcript: unknown[] | undefined): string {
+  if (!transcript || transcript.length === 0) {
+    return '';
+  }
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const item = asRecord(transcript[index]);
+    if (!item) continue;
+    if (item.role === 'assistant') {
+      return String(item.content ?? '').trim();
+    }
+  }
+  return '';
+}
+
+function isEstimateCancellationIntent(inputText: string): boolean {
+  return /\b(cancel|stop|never mind|nevermind|not now|exit estimate)\b/i.test(inputText);
+}
+
+function hasStructuredEstimateInput(inputText: string): boolean {
+  return /\b(zone[abcd]|postal|storey|rooms?|sq\s*ft|square\s*foot|scope|screens?|tracks?|sliding|patio|skylight)\b/i.test(
+    inputText
+  );
+}
 
 function isLikelyInfoQuestion(inputText: string): boolean {
   return INFO_QUESTION_CUES.test(inputText);
@@ -786,37 +854,6 @@ function hasOptionTextMatch(raw: string, options: SchemaOption[]): string | null
   return null;
 }
 
-function hasEstimateSignalInState(state: SessionRecord, inputText: string): boolean {
-  const schema = getEstimateSchema();
-  const hasEstimateAnswer = schema.fields.some((field) => {
-    if (!ESTIMATE_FLOW_FIELD_HINTS.has(field.key)) {
-      return false;
-    }
-
-    const value = getAnswerValue(state.answers, field.key);
-    return value !== undefined && value !== null && value !== '';
-  });
-  if (hasEstimateAnswer) {
-    return true;
-  }
-
-  if (state.asked_keys.some((key) => ESTIMATE_FLOW_FIELD_HINTS.has(key))) {
-    return true;
-  }
-
-  const hasEstimateContext = Boolean(
-    state.transcript?.some((entry) => {
-      const record = asRecord(entry);
-      return record?.role === 'assistant' && ESTIMATE_FLOW_CONTEXT_RE.test(String(record.content ?? ''));
-    })
-  );
-  if (hasEstimateContext) {
-    return true;
-  }
-
-  return hasEstimateIntent(inputText) || state.asked_keys.length > 0;
-}
-
 const INTEGER_HINTS: Record<string, string[]> = {
   roomCount: ['room', 'rooms', 'bedroom', 'bedrooms', 'bed', 'sleeping'],
   sizeBracket: ['under', 'thousand', 'sqft', 'square', 'foot', 'feet'],
@@ -947,7 +984,7 @@ function summarizeStateForResponse(state: {
   last_question_key: string | null;
 }, done: boolean) {
   return {
-    answers: state.answers,
+    answers: sanitizedAnswersForClient(state.answers),
     asked_keys: state.asked_keys,
     last_question_key: state.last_question_key,
     done,
@@ -984,10 +1021,12 @@ export async function appendSessionTranscript(
   role: TranscriptRole,
   content: string,
   at = nowIso(),
-  channel?: PostagentChannel
+  channel?: PostagentChannel,
+  reasoning?: string,
+  meta?: Record<string, unknown>
 ): Promise<void> {
   const runtime = await getRuntime();
-  await runtime.appendTranscript(sessionId, { role, content, at, channel });
+  await runtime.appendTranscript(sessionId, { role, content, at, channel, reasoning, meta });
 }
 
 export async function appendTranscript(
@@ -995,9 +1034,11 @@ export async function appendTranscript(
   role: TranscriptRole,
   content: string,
   at = nowIso(),
-  channel?: PostagentChannel
+  channel?: PostagentChannel,
+  reasoning?: string,
+  meta?: Record<string, unknown>
 ): Promise<void> {
-  return appendSessionTranscript(sessionId, role, content, at, channel);
+  return appendSessionTranscript(sessionId, role, content, at, channel, reasoning, meta);
 }
 
 async function callOpenAI(
@@ -1070,38 +1111,6 @@ async function callOpenAIWithFallback(
 
 function transcriptLine(inputText: string): string {
   return inputText.trim();
-}
-
-async function appendDurableConversationTurn(
-  sessionId: string,
-  role: TranscriptRole,
-  content: string,
-  at: string,
-  options?: { reasoning?: string[]; channel?: PostagentChannel }
-): Promise<void> {
-  try {
-    const logs = await import('../../../server/conversationLogStore.js');
-    const reasoning = options?.reasoning;
-    const turn = {
-      role,
-      content,
-      at,
-      reasoning: Array.isArray(reasoning) && reasoning.length > 0 ? reasoning.join('\n') : undefined,
-    } as {
-      role: TranscriptRole;
-      content: string;
-      at: string;
-      reasoning?: string;
-      channel?: PostagentChannel;
-    };
-    const normalizedChannel = options?.channel?.toLowerCase() as PostagentChannel | undefined;
-    if (normalizedChannel) {
-      turn.channel = normalizedChannel;
-    }
-    await logs.appendConversationTurn(sessionId, turn);
-  } catch {
-    // Keep primary chat flow working even if log persistence is unavailable.
-  }
 }
 
 async function callTool(
@@ -1452,7 +1461,9 @@ async function runAgentLoop(
   }
 
   const session = await runtime.getSession(sessionId);
-  const done = estimateFlowActive && runtime.validateRequiredAnswers(session.answers).length === 0;
+  const done =
+    estimateFlowActive &&
+    runtime.validateRequiredAnswers(sanitizedAnswersForClient(session.answers)).length === 0;
   const nextHint = !estimateFlowActive || done ? { done: true } : await runtime.peekNextQuestion(sessionId);
   const computedQuote = quote === null ? await maybeComputeQuote(runtime, sessionId, done) : quote;
 
@@ -1485,56 +1496,64 @@ async function runAgentLoop(
 }
 
 export async function decideNextAssistantTurn(
-  request: { session_id: string; input_text: string; channel?: PostagentChannel }
+  request: { session_id: string; input_text: string; channel?: PostagentChannel; turn_id?: string }
 ): Promise<PostagentEstimateResponse> {
-  const modelConfig = await resolveModelProviderConfig(request.channel);
-
-  const runtime = await getRuntime();
-  const sessionId = request.session_id.trim();
-  const inputText = String(request.input_text || '').trim() || DEFAULT_USER_START;
-  const preState = await runtime.toolGetState(sessionId);
-  const estimateFlowActive = hasEstimateSignalInState(preState, inputText);
-
-  const loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, request.channel, estimateFlowActive);
-  const finalState = await runtime.getSession(sessionId);
-  const done = loopResult.done;
-
-  const response: PostagentEstimateResponse = {
-    session_id: sessionId,
-    assistant_message: loopResult.assistant_message,
-    assistant_reasoning: loopResult.assistant_reasoning,
-    state: summarizeStateForResponse(
-      {
-        answers: finalState.answers,
-        asked_keys: finalState.asked_keys,
-        last_question_key: finalState.last_question_key,
-      },
-      done
-    ),
-    quote: loopResult.quote,
-    done,
-  };
-
-  if (!loopResult.next_hint.done && loopResult.next_hint.next_field_key) {
-    response.next_question = {
-      key: loopResult.next_hint.next_field_key,
-      question_text: loopResult.next_hint.question_text,
-      input_ui_hint: loopResult.next_hint.input_ui_hint,
-    };
-  }
-
-  return response;
+  return runEstimateAgentCore({
+    session_id: request.session_id,
+    input_text: request.input_text,
+    channel: request.channel,
+    turn_id: request.turn_id,
+  });
 }
 
 export async function runEstimateAgentCore(
   request: PostagentEstimateRequest
 ): Promise<PostagentEstimateResponse> {
-  const modelConfig = await resolveModelProviderConfig(request.channel);
-
   const runtime = await getRuntime();
   const sessionId = request.session_id?.trim() || newSessionId();
   const inputText = String(request.input_text || '').trim() || DEFAULT_USER_START;
   const channel = request.channel;
+  const turnId = readTurnId(request);
+
+  const initialSession = await runtime.getSession(sessionId);
+  let mode = getSessionMode(initialSession.answers);
+  const alreadyProcessed = turnId ? readProcessedTurnIds(initialSession.answers).includes(turnId) : false;
+
+  if (alreadyProcessed) {
+    const cleanedAnswers = sanitizedAnswersForClient(initialSession.answers);
+    const done = mode === 'estimate' && runtime.validateRequiredAnswers(cleanedAnswers).length === 0;
+    const nextHint = done ? { done: true } : await runtime.peekNextQuestion(sessionId);
+    const quote = done ? await maybeComputeQuote(runtime, sessionId, true) : null;
+    const dedupedResponse: PostagentEstimateResponse = {
+      session_id: sessionId,
+      assistant_message: latestAssistantText(initialSession.transcript) || 'That step is already processed.',
+      assistant_reasoning: ['Duplicate turn ignored by turn_id idempotency.'],
+      state: summarizeStateForResponse(
+        {
+          answers: initialSession.answers,
+          asked_keys: initialSession.asked_keys,
+          last_question_key: initialSession.last_question_key,
+        },
+        done
+      ),
+      quote,
+      done,
+    };
+    if (!nextHint.done && nextHint.next_field_key) {
+      dedupedResponse.next_question = {
+        key: nextHint.next_field_key,
+        question_text: nextHint.question_text,
+        input_ui_hint: nextHint.input_ui_hint,
+      };
+    }
+    return dedupedResponse;
+  }
+
+  if (mode === 'estimate' && isEstimateCancellationIntent(inputText)) {
+    mode = 'support';
+  } else if (mode === 'support' && (hasEstimateIntent(inputText) || hasStructuredEstimateInput(inputText))) {
+    mode = 'estimate';
+  }
 
   const userTranscriptAt = nowIso();
   const userTranscript = transcriptLine(inputText);
@@ -1544,20 +1563,82 @@ export async function runEstimateAgentCore(
     at: userTranscriptAt,
     channel,
   });
-  await appendDurableConversationTurn(sessionId, 'user', userTranscript, userTranscriptAt, {
-    channel,
-  });
 
-  const schema = await runtime.toolGetSchema();
-  const state = await runtime.toolGetState(sessionId);
-  const estimateFlowActive = hasEstimateSignalInState(state, inputText);
-  const nextHint = await runtime.peekNextQuestion(sessionId);
-  if (estimateFlowActive) {
-    await normalizeAndSetAnswersFromInput(runtime, sessionId, inputText, schema, state, nextHint);
+  let loopResult: {
+    assistant_message: string;
+    assistant_reasoning: string[];
+    quote: unknown | null;
+    next_hint: NextHint;
+    done: boolean;
+  };
+
+  if (mode === 'estimate') {
+    const schema = await runtime.toolGetSchema();
+    const state = await runtime.toolGetState(sessionId);
+    const nextHint = await runtime.peekNextQuestion(sessionId);
+    const parseResult = await normalizeAndSetAnswersFromInput(runtime, sessionId, inputText, schema, state, nextHint);
+
+    const afterParse = await runtime.getSession(sessionId);
+    const missingRequired = runtime.validateRequiredAnswers(sanitizedAnswersForClient(afterParse.answers));
+    const done = missingRequired.length === 0;
+    const quote = done ? await runtime.toolComputeQuote(sessionId) : null;
+
+    let deterministicMessage = '';
+    let deterministicNextHint: NextHint = { done: true };
+    if (done && quote) {
+      const quoteRecord = asRecord(quote) ?? {};
+      const totalText = asNumericText(quoteRecord.total);
+      const contact = asRecord(afterParse.answers.contact) ?? {};
+      const email = String(contact.email ?? '').trim();
+      deterministicMessage = totalText
+        ? `Thanks, I have everything for your estimate. The subtotal is ${totalText}.${
+            email ? ` I can email the quote to ${email}.` : ''
+          }`
+        : 'Thanks, I have everything for your estimate. Your quote is ready.';
+      deterministicNextHint = { done: true };
+    } else if (parseResult.ambiguity.length > 0 && parseResult.applied.length === 0) {
+      deterministicMessage = parseResult.ambiguity[0];
+      deterministicNextHint = await runtime.peekNextQuestion(sessionId);
+    } else {
+      deterministicNextHint = await runtime.toolNextQuestion(sessionId);
+      deterministicMessage = deterministicNextHint.question_text ?? 'Please share the next estimate detail.';
+    }
+
+    loopResult = {
+      assistant_message: normalizeAssistantMessage(deterministicMessage),
+      assistant_reasoning: buildReasoningText([
+        `Estimate mode is active for session ${sessionId}.`,
+        `Parsed ${parseResult.applied.length} field update(s) from this turn.`,
+        done
+          ? 'All required estimate fields are complete; quote computed deterministically.'
+          : `Missing required fields remain; next question key is ${deterministicNextHint.next_field_key ?? 'unknown'}.`,
+      ]),
+      quote,
+      next_hint: deterministicNextHint,
+      done,
+    };
+  } else {
+    const modelConfig = await resolveModelProviderConfig(channel);
+    loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, channel, false);
+    loopResult.done = false;
+    loopResult.quote = null;
+    loopResult.next_hint = { done: true };
   }
 
-  const loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, channel, estimateFlowActive);
-  const finalState = await runtime.getSession(sessionId);
+  const finalStateBeforeMeta = await runtime.getSession(sessionId);
+  let metaAnswers = withSessionMode(finalStateBeforeMeta.answers, mode);
+  if (turnId) {
+    metaAnswers = withProcessedTurn(metaAnswers, turnId);
+  }
+
+  const finalState =
+    JSON.stringify(metaAnswers) === JSON.stringify(finalStateBeforeMeta.answers)
+      ? finalStateBeforeMeta
+      : await runtime.saveSession({
+          ...finalStateBeforeMeta,
+          answers: metaAnswers,
+        });
+
   const done = loopResult.done;
 
   const finalStateSummary = {
@@ -1579,10 +1660,7 @@ export async function runEstimateAgentCore(
     content: assistantTranscript,
     at: assistantTranscriptAt,
     channel,
-  });
-  await appendDurableConversationTurn(sessionId, 'assistant', assistantTranscript, assistantTranscriptAt, {
-    reasoning: loopResult.assistant_reasoning,
-    channel,
+    reasoning: loopResult.assistant_reasoning.join('\n'),
   });
 
   const response: PostagentEstimateResponse = {
@@ -1631,6 +1709,7 @@ export async function handlerForEstimateAgentPost(
 
   const rawSessionId = String(payload.session_id ?? '').trim();
   const inputText = String(payload.input_text ?? payload.user_message ?? '').trim();
+  const rawTurnId = String(payload.turn_id ?? '').trim();
   const hasSession = rawSessionId.length > 0;
 
   if (!createSessionWhenMissing && !hasSession) {
@@ -1643,6 +1722,7 @@ export async function handlerForEstimateAgentPost(
       session_id: hasSession ? rawSessionId : undefined,
       input_text: inputText,
       channel: (payload?.channel as PostagentChannel | undefined) ?? 'web',
+      turn_id: rawTurnId || undefined,
       metadata: asRecord(payload?.metadata) ?? {},
     });
 

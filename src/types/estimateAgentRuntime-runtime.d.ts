@@ -4,7 +4,14 @@ declare module '*estimateAgentRuntime.mjs' {
     session_id: string;
     answers: Record<string, unknown>;
     asked_keys: string[];
-    transcript?: Array<{ role: 'user' | 'assistant' | 'tool'; content: string; at: string }>;
+    transcript?: Array<{
+      role: 'user' | 'assistant' | 'tool';
+      content: string;
+      at: string;
+      channel?: string;
+      reasoning?: string;
+      meta?: Record<string, unknown>;
+    }>;
     last_question_key: string | null;
     created_at?: string;
     updated_at?: string;
@@ -23,8 +30,19 @@ declare module '*estimateAgentRuntime.mjs' {
     };
   }
 
-  export function appendTranscript(sessionId: string, entry: { role: 'user' | 'assistant' | 'tool'; content: string; at: string }): Promise<EstimateSessionRecord>;
+  export function appendTranscript(
+    sessionId: string,
+    entry: {
+      role: 'user' | 'assistant' | 'tool';
+      content: string;
+      at: string;
+      channel?: string;
+      reasoning?: string;
+      meta?: Record<string, unknown>;
+    }
+  ): Promise<EstimateSessionRecord>;
   export function getSession(sessionId: string): Promise<EstimateSessionRecord>;
+  export function saveSession(session: EstimateSessionRecord): Promise<EstimateSessionRecord>;
   export function peekNextQuestion(sessionId: string): Promise<NextQuestionResult>;
   export function summaryState(session: EstimateSessionRecord): {
     answers: Record<string, unknown>;
@@ -104,13 +122,19 @@ declare module '*estimateAgentCoreRuntime.mjs' {
     session_id?: string;
     input_text: string;
     channel?: PostagentChannel;
+    turn_id?: string;
     metadata?: Record<string, unknown>;
   }): Promise<PostagentEstimateResponse>;
   export function loadSchema(): Promise<unknown>;
   export function getState(sessionId: string): Promise<{ session_id: string; answers: Record<string, unknown>; asked_keys: string[]; last_question_key: string | null }>;
   export function appendSessionTranscript(sessionId: string, role: 'user' | 'assistant' | 'tool', content: string, at?: string): Promise<void>;
   export function appendTranscript(sessionId: string, role: 'user' | 'assistant' | 'tool', content: string, at?: string): Promise<void>;
-  export function decideNextAssistantTurn(request: { session_id: string; input_text: string; channel?: PostagentChannel }): Promise<PostagentEstimateResponse>;
+  export function decideNextAssistantTurn(request: {
+    session_id: string;
+    input_text: string;
+    channel?: PostagentChannel;
+    turn_id?: string;
+  }): Promise<PostagentEstimateResponse>;
   export function normalizeAndSetAnswersFromInput(
     runtime: unknown,
     sessionId: string,

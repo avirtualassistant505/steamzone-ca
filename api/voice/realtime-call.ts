@@ -92,39 +92,7 @@ function buildRealtimeSessionConfigs(model: string, voice: string): SessionConfi
     tool_choice: 'auto',
   };
 
-  const modernConfigNoAudioFormats = {
-    model,
-    instructions: REALTIME_INSTRUCTIONS,
-    modalities: ['text', 'audio'],
-    voice,
-    turn_detection: {
-      type: 'server_vad',
-    },
-    tools: baseTools,
-    tool_choice: 'auto',
-  };
-
-  const legacyNestedAudioConfig = {
-    type: 'realtime',
-    model,
-    instructions: REALTIME_INSTRUCTIONS,
-    modalities: ['text', 'audio'],
-    audio: {
-      input: {
-        format: 'pcm16',
-        turn_detection: {
-          type: 'server_vad',
-        },
-      },
-      output: {
-        voice,
-      },
-    },
-    tools: baseTools,
-    tool_choice: 'auto',
-  };
-
-  return [modernConfig, modernConfigNoAudioFormats, legacyNestedAudioConfig];
+  return [modernConfig];
 }
 
 function isUnknownParameterError(text: string): boolean {
@@ -193,12 +161,24 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
-  const model = process.env.OPENAI_REALTIME_MODEL?.trim() || 'gpt-realtime';
+  const storedModelConfig = await import('../../server/agentModelStore.js')
+    .then((mod) => mod.getAgentModelConfig())
+    .catch(() => null);
+  const storedVoiceModel = storedModelConfig?.voiceModel?.trim() ?? '';
+  const inferredRealtimeModel =
+    storedVoiceModel && storedVoiceModel.toLowerCase().includes('realtime')
+      ? storedVoiceModel.replace(/^openai\//i, '')
+      : '';
+
+  const model =
+    process.env.OPENAI_REALTIME_MODEL?.trim() ||
+    inferredRealtimeModel ||
+    'gpt-realtime';
   const voice = process.env.OPENAI_REALTIME_VOICE?.trim() || 'marin';
   const preferredConfigs = buildRealtimeSessionConfigs(model, voice);
   const attempts: RealtimeAttempt[] = preferredConfigs.flatMap((config) => [
-    { config, transport: 'form' },
     { config, transport: 'json' },
+    { config, transport: 'form' },
   ]);
 
   const fallbackModel = model === 'gpt-realtime' ? 'gpt-4o-realtime-preview' : model;

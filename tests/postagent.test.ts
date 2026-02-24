@@ -3,9 +3,9 @@ import postagentHandler from '../api/postagent/estimate';
 import {
   loadSchema,
   normalizeAndSetAnswersFromInput,
+  runEstimateAgentCore,
 } from '../src/estimate/core/estimateAgentCore';
-import * as estimateAgentRuntime from '../server/estimateAgentRuntime.mjs';
-import * as estimateAgentCoreRuntime from '../server/estimateAgentCoreRuntime.mjs';
+import * as estimateAgentRuntime from '../server/estimateAgentRuntimeEntry';
 
 interface MockRes {
   code: number;
@@ -54,7 +54,7 @@ function mockOpenAIMessage(message = 'Got it.') {
 
 async function completeWindowAnswers(sessionId: string): Promise<void> {
   mockOpenAIMessage('Thanks, I have that.');
-  await estimateAgentCoreRuntime.runEstimateAgentCore({
+  await runEstimateAgentCore({
     session_id: sessionId,
     input_text:
       'Need window cleaning. postal code R5G2X3, zone zoneA, storey bungalow, size bracket under1000, scope exterior, screens none, tracks basic, hard reach no, hard water no, construction debris no, sliding removal none, patio doors none, skylights none, railing glass none, french panes none, sunroom no, walkout no, my name is Jane Test, phone 2365066570, email jane@example.com, consent yes',
@@ -342,7 +342,7 @@ describe('POST /api/postagent/estimate', () => {
         method: 'POST',
         body: {
           session_id: 'postagent-markdown-cleanup-1',
-          input_text: 'Need an estimate',
+          input_text: 'What areas do you serve?',
         },
       },
       res

@@ -18,6 +18,7 @@ Request:
 ```json
 {
   "session_id": "optional",
+  "turn_id": "optional-uuid-per-user-turn",
   "input_text": "I need a window estimate",
   "channel": "web",
   "metadata": {}
@@ -50,6 +51,25 @@ Response:
 ```
 
 If `session_id` is not supplied, the endpoint creates a new session and returns one.
+If `turn_id` repeats for the same `session_id`, the endpoint returns the previously-processed state for idempotency.
+
+## Finalize endpoint
+`POST /api/postagent/finalize`
+
+Request:
+
+```json
+{
+  "session_id": "<session-id>",
+  "send_email": true
+}
+```
+
+Behavior:
+- Validates required answers from the shared schema.
+- Computes deterministic quote.
+- Calls the same estimate-create pipeline with strict validation and idempotency.
+- Marks session finalized metadata and returns quote/email/record details.
 
 ## Example cURL
 ```bash
@@ -57,6 +77,7 @@ curl -X POST http://localhost:5173/api/postagent/estimate \
   -H "Content-Type: application/json" \
   -d '{
     "input_text":"Estimate for windows, postal code R5G 2X3, zone A",
+    "turn_id":"turn-001",
     "channel":"web",
     "metadata":{"source":"curl-smoke"}
   }'
@@ -67,7 +88,17 @@ curl -X POST http://localhost:5173/api/postagent/estimate \
   -H "Content-Type: application/json" \
   -d '{
     "session_id":"<session-id>",
+    "turn_id":"turn-002",
     "input_text":"Update: I meant 10 windows and 2k sqft"
+  }'
+```
+
+```bash
+curl -X POST http://localhost:5173/api/postagent/finalize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id":"<session-id>",
+    "send_email":true
   }'
 ```
 

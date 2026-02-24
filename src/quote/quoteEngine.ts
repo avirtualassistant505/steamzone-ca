@@ -36,8 +36,33 @@ function generateQuoteId(): string {
   return `Q-${stamp}-${suffix}`;
 }
 
+function assertFiniteAmount(value: number, label: string): void {
+  if (!Number.isFinite(value)) {
+    throw new Error(`Quote computation produced non-finite value for ${label}.`);
+  }
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function stripInternalAnswerKeys(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => stripInternalAnswerKeys(entry));
+  }
+
+  if (!isObject(value)) {
+    return value;
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (key.startsWith('__')) {
+      continue;
+    }
+    out[key] = stripInternalAnswerKeys(nested);
+  }
+  return out;
 }
 
 function readAnswer<T>(answers: Record<string, unknown>, key: string, fallback: T): T {
@@ -175,29 +200,39 @@ export async function computeDeterministicQuote(answersInput: Record<string, unk
     throw new Error('answers must be an object.');
   }
 
-  const answers = structuredClone(answersInput);
+  const answers = stripInternalAnswerKeys(structuredClone(answersInput)) as Record<string, unknown>;
   const { serviceType, normalizedInput } = buildInputFromAnswers(answers);
   const { config } = await loadActivePricingConfig();
   const result = calculateEstimate(serviceType, normalizedInput, config);
+
+  assertFiniteAmount(result.subtotal, 'subtotal');
+  assertFiniteAmount(result.estimateLow, 'estimateLow');
+  assertFiniteAmount(result.estimateHigh, 'estimateHigh');
+
+  const lineItems = [
+    {
+      label: 'Estimated subtotal',
+      amount: result.subtotal,
+    },
+    {
+      label: 'Low estimate',
+      amount: result.estimateLow,
+    },
+    {
+      label: 'High estimate',
+      amount: result.estimateHigh,
+    },
+  ];
+
+  lineItems.forEach((item, index) => {
+    assertFiniteAmount(item.amount, `line item ${index + 1} (${item.label})`);
+  });
 
   const quote: QuoteOutput = {
     quote_id: generateQuoteId(),
     total: result.subtotal,
     currency: 'CAD',
-    line_items: [
-      {
-        label: 'Estimated subtotal',
-        amount: result.subtotal,
-      },
-      {
-        label: 'Low estimate',
-        amount: result.estimateLow,
-      },
-      {
-        label: 'High estimate',
-        amount: result.estimateHigh,
-      },
-    ],
+    line_items: lineItems,
     assumptions: [
       ...result.notes,
       `Confidence: ${formatConfidence(result.confidence)}`,

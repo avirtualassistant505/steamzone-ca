@@ -238,6 +238,8 @@ export default function EstimateBotLabPage() {
   const [hint, setHint] = useState<InputUiHint | null>(null);
   const [lastQuestionText, setLastQuestionText] = useState('');
   const [copyStatus, setCopyStatus] = useState('');
+  const [finalizeStatus, setFinalizeStatus] = useState('');
+  const [isFinalizing, setIsFinalizing] = useState(false);
   const [hasUserTurn, setHasUserTurn] = useState(false);
   const [estimateEngaged, setEstimateEngaged] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
@@ -482,6 +484,7 @@ export default function EstimateBotLabPage() {
           session_id: effectiveSessionId,
           input_text: trimmed || WARM_OPENER,
           channel: requestedChannel,
+          turn_id: newMessageId(),
         }),
       });
 
@@ -585,6 +588,8 @@ export default function EstimateBotLabPage() {
     setHint(null);
     setLastQuestionText('');
     setCopyStatus('');
+    setFinalizeStatus('');
+    setIsFinalizing(false);
     setHasUserTurn(false);
     setEstimateEngaged(false);
     setIsVoiceCallActive(false);
@@ -622,6 +627,45 @@ export default function EstimateBotLabPage() {
       setCopyStatus('Quote summary copied.');
     } catch {
       setCopyStatus('Unable to copy to clipboard.');
+    }
+  }
+
+  async function finalizeQuoteEmail(): Promise<void> {
+    if (!quote || !sessionId || isFinalizing) {
+      return;
+    }
+
+    setFinalizeStatus('');
+    setIsFinalizing(true);
+    try {
+      const response = await fetch('/api/postagent/finalize', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          send_email: true,
+        }),
+      });
+      const parsed = await parseJsonResponse<{ message?: string; quote_number?: string; email?: { message?: string } }>(
+        response
+      );
+      if (!parsed.ok || !response.ok || !parsed.payload) {
+        throw new Error(parsed.textError ?? parsed.payload?.message ?? 'Unable to finalize quote.');
+      }
+
+      const emailMessage = parsed.payload.email?.message ?? '';
+      const quoteNumber = parsed.payload.quote_number ?? '';
+      setFinalizeStatus(
+        quoteNumber
+          ? `Finalized as ${quoteNumber}. ${emailMessage || 'Quote email has been sent.'}`
+          : emailMessage || 'Quote email has been sent.'
+      );
+    } catch (error) {
+      setFinalizeStatus(error instanceof Error ? error.message : 'Unable to finalize quote.');
+    } finally {
+      setIsFinalizing(false);
     }
   }
 
@@ -798,6 +842,18 @@ export default function EstimateBotLabPage() {
                     <li key={item}>{item}</li>
                   ))}
                 </ul>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    void finalizeQuoteEmail();
+                  }}
+                  disabled={isFinalizing || !done}
+                  className="mt-4 inline-flex w-full items-center justify-center rounded-lg bg-cyan-600 px-3 py-2 text-sm font-semibold text-white hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isFinalizing ? 'Sending...' : 'Finalize & Email Quote'}
+                </button>
+                {finalizeStatus && <p className="mt-2 text-xs text-cyan-700">{finalizeStatus}</p>}
               </div>
             )}
           </aside>
