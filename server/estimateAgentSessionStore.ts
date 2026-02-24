@@ -61,6 +61,14 @@ function normalizeTranscriptContent(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
+function normalizeTranscriptForDedupe(value: string): string {
+  return normalizeTranscriptContent(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function cloneSession(session: EstimateSessionRecord): EstimateSessionRecord {
   return {
     ...session,
@@ -250,24 +258,30 @@ function mergeTranscript(existing: TranscriptEntry[], incoming: TranscriptEntry[
   for (const entry of rows) {
     const normalized = entry.normalizedContent;
     if (!normalized) continue;
+    const canonical = normalizeTranscriptForDedupe(normalized);
 
     const duplicate = merged.findIndex((current) => {
       if (current.role !== entry.role) return false;
-      if (normalizeTranscriptContent(current.content) !== normalized) return false;
+      if (normalizeTranscriptForDedupe(current.content) !== canonical) return false;
       const currentAt = Date.parse(current.at) || 0;
       return Math.abs(currentAt - entry.normalizedAt) <= 5000;
     });
 
     if (duplicate >= 0) {
       const existingEntry = merged[duplicate];
-      if (existingEntry.channel === 'unknown' && entry.channel) {
-        existingEntry.channel = entry.channel;
-      }
-      if (!existingEntry.reasoning && entry.reasoning) {
-        existingEntry.reasoning = entry.reasoning;
-      }
-      if (!existingEntry.meta && entry.meta) {
-        existingEntry.meta = entry.meta;
+      const existingChannel = existingEntry.channel ?? 'unknown';
+      const incomingChannel = entry.channel ?? 'unknown';
+
+      if (incomingChannel !== 'unknown' && existingChannel === 'unknown') {
+        existingEntry.channel = incomingChannel;
+        existingEntry.content = entry.content;
+        existingEntry.at = entry.at;
+        existingEntry.reasoning = entry.reasoning ?? existingEntry.reasoning;
+        existingEntry.meta = entry.meta ?? existingEntry.meta;
+      } else {
+        // Preserve earliest known-anchored content while still merging metadata.
+        existingEntry.reasoning = existingEntry.reasoning || entry.reasoning;
+        existingEntry.meta = existingEntry.meta || entry.meta;
       }
       continue;
     }
@@ -777,21 +791,53 @@ export async function appendTranscript(
   const normalizedEntry: TranscriptEntry = {
     ...entry,
     content: normalizeTranscriptContent(entry.content),
+    channel: entry.channel,
+    reasoning: entry.reasoning,
   };
-
-  const previous = session.transcript[session.transcript.length - 1];
-  if (
-    previous &&
-    previous.role === normalizedEntry.role &&
-    normalizeTranscriptContent(previous.content) === normalizedEntry.content
-  ) {
-    return session;
-  }
+  const mergedTranscript = mergeTranscript(session.transcript, [normalizedEntry]);
 
   const next: EstimateSessionRecord = {
     ...session,
-    transcript: [...session.transcript, normalizedEntry],
+    transcript: mergedTranscript,
   };
 
   return saveSession(next);
+}
+
+export async function deleteSession(sessionId: string): Promise<boolean> {
+  const normalized = sessionId.trim();
+  if (!normalized) {
+    throw new Error('session_id is required.');
+  }
+
+  memoryStore.delete(normalized);
+
+  const supabase = await getSupabaseAdminClient();
+  if (!supabase) {
+    setStorageMode('memory_fallback');
+    return true;
+  }
+
+  try {
+    const { error } = await supabase.from(TABLE_NAME).delete().eq('session_id', normalized);
+    if (error) {
+      if (isMissingTableOrTransient(error.message) || isTransientError(error.message)) {
+        setStorageMode('memory_fallback');
+        return true;
+      }
+
+      throw new Error(error.message);
+    }
+
+    setStorageMode('database');
+    return true;
+  } catch (error) {
+    const message = extractErrorMessage(error);
+    if (isMissingTableOrTransient(message) || isTransientError(message)) {
+      setStorageMode('memory_fallback');
+      return true;
+    }
+
+    throw new Error(message);
+  }
 }
