@@ -30,8 +30,6 @@ export interface EstimateSessionRecord {
 const memoryStore = new Map<string, EstimateSessionRecord>();
 const TABLE_NAME = 'estimate_sessions';
 const MAX_SAVE_RETRIES = 3;
-const SESSION_COLUMNS_WITH_VERSION =
-  'session_id, answers, asked_keys, transcript, last_question_key, mode, processed_turn_ids, finalized_record_id, finalized_quote_hash, finalized_at, version, created_at, updated_at';
 const SESSION_COLUMNS_WITH_VERSION_REVIEW =
   'session_id, answers, asked_keys, transcript, last_question_key, mode, processed_turn_ids, finalized_record_id, finalized_quote_hash, finalized_at, review_notes, review_status, version, created_at, updated_at';
 const SESSION_COLUMNS_WITH_VERSION_NO_REVIEW =
@@ -520,56 +518,48 @@ export async function listSessions(limit = 100): Promise<EstimateSessionRecord[]
   }
 
   try {
-    const loaded = await supabase
-      .from(TABLE_NAME)
-      .select(SESSION_COLUMNS_WITH_VERSION)
-      .order('updated_at', { ascending: false })
-      .limit(normalizedLimit);
+    const attempts = queryFallbackOrder(true, true);
 
-    if (loaded.error) {
-      if (isMissingVersionColumnError(loaded.error.message)) {
-        const fallback = await supabase
-          .from(TABLE_NAME)
-          .select(SESSION_COLUMNS_LEGACY)
-          .order('updated_at', { ascending: false })
-          .limit(normalizedLimit);
+    for (const attempt of attempts) {
+      const loaded = await supabase
+        .from(TABLE_NAME)
+        .select(attempt.columns)
+        .order('updated_at', { ascending: false })
+        .limit(normalizedLimit);
 
-        if (fallback.error) {
-          setStorageMode('memory_fallback');
-          return Array.from(memoryStore.values())
-            .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
-            .slice(0, normalizedLimit)
-            .map((session) => cloneSession(session));
+      if (loaded.error) {
+        const normalizedMessage = asQueryErrorMessage(loaded.error);
+        const message = normalizedMessage ? normalizedMessage.trim().toLowerCase() : '';
+        if (isMissingReviewColumn(message) && attempt.supportsReview) {
+          continue;
         }
 
-        if (!Array.isArray(fallback.data)) {
-          setStorageMode('memory_fallback');
-          return [];
+        if (isMissingVersionColumn(message) && attempt.supportsVersion) {
+          continue;
         }
 
-        setStorageMode('database');
-        return fallback.data.map((row) => ({
-          ...toEstimateSessionRecord(row, String((row as { session_id?: string }).session_id ?? '')),
-          version: 0,
-        }));
+        setStorageMode('memory_fallback');
+        return Array.from(memoryStore.values())
+          .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
+          .slice(0, normalizedLimit)
+          .map((session) => cloneSession(session));
       }
 
-      setStorageMode('memory_fallback');
-      return Array.from(memoryStore.values())
-        .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
-        .slice(0, normalizedLimit)
-        .map((session) => cloneSession(session));
+      if (!Array.isArray(loaded.data)) {
+        setStorageMode('memory_fallback');
+        return [];
+      }
+
+      setStorageMode('database');
+      return loaded.data.map((row) =>
+        toEstimateSessionRecord(row, String((row as { session_id?: string }).session_id ?? ''))
+      );
     }
 
-    if (!Array.isArray(loaded.data)) {
-      setStorageMode('memory_fallback');
-      return [];
-    }
-
-    setStorageMode('database');
-    return loaded.data.map((row) =>
-      toEstimateSessionRecord(row, String((row as { session_id?: string }).session_id ?? ''))
-    );
+    // If all attempts are missing column combinations (e.g., partially created table),
+    // fall back to memory for resilience.
+    setStorageMode('memory_fallback');
+    return [];
   } catch {
     setStorageMode('memory_fallback');
     return Array.from(memoryStore.values())
@@ -582,7 +572,8 @@ export async function listSessions(limit = 100): Promise<EstimateSessionRecord[]
 function buildDbPayload(
   session: EstimateSessionRecord,
   includeVersion: boolean,
-  version: number
+  version: number,
+  includeReview: boolean
 ): Record<string, unknown> {
   const payload = {
     session_id: session.session_id,
@@ -595,11 +586,14 @@ function buildDbPayload(
     finalized_record_id: session.finalized_record_id,
     finalized_quote_hash: session.finalized_quote_hash,
     finalized_at: session.finalized_at,
-    review_notes: session.review_notes,
-    review_status: session.review_status,
     created_at: session.created_at,
     updated_at: session.updated_at,
   } as Record<string, unknown>;
+
+  if (includeReview) {
+    payload.review_notes = session.review_notes;
+    payload.review_status = session.review_status;
+  }
 
   if (includeVersion) {
     payload.version = version;
@@ -631,12 +625,31 @@ export async function saveSession(session: EstimateSessionRecord): Promise<Estim
 
     if (!loaded.row) {
       const nextVersion = loaded.supportsVersion ? Math.max(1, coerceVersion(current.version)) : current.version;
-      const payload = buildDbPayload(current, loaded.supportsVersion, loaded.supportsVersion ? nextVersion : coerceVersion(current.version));
+      const payload = buildDbPayload(
+        current,
+        loaded.supportsVersion,
+        loaded.supportsVersion ? nextVersion : coerceVersion(current.version),
+        loaded.querySupportsReview
+      );
+      const payloadWithoutReview =
+        loaded.querySupportsReview &&
+        buildDbPayload(
+          current,
+          loaded.supportsVersion,
+          loaded.supportsVersion ? nextVersion : coerceVersion(current.version),
+          false
+        );
 
       try {
-        const { error } = await supabase
-          .from(TABLE_NAME)
-          .upsert(payload, { onConflict: 'session_id' });
+        const performUpsert = async (data: Record<string, unknown>) =>
+          supabase.from(TABLE_NAME).upsert(data, { onConflict: 'session_id' });
+
+        let { error } = await performUpsert(payload);
+
+        if (error && isMissingReviewColumnError(error.message) && payloadWithoutReview) {
+          const fallback = await performUpsert(payloadWithoutReview);
+          error = fallback.error;
+        }
 
         if (!error) {
           setStorageMode('database');
@@ -682,10 +695,20 @@ export async function saveSession(session: EstimateSessionRecord): Promise<Estim
 
     if (!loaded.supportsVersion) {
       const merged = mergeSessionRows(latest, current);
-      const payload = buildDbPayload(merged, false, merged.version);
+      const payload = buildDbPayload(merged, false, merged.version, loaded.querySupportsReview);
+      const payloadWithoutReview = loaded.querySupportsReview && buildDbPayload(merged, false, merged.version, false);
 
       try {
-        const { error } = await supabase.from(TABLE_NAME).upsert(payload, { onConflict: 'session_id' });
+        const performUpsert = async (data: Record<string, unknown>) =>
+          supabase.from(TABLE_NAME).upsert(data, { onConflict: 'session_id' });
+
+        let result = await performUpsert(payload);
+        if (result.error && isMissingReviewColumnError(result.error.message) && payloadWithoutReview) {
+          result = await performUpsert(payloadWithoutReview);
+        }
+
+        const { error } = result;
+
         if (!error) {
           setStorageMode('database');
           return {
@@ -722,9 +745,11 @@ export async function saveSession(session: EstimateSessionRecord): Promise<Estim
     const merged = mergeSessionRows(latest, current);
     const expectedVersion = latest.version;
     const nextVersion = expectedVersion + 1;
+    const payloadWithoutReview =
+      loaded.querySupportsReview && buildDbPayload(merged, true, nextVersion, false);
 
     try {
-      const payload = buildDbPayload(merged, true, nextVersion);
+      const payload = buildDbPayload(merged, true, nextVersion, loaded.querySupportsReview);
 
       const { data, error } = await supabase
         .from(TABLE_NAME)
@@ -732,6 +757,36 @@ export async function saveSession(session: EstimateSessionRecord): Promise<Estim
         .eq('session_id', merged.session_id)
         .eq('version', expectedVersion)
         .select('session_id, version');
+
+      if (error && isMissingReviewColumnError(error.message) && payloadWithoutReview) {
+        const fallback = await supabase
+          .from(TABLE_NAME)
+          .update(payloadWithoutReview)
+          .eq('session_id', merged.session_id)
+          .eq('version', expectedVersion)
+          .select('session_id, version');
+
+        const fallbackData = fallback.data;
+        const fallbackError = fallback.error;
+        if (!fallbackError && Array.isArray(fallbackData) && fallbackData.length > 0) {
+          setStorageMode('database');
+          return {
+            ...merged,
+            version: nextVersion,
+            updated_at: merged.updated_at,
+          };
+        }
+
+        if (fallbackError) {
+          if (isMissingVersionColumnError(fallbackError.message) || isMissingTableError(fallbackError.message)) {
+            current = {
+              ...current,
+              version: 0,
+            };
+            continue;
+          }
+        }
+      }
 
       if (!error && Array.isArray(data) && data.length > 0) {
         setStorageMode('database');

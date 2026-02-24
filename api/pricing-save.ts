@@ -1,3 +1,5 @@
+import { getSupabaseAdminClient } from '../server/supabaseAdmin.js';
+
 type ApiRequest = { method?: string; body?: unknown; headers?: Record<string, string | string[] | undefined> };
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
 
@@ -15,15 +17,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
 
   try {
-    const url = process.env.SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !key) {
+    const supabase = await getSupabaseAdminClient();
+    if (!supabase) {
       res.status(500).json({ message: 'Supabase is not configured on the server yet.' });
       return;
     }
-
-    const supa = await import('@supabase/supabase-js');
-    const supabase = supa.createClient(url, key, { auth: { persistSession: false } });
 
     const versionFromConfig =
       typeof (config as Record<string, unknown>).version === 'number'

@@ -57,6 +57,7 @@ type SupportedChannel = 'web' | 'voice' | 'sms' | 'test';
 type SendMessageOptions = {
   silentUserBubble?: boolean;
   channel?: SupportedChannel;
+  sessionId?: string;
 };
 
 interface SpeechRecognitionLike {
@@ -130,6 +131,20 @@ function sanitizeMessageText(text: string): string {
     .replace(/_(.+?)_/g, '$1')
     .replace(/[ \t]{2,}/g, ' ')
     .trim();
+}
+
+function normalizeAssistantText(text: string): string {
+  const sanitized = sanitizeMessageText(text);
+  if (sanitized) {
+    return sanitized;
+  }
+
+  const fallback = text.trim();
+  if (fallback) {
+    return sanitizeMessageText(fallback);
+  }
+
+  return 'Sorry, I am ready for your next message.';
 }
 
 function hasEstimateIntent(input: string): boolean {
@@ -252,6 +267,7 @@ export default function EstimateBotLabPage() {
   const voiceSessionIdRef = useRef<string>(readSessionId(VOICE_SESSION_STORAGE_KEY));
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioAbortRef = useRef<AbortController | null>(null);
+  const finalizedSessionRef = useRef<Set<string>>(new Set());
   const isBusyRef = useRef(false);
   const isVoiceCallActiveRef = useRef(false);
   const isSpeechRecognitionSupported =
@@ -464,6 +480,11 @@ export default function EstimateBotLabPage() {
         : 'web';
     const isVoiceTurn = requestedChannel === 'voice' || requestedChannel === 'test';
     const preThinkingMs = getPreThinkingDelayMs(trimmed, isVoiceTurn);
+    const explicitSessionId = typeof options?.sessionId === 'string' ? options.sessionId.trim() : '';
+    const effectiveSessionId = explicitSessionId || (isVoiceTurn ? voiceSessionIdRef.current : sessionId);
+    if (!effectiveSessionId) {
+      throw new Error('Missing session id for message.');
+    }
 
     if (!options?.silentUserBubble && trimmed) {
       setMessages((prev) => [...prev, { id: newMessageId(), role: 'user', content: trimmed }]);
@@ -474,7 +495,6 @@ export default function EstimateBotLabPage() {
     }
 
     try {
-      const effectiveSessionId = isVoiceTurn ? voiceSessionIdRef.current : sessionId;
       const responsePromise = fetch('/api/postagent/estimate', {
         method: 'POST',
         headers: {
@@ -500,7 +520,7 @@ export default function EstimateBotLabPage() {
         throw new Error(parsed.textError ?? payload?.message ?? 'Unable to reach estimate agent.');
       }
 
-      const assistantText = sanitizeMessageText(payload.assistant_message);
+      const assistantText = normalizeAssistantText(payload.assistant_message);
       const elapsedMs = Date.now() - startedAt;
       const delayMs = Math.max(0, getResponseDelayMs(assistantText, isVoiceTurn) - elapsedMs);
       const cappedDelayMs = isVoiceTurn ? delayMs : Math.min(delayMs, 900);
@@ -536,6 +556,13 @@ export default function EstimateBotLabPage() {
           }, 350);
         }
       }
+
+      if (!isVoiceTurn && payload.done && payload.quote && payload.session_id) {
+        if (!finalizedSessionRef.current.has(payload.session_id)) {
+          finalizedSessionRef.current.add(payload.session_id);
+          void finalizeQuoteEmail(payload.quote, payload.session_id);
+        }
+      }
     } catch (error) {
       const fallback =
         error instanceof Error
@@ -557,6 +584,29 @@ export default function EstimateBotLabPage() {
     }
   }
 
+  async function clearSessionFromLogs(targetSessionId: string): Promise<void> {
+    if (!targetSessionId) {
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/transcripts-delete', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ session_id: targetSessionId }),
+      });
+
+      if (!response.ok) {
+        return;
+      }
+      await response.json();
+    } catch {
+      // Keep UI behavior resilient; storage mode fallback is surfaced elsewhere.
+    }
+  }
+
   useEffect(() => {
     if (messages.length === 0 && !isBusy) {
       void sendMessage(WARM_OPENER, { silentUserBubble: true, channel: 'web' });
@@ -573,10 +623,14 @@ export default function EstimateBotLabPage() {
   }
 
   function startOver(): void {
+    const previousSessionId = sessionId;
+    const previousVoiceSessionId = voiceSessionIdRef.current;
+
     const id = newSessionId();
+    const voiceId = newSessionId();
+
     saveSessionId(SESSION_STORAGE_KEY, id);
     setSessionId(id);
-    const voiceId = newSessionId();
     voiceSessionIdRef.current = voiceId;
     saveSessionId(VOICE_SESSION_STORAGE_KEY, voiceId);
     setMessages([]);
@@ -590,11 +644,22 @@ export default function EstimateBotLabPage() {
     setCopyStatus('');
     setFinalizeStatus('');
     setIsFinalizing(false);
+    setIsBusy(false);
+    setIsThinking(false);
+    finalizedSessionRef.current.delete(sessionId);
+    finalizedSessionRef.current.delete(id);
     setHasUserTurn(false);
     setEstimateEngaged(false);
     setIsVoiceCallActive(false);
     stopListening();
     stopSpeaking();
+
+    if (previousSessionId) {
+      void clearSessionFromLogs(previousSessionId);
+    }
+    if (previousVoiceSessionId) {
+      void clearSessionFromLogs(previousVoiceSessionId);
+    }
   }
 
   async function copyQuoteSummary(): Promise<void> {
@@ -630,8 +695,13 @@ export default function EstimateBotLabPage() {
     }
   }
 
-  async function finalizeQuoteEmail(): Promise<void> {
-    if (!quote || !sessionId || isFinalizing) {
+  async function finalizeQuoteEmail(
+    inputQuote?: QuotePayload,
+    inputSessionId?: string
+  ): Promise<void> {
+    const currentQuote = inputQuote ?? quote;
+    const currentSessionId = inputSessionId ?? sessionId;
+    if (!currentQuote || !currentSessionId || isFinalizing) {
       return;
     }
 
@@ -644,7 +714,7 @@ export default function EstimateBotLabPage() {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
-          session_id: sessionId,
+          session_id: currentSessionId,
           send_email: true,
         }),
       });
@@ -664,6 +734,9 @@ export default function EstimateBotLabPage() {
       );
     } catch (error) {
       setFinalizeStatus(error instanceof Error ? error.message : 'Unable to finalize quote.');
+      if (currentSessionId) {
+        finalizedSessionRef.current.delete(currentSessionId);
+      }
     } finally {
       setIsFinalizing(false);
     }

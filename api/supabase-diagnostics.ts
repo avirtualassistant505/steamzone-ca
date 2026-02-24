@@ -1,3 +1,5 @@
+import { getSupabaseAdminClient } from '../server/supabaseAdmin.js';
+
 type ApiRequest = {
   method?: string;
 };
@@ -29,6 +31,7 @@ type Diagnostics = {
     trainingDataTableExists?: boolean;
     agentModelSettingsTableExists?: boolean;
     estimateSessionsVersionColumnExists?: boolean;
+    estimateSessionsReviewColumnsExist?: boolean;
     agentModelSettingsVoiceModelColumnExists?: boolean;
     sampleError?: string;
   };
@@ -259,8 +262,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     config.urlHost = parsedUrl.hostname;
     config.projectRef = extractProjectRef(rawUrl);
 
-    const { createClient } = await import('@supabase/supabase-js');
-    const client = createClient(rawUrl, rawKey, { auth: { persistSession: false } });
+    const client = await getSupabaseAdminClient();
+    if (!client) {
+      res.status(200).json({
+        ok: false,
+        message: 'Unable to initialize Supabase client with current env configuration.',
+        config,
+        probe: { reachable: false },
+      } as Diagnostics);
+      return;
+    }
 
     const [estimateSessionsResult, trainingDataResult, agentModelSettingsResult] = await Promise.all([
       tableQuery(client, 'estimate_sessions', 'session_id'),
@@ -268,8 +279,13 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       tableQuery(client, 'agent_model_settings', 'id'),
     ]);
 
-    const [estimateSessionsVersionColumnExists, agentModelSettingsVoiceModelColumnExists] = await Promise.all([
+    const [
+      estimateSessionsVersionColumnExists,
+      estimateSessionsReviewColumnsExist,
+      agentModelSettingsVoiceModelColumnExists,
+    ] = await Promise.all([
       columnQuery(client, 'estimate_sessions', 'session_id,version'),
+      columnQuery(client, 'estimate_sessions', 'session_id,review_status,review_notes'),
       columnQuery(client, 'agent_model_settings', 'id,voice_model'),
     ]);
 
@@ -279,6 +295,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       trainingDataTableExists: trainingDataResult.exists,
       agentModelSettingsTableExists: agentModelSettingsResult.exists,
       estimateSessionsVersionColumnExists: estimateSessionsResult.exists && estimateSessionsVersionColumnExists,
+      estimateSessionsReviewColumnsExist: estimateSessionsResult.exists && estimateSessionsReviewColumnsExist,
       agentModelSettingsVoiceModelColumnExists: agentModelSettingsResult.exists && agentModelSettingsVoiceModelColumnExists,
       sampleError: undefined,
     };
@@ -296,6 +313,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     if (estimateSessionsResult.exists && !estimateSessionsVersionColumnExists) {
       checks.push('estimate_sessions table exists but missing version column.');
     }
+    if (estimateSessionsResult.exists && !estimateSessionsReviewColumnsExist) {
+      checks.push('estimate_sessions table exists but missing review_status/review_notes columns.');
+    }
     if (agentModelSettingsResult.exists && !agentModelSettingsVoiceModelColumnExists) {
       checks.push('agent_model_settings table exists but missing voice_model column.');
     }
@@ -312,7 +332,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
         errorCategory: classification.errorCategory,
         errorCode: classification.errorCode,
         remediationHint:
-          'Run server/sql/estimate_sessions.sql, server/sql/training_data.sql, and server/sql/agent_model_settings.sql. If the project is paused in Supabase, resume it and retry.',
+          'Run server/sql/estimate_sessions.sql, server/sql/training_data.sql, and server/sql/agent_model_settings.sql (or server/sql/fix_estimate_session_schema.sql). If the project is paused in Supabase, resume it and retry.',
         projectHealthUrl: classification.projectHealthUrl,
         config,
         probe,

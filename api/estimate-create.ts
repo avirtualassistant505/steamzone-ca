@@ -1,5 +1,6 @@
 import { Resend } from 'resend';
 import type { EstimateRecord, LeadContact, PricingConfig, ServiceType, WindowZone } from '../src/lib/estimateEngine.js';
+import { getSupabaseAdminClient } from '../server/supabaseAdmin.js';
 
 type ApiRequest = { method?: string; body?: unknown; headers?: Record<string, string | string[] | undefined> };
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
@@ -83,6 +84,10 @@ function env(name: string): string | null {
   const raw = process.env[name];
   const trimmed = typeof raw === 'string' ? raw.trim() : '';
   return trimmed ? trimmed : null;
+}
+
+async function getSupabaseClient() {
+  return getSupabaseAdminClient();
 }
 
 function finiteNumber(value: unknown): number {
@@ -545,16 +550,12 @@ async function loadPricingConfigForEstimate(): Promise<{ config: PricingConfig; 
   const engine = await getEngine();
   const defaults = engine.createDefaultPricingConfig() as PricingConfig;
 
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) {
+  const supabase = await getSupabaseClient();
+  if (!supabase) {
     return { config: defaults, source: 'env_missing' };
   }
 
   try {
-    const supa = await import('@supabase/supabase-js');
-    const supabase = supa.createClient(url, key, { auth: { persistSession: false } });
-
     const { data, error } = await supabase
       .from('pricing_config')
       .select('config, updated_at')
@@ -577,16 +578,12 @@ async function loadPricingConfigForEstimate(): Promise<{ config: PricingConfig; 
 }
 
 async function storeEstimateRecord(record: EstimateRecord): Promise<{ stored: boolean; recordId?: string; error?: string }> {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) {
+  const supabase = await getSupabaseClient();
+  if (!supabase) {
     return { stored: false, error: 'supabase_env_missing' };
   }
 
   try {
-    const supa = await import('@supabase/supabase-js');
-    const supabase = supa.createClient(url, key, { auth: { persistSession: false } });
-
     const { data, error } = await supabase
       .from('estimate_records')
       .insert({
@@ -616,16 +613,12 @@ async function storeEstimateRecord(record: EstimateRecord): Promise<{ stored: bo
 }
 
 async function fetchEstimateRecordByIdempotencyKey(idempotencyKey: string): Promise<EstimateRecord | null> {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) {
+  const supabase = await getSupabaseClient();
+  if (!supabase) {
     return null;
   }
 
   try {
-    const supa = await import('@supabase/supabase-js');
-    const supabase = supa.createClient(url, key, { auth: { persistSession: false } });
-
     const { data, error } = await supabase
       .from('estimate_records')
       .select(
@@ -680,16 +673,12 @@ async function storeEstimateRecordWithIdempotency(
     return { stored: stored.stored, recordId: stored.recordId, error: stored.error };
   }
 
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) {
+  const supabase = await getSupabaseClient();
+  if (!supabase) {
     return { stored: false, error: 'supabase_env_missing' };
   }
 
   try {
-    const supa = await import('@supabase/supabase-js');
-    const supabase = supa.createClient(url, key, { auth: { persistSession: false } });
-
     // First, check if this submission was already stored.
     const existing = await fetchEstimateRecordByIdempotencyKey(idempotencyKey);
     if (existing) {

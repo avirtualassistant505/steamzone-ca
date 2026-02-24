@@ -1,3 +1,4 @@
+import { getSupabaseAdminClient } from '../server/supabaseAdmin.js';
 type ApiRequest = { method?: string };
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
 
@@ -10,16 +11,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   try {
     const engine = await import('../server/estimateEngineRuntime.mjs');
     const defaults = engine.createDefaultPricingConfig();
-
-    const url = process.env.SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !key) {
+    const supabase = await getSupabaseAdminClient();
+    if (!supabase) {
       res.status(200).json({ config: defaults, source: 'env_missing' });
       return;
     }
-
-    const supa = await import('@supabase/supabase-js');
-    const supabase = supa.createClient(url, key, { auth: { persistSession: false } });
 
     const { data, error } = await supabase
       .from('pricing_config')

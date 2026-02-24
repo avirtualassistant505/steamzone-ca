@@ -10,6 +10,7 @@ import {
 
 import { searchSteamZoneKnowledgeAsync, type KnowledgeMatch } from './steamzoneKnowledge.js';
 import * as estimateAgentRuntime from '../../../server/estimateAgentRuntimeEntry.js';
+import { finalizeEstimateSession } from '../../../server/estimateFinalize.js';
 import {
   AGENT_DEFAULT_MODEL,
   AGENT_DEFAULT_VOICE_MODEL,
@@ -42,6 +43,15 @@ export interface PostagentEstimateResponse {
   };
   quote: unknown | null;
   done: boolean;
+  finalize?: {
+    done: boolean;
+    already_finalized: boolean;
+    quote_hash: string | null;
+    quote_number: string | null;
+    record_id: string | null;
+    email_message: string | null;
+    email_success: boolean | null;
+  };
   next_question?: {
     key: string;
     question_text?: string;
@@ -674,13 +684,28 @@ function hasEstimateIntent(inputText: string): boolean {
 }
 
 function normalizeAssistantMessage(text: string): string {
-  return text
-    .replace(/^hi,\s*how are you\?\s*what can i help you with today\?\s*/i, '')
+  const withoutWelcome = text.replace(/^hi,\s*how are you\?\s*what can i help you with today\?\s*/i, '').trim();
+  const base = withoutWelcome
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
     .replace(/(\d+)\s*to\s*(\d+)/gi, '$1 to $2')
     .replace(/(\d+)to(\d+)/g, '$1 to $2')
+    .replace(/\bunder(\d{3,5})/gi, 'under $1')
+    .replace(/\bover(\d{3,5})/gi, 'over $1')
+    .replace(/\*/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+
+  if (base) {
+    return base;
+  }
+
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
     .replace(/\bunder(\d{3,5})/gi, 'under $1')
     .replace(/\bover(\d{3,5})/gi, 'over $1')
     .replace(/\*/g, '')
@@ -1687,6 +1712,42 @@ export async function runEstimateAgentCore(
 
   const done = loopResult.done;
 
+  let finalizedAt = false;
+  let finalizeError: string | null = null;
+  let finalizeData: {
+    quote_hash: string;
+    quote: unknown;
+    record_id: string | null;
+    quote_number: string | null;
+    email: { message: string; success: boolean; deliveryMode?: 'customer' | 'internal' } | null;
+    already_finalized: boolean;
+  } | null = null;
+
+  if (mode === 'estimate' && done && process.env.NODE_ENV !== 'test') {
+    try {
+      const result = await finalizeEstimateSession(sessionId, { sendEmail: true });
+      if (result.ok) {
+        finalizeData = {
+          quote_hash: result.quote_hash,
+          quote: result.quote,
+          record_id: result.record_id,
+          quote_number: result.quote_number,
+          email: result.email,
+          already_finalized: result.already_finalized,
+        };
+        finalizedAt = true;
+      } else {
+        finalizeError = result.message ?? 'Unable to finalize estimate.';
+      }
+    } catch (error) {
+      finalizeError = error instanceof Error ? error.message : 'Unable to finalize estimate.';
+    }
+  }
+
+  if (done && finalizeData?.quote) {
+    loopResult.quote = finalizeData.quote;
+  }
+
   const finalStateSummary = {
     ...summarizeStateForResponse(
       {
@@ -1715,6 +1776,20 @@ export async function runEstimateAgentCore(
     assistant_reasoning: loopResult.assistant_reasoning,
     state: finalStateSummary,
     quote: loopResult.quote,
+    // Legacy support for UI consumers that inspect finalize status separately.
+    finalize: finalizedAt
+      ? {
+          done: true,
+          already_finalized: finalizeData?.already_finalized ?? false,
+          quote_hash: finalizeData?.quote_hash ?? null,
+          quote_number: finalizeData?.quote_number ?? null,
+          record_id: finalizeData?.record_id ?? null,
+          email_message: finalizeData?.email?.message ?? null,
+          email_success: finalizeData?.email?.success ?? null,
+        }
+      : finalizeError
+        ? { done: false, already_finalized: false, quote_hash: null, quote_number: null, record_id: null, email_message: finalizeError, email_success: false }
+        : undefined,
     done,
   };
 
