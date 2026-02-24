@@ -465,7 +465,10 @@ export async function appendConversationTurn(
 
   const session = await loadConversationSession(normalizedSessionId);
   const updatedAt = nowIso();
-  const persistSession = async (sessionToPersist: ConversationSessionRecord): Promise<ConversationSessionRecord> => {
+  const persistSessionTranscript = async (
+    sessionToPersist: ConversationSessionRecord,
+    transcript: ConversationTurn[]
+  ): Promise<ConversationSessionRecord> => {
     const supabase = await getSupabaseAdminClient();
     if (!supabase || getConversationStorageMode() === 'memory_fallback') {
       setStorageMode('memory_fallback');
@@ -473,38 +476,43 @@ export async function appendConversationTurn(
     }
 
     try {
-      const payload = {
-        session_id: sessionToPersist.session_id,
-        answers: sessionToPersist.answers,
-        asked_keys: sessionToPersist.asked_keys,
-        transcript: sessionToPersist.transcript,
-        last_question_key: sessionToPersist.last_question_key,
-        review_notes: sessionToPersist.review_notes,
-        review_status: sessionToPersist.review_status,
-        created_at: sessionToPersist.created_at,
-        updated_at: sessionToPersist.updated_at,
-      };
-      const minimalPayload = {
-        session_id: sessionToPersist.session_id,
-        answers: sessionToPersist.answers,
-        asked_keys: sessionToPersist.asked_keys,
-        transcript: sessionToPersist.transcript,
-        last_question_key: sessionToPersist.last_question_key,
-        created_at: sessionToPersist.created_at,
-        updated_at: sessionToPersist.updated_at,
-      };
+      const { data, error } = await supabase
+        .from(TABLE_NAME)
+        .update({
+          transcript,
+          updated_at: sessionToPersist.updated_at,
+        })
+        .eq('session_id', normalizedSessionId)
+        .select('session_id');
 
-      const { error } = await supabase.from(TABLE_NAME).upsert(payload, { onConflict: 'session_id' });
-      if (error && isReviewColumnMissingError(error.message)) {
-        const retry = await supabase.from(TABLE_NAME).upsert(minimalPayload, { onConflict: 'session_id' });
-        if (retry.error) {
-          throw retry.error;
-        }
-      } else if (error) {
-        throw error;
+      if (!error && Array.isArray(data) && data.length > 0) {
+        writeMemorySession({
+          ...sessionToPersist,
+          transcript,
+        });
+        setStorageMode('database');
+        return writeMemorySession(sessionToPersist);
       }
 
-      writeMemorySession(sessionToPersist);
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      const upsertPayload = {
+        session_id: sessionToPersist.session_id,
+        transcript,
+        updated_at: sessionToPersist.updated_at,
+      };
+
+      const { error: upsertError } = await supabase.from(TABLE_NAME).upsert(upsertPayload, { onConflict: 'session_id' });
+      if (upsertError) {
+        throw new Error(upsertError.message);
+      }
+
+      writeMemorySession({
+        ...sessionToPersist,
+        transcript,
+      });
       setStorageMode('database');
       return sessionToPersist;
     } catch (error) {
@@ -539,7 +547,7 @@ export async function appendConversationTurn(
         updated_at: updatedAt,
         created_at: session.created_at || updatedAt,
       };
-      return persistSession(mergedSession);
+      return persistSessionTranscript(mergedSession, mergedSession.transcript);
     }
 
     return session;
@@ -552,7 +560,7 @@ export async function appendConversationTurn(
     created_at: session.created_at || updatedAt,
   };
 
-  return persistSession(next);
+  return persistSessionTranscript(next, next.transcript);
 }
 
 export async function setConversationReviewState(
@@ -585,35 +593,40 @@ export async function setConversationReviewState(
   }
 
   try {
-    const payload = {
+    const { data, error } = await supabase
+      .from(TABLE_NAME)
+      .update({
+        review_notes: next.review_notes,
+        review_status: next.review_status,
+        updated_at: next.updated_at,
+      })
+      .eq('session_id', normalizedSessionId)
+      .select('session_id');
+
+    if (error) {
+      if (isReviewColumnMissingError(error.message)) {
+        writeMemorySession(next);
+        setStorageMode('database');
+        return next;
+      }
+      throw new Error(error.message);
+    }
+
+    if (data && data.length > 0) {
+      writeMemorySession(next);
+      setStorageMode('database');
+      return next;
+    }
+
+    const upsertPayload = {
       session_id: next.session_id,
-      answers: next.answers,
-      asked_keys: next.asked_keys,
-      transcript: next.transcript,
-      last_question_key: next.last_question_key,
       review_notes: next.review_notes,
       review_status: next.review_status,
-      created_at: next.created_at,
       updated_at: next.updated_at,
     };
-    const minimalPayload = {
-      session_id: next.session_id,
-      answers: next.answers,
-      asked_keys: next.asked_keys,
-      transcript: next.transcript,
-      last_question_key: next.last_question_key,
-      created_at: next.created_at,
-      updated_at: next.updated_at,
-    };
-
-    const { error } = await supabase.from(TABLE_NAME).upsert(payload, { onConflict: 'session_id' });
-    if (error && isReviewColumnMissingError(error.message)) {
-      const retry = await supabase.from(TABLE_NAME).upsert(minimalPayload, { onConflict: 'session_id' });
-      if (retry.error) {
-        throw retry.error;
-      }
-    } else if (error) {
-      throw error;
+    const { error: upsertError } = await supabase.from(TABLE_NAME).upsert(upsertPayload, { onConflict: 'session_id' });
+    if (upsertError) {
+      throw new Error(upsertError.message);
     }
 
     writeMemorySession(next);

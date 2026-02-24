@@ -1,4 +1,4 @@
-import estimateFormSchemaJson from './estimateFormSchema.json' with { type: 'json' };
+import { estimateFormSchema as estimateFormSchemaJson } from './estimateFormSchemaData.js';
 
 export type ServiceType = 'window' | 'commercialWindow' | 'carpet' | 'postConstruction';
 
@@ -56,9 +56,25 @@ export interface EstimateFormSchema {
   fields: SchemaField[];
 }
 
-const estimateFormSchema = estimateFormSchemaJson as EstimateFormSchema;
+const estimateFormSchema = estimateFormSchemaJson as unknown as EstimateFormSchema;
+
+const fieldOrder = new Map(estimateFormSchema.fields.map((field, index) => [field.key, index] as const));
 
 const fieldMap = new Map(estimateFormSchema.fields.map((field) => [field.key, field]));
+
+const fieldComparator = (left: SchemaField, right: SchemaField): number => {
+  if (left.step !== right.step) {
+    return left.step - right.step;
+  }
+
+  const leftOrder = fieldOrder.get(left.key) ?? Number.MAX_SAFE_INTEGER;
+  const rightOrder = fieldOrder.get(right.key) ?? Number.MAX_SAFE_INTEGER;
+  if (leftOrder !== rightOrder) {
+    return leftOrder - rightOrder;
+  }
+
+  return left.key.localeCompare(right.key);
+};
 
 function getPathValue(obj: Record<string, unknown>, path: string): unknown {
   const pieces = path.split('.');
@@ -186,11 +202,15 @@ export function isFieldRequired(field: SchemaField, answers: Record<string, unkn
 }
 
 export function getVisibleFieldsInOrder(answers: Record<string, unknown>): SchemaField[] {
-  return estimateFormSchema.fields.filter((field) => isFieldVisible(field, answers));
+  return estimateFormSchema.fields
+    .filter((field) => isFieldVisible(field, answers))
+    .sort(fieldComparator);
 }
 
 export function getRequiredVisibleFieldsInOrder(answers: Record<string, unknown>): SchemaField[] {
-  return estimateFormSchema.fields.filter((field) => isFieldRequired(field, answers));
+  return estimateFormSchema.fields
+    .filter((field) => isFieldRequired(field, answers))
+    .sort(fieldComparator);
 }
 
 export function getAnswerValue(answers: Record<string, unknown>, key: string): unknown {

@@ -1,4 +1,4 @@
-{
+export const estimateFormSchema = {
   "version": "v1",
   "title": "Steam Zone Estimate Form Schema",
   "services": [
@@ -2202,4 +2202,4 @@
       ]
     }
   ]
-}
+} as const;

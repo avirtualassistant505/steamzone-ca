@@ -1,5 +1,6 @@
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { getSupabaseAdminClient } from './supabaseAdmin.js';
-import trainingData from '../GHL/steamzone.ca/data/training/steamzone_master_training_merged_2026-02-09T16-22-36-339Z.json' with { type: 'json' };
 
 type StoredTrainingItem = {
   question?: unknown;
@@ -28,13 +29,18 @@ type LoadResult = {
 const CACHE_TTL_MS = 30_000;
 const TABLE_NAME = 'training_data';
 const ROW_ID = 'active';
+const DEFAULT_FALLBACK_FILE_CANDIDATES = [
+  path.join(process.cwd(), 'GHL', 'steamzone.ca', 'data', 'training', 'steamzone_master_training_merged_2026-02-09T16-22-16-454Z.json'),
+  path.join(process.cwd(), 'GHL', 'steamzone.ca', 'data', 'training', 'steamzone_master_training_merged_2026-02-09T16-22-36-339Z.json'),
+  path.join(process.cwd(), 'data', 'training', 'steamzone_master_training_merged_2026-02-09T16-22-36-339Z.json'),
+] as const;
 
 const memory: {
   items: TrainingItem[];
   loadedAt: number;
   source: TrainingSource;
 } = {
-  items: normalizeIncomingTrainingItems(trainingData),
+  items: [],
   loadedAt: 0,
   source: 'fallback',
 };
@@ -49,6 +55,23 @@ function isMissingTableError(message: string): boolean {
 
 function toStringValue(value: unknown): string {
   return String(value ?? '').trim();
+}
+
+async function loadFallbackFromDisk(): Promise<TrainingItem[]> {
+  for (const candidate of DEFAULT_FALLBACK_FILE_CANDIDATES) {
+    try {
+      const raw = await fs.readFile(candidate, 'utf8');
+      const parsed = JSON.parse(raw) as unknown;
+      const parsedItems = normalizeIncomingTrainingItems(parsed);
+      if (parsedItems.length > 0) {
+        return parsedItems;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return [];
 }
 
 export function normalizeIncomingTrainingItems(raw: unknown): TrainingItem[] {
@@ -78,7 +101,7 @@ export function normalizeIncomingTrainingItems(raw: unknown): TrainingItem[] {
 }
 
 function fallbackItems(): TrainingItem[] {
-  return normalizeIncomingTrainingItems(trainingData);
+  return [];
 }
 
 function cacheIsFresh(): boolean {
@@ -140,7 +163,10 @@ export async function loadActiveTrainingItems(): Promise<LoadResult> {
 
   if (!loaded) {
     if (!memory.loadedAt) {
-      memory.items = fallbackItems();
+      memory.items = await loadFallbackFromDisk();
+      if (memory.items.length === 0) {
+        memory.items = fallbackItems();
+      }
       memory.source = 'fallback';
     }
 
@@ -215,6 +241,6 @@ export async function saveActiveTrainingItems(items: unknown): Promise<LoadResul
 
 export async function clearTrainingDataCache(): Promise<void> {
   memory.loadedAt = 0;
-  memory.items = normalizeIncomingTrainingItems(trainingData);
+  memory.items = [];
   memory.source = 'fallback';
 }

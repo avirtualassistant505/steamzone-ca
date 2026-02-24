@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import estimateCreateHandler from '../estimate-create.js';
 import { getSession, saveSession } from '../../server/estimateAgentSessionStore.js';
-import { computeDeterministicQuote } from '../../src/quote/quoteEngine.js';
+import { computeDeterministicQuote, type QuoteOutput } from '../../src/quote/quoteEngine.js';
 import { validateRequiredAnswers } from '../../src/quote/normalization.js';
+import { getEstimateSchema } from '../../src/quote/schema.js';
 
 type ApiRequest = { method?: string; body?: unknown };
 type ApiResponse = { status: (code: number) => ApiResponse; json: (body: unknown) => void };
@@ -94,6 +95,8 @@ function hashQuoteInputs(sessionId: string, answers: Record<string, unknown>): s
   const payload = stableStringify({
     session_id: sessionId,
     answers,
+    quote_version: 'v1',
+    schema_version: getEstimateSchema().version,
   });
   return createHash('sha256').update(payload).digest('hex');
 }
@@ -131,9 +134,23 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   }
 
   const sendEmail = asBool(parsedBody.send_email, true);
+  const requestQuoteHash = asText((parsedBody as { quote_hash?: unknown }).quote_hash);
 
   try {
     const session = await getSession(sessionId);
+    const currentHash = requestQuoteHash || hashQuoteInputs(sessionId, stripInternalAnswerKeys(session.answers) as Record<string, unknown>);
+    if (session.finalized_quote_hash && session.finalized_quote_hash === currentHash) {
+      res.status(200).json({
+        ok: true,
+        session_id: sessionId,
+        quote_hash: session.finalized_quote_hash,
+        record_id: session.finalized_record_id,
+        message: 'Estimate already finalized for this session state.',
+        already_finalized: true,
+      });
+      return;
+    }
+
     const cleanedAnswers = stripInternalAnswerKeys(session.answers) as Record<string, unknown>;
     const errors = validateRequiredAnswers(cleanedAnswers);
     if (errors.length > 0) {
@@ -146,6 +163,35 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
 
     const quote = await computeDeterministicQuote(cleanedAnswers);
     const quoteHash = hashQuoteInputs(sessionId, cleanedAnswers);
+    if (session.finalized_quote_hash && session.finalized_quote_hash === quoteHash) {
+      res.status(200).json({
+        ok: true,
+        session_id: sessionId,
+        quote,
+        quote_hash: session.finalized_quote_hash,
+        record_id: session.finalized_record_id,
+        message: 'Estimate already finalized for this answer set.',
+        already_finalized: true,
+      });
+      return;
+    }
+
+    if (session.finalized_quote_hash && !session.finalized_record_id && session.finalized_at) {
+      // Legacy partial finalize marker; continue with idempotent path by recomputing and reusing prior result.
+      const priorRecordId = String(session.finalized_record_id ?? '').trim();
+      if (priorRecordId) {
+        res.status(200).json({
+          ok: true,
+          session_id: sessionId,
+          quote,
+          quote_hash: session.finalized_quote_hash,
+          record_id: priorRecordId,
+          message: 'Estimate already finalized for this answer set.',
+          already_finalized: true,
+        });
+        return;
+      }
+    }
     const idempotencyKey = `postagent:${sessionId}:${quoteHash}`;
     const serviceType = asText(cleanedAnswers.serviceType);
     if (!serviceType) {
@@ -184,16 +230,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     const recordId = asText(record?.id);
     const quoteNumber = asText(record?.quoteNumber);
 
-    const answersWithMeta = {
-      ...(session.answers ?? {}),
-      __finalized_record_id: recordId || null,
-      __finalized_quote_hash: quoteHash,
-      __finalized_at: new Date().toISOString(),
-    };
-
+    const finalizedAt = new Date().toISOString();
     await saveSession({
       ...session,
-      answers: answersWithMeta,
+      finalized_record_id: recordId || null,
+      finalized_quote_hash: quoteHash,
+      finalized_at: finalizedAt,
     });
 
     res.status(200).json({
@@ -203,6 +245,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       quote_hash: quoteHash,
       record_id: recordId || null,
       quote_number: quoteNumber || null,
+      quote: quote as QuoteOutput,
       email: email ?? null,
       idempotency_key: idempotencyKey,
     });

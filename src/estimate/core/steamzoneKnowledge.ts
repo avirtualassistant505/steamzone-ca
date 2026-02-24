@@ -1,4 +1,3 @@
-import trainingData from '../../../GHL/steamzone.ca/data/training/steamzone_master_training_merged_2026-02-09T16-22-36-339Z.json' with { type: 'json' };
 import { loadActiveTrainingItems } from '../../../server/trainingDataStore.js';
 import type { TrainingItem } from '../../../server/trainingDataStore.js';
 
@@ -113,13 +112,6 @@ function tokenize(text: string): string[] {
     .filter((token) => token.length > 1 && !STOP_WORDS.has(token));
 }
 
-function safeItems(): RawTrainingItem[] {
-  if (!Array.isArray(trainingData)) {
-    return [];
-  }
-  return trainingData as RawTrainingItem[];
-}
-
 function trainingItemsToRaw(items: TrainingItem[]): RawTrainingItem[] {
   return items.map((item) => ({
     question: item.question,
@@ -130,7 +122,7 @@ function trainingItemsToRaw(items: TrainingItem[]): RawTrainingItem[] {
   }));
 }
 
-const STATIC_ENTRIES = buildKnowledgeEntries([...PINNED_ENTRIES, ...safeItems()]);
+const STATIC_ENTRIES = buildKnowledgeEntries(PINNED_ENTRIES);
 
 let cache: KnowledgeEntry[] = STATIC_ENTRIES;
 let cacheLoadedAt = 0;

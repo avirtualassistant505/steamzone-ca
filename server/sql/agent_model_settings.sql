@@ -2,6 +2,7 @@
 create table if not exists public.agent_model_settings (
   id text primary key,
   model text not null,
+  voice_model text,
   prompt_text text,
   updated_at timestamptz not null default now()
 );

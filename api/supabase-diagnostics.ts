@@ -26,6 +26,10 @@ type Diagnostics = {
   probe: {
     reachable: boolean;
     estimateSessionsTableExists?: boolean;
+    trainingDataTableExists?: boolean;
+    agentModelSettingsTableExists?: boolean;
+    estimateSessionsVersionColumnExists?: boolean;
+    agentModelSettingsVoiceModelColumnExists?: boolean;
     sampleError?: string;
   };
 };
@@ -64,11 +68,71 @@ function isMissingTableError(message: string): boolean {
   );
 }
 
+function asQueryResult<T>(response: {
+  data: T | null;
+  error?: { message?: unknown } | null;
+}): { data: T | null; error: { message: string } | null } {
+  if (!response || response.error == null) {
+    return { data: response?.data ?? null, error: null };
+  }
+
+  if (typeof response.error.message === 'string' && response.error.message.trim()) {
+    return { data: response.data, error: { message: response.error.message } };
+  }
+
+  const fallback = JSON.stringify(response.error);
+  return {
+    data: response.data,
+    error: {
+      message:
+        typeof fallback === 'string' && fallback.length > 0
+          ? fallback
+          : 'Supabase request failed.',
+    },
+  };
+}
+
 function buildErrorMessage(message: string): string {
   if (!message) {
     return 'Unknown Supabase error.';
   }
   return message.length > 240 ? `${message.substring(0, 240)}...` : message;
+}
+
+async function tableQuery(
+  client: {
+    from: (table: string) => {
+      select: (columns: string) => {
+        limit: (count: number) => Promise<{ data: unknown[] | null; error?: { message?: unknown } | null }>;
+      };
+    };
+  },
+  table: string,
+  columns = 'session_id'
+): Promise<{ exists: boolean; error?: string }> {
+  const response = await client.from(table).select(columns).limit(1);
+  const cast = asQueryResult(response);
+  if (cast.error) {
+    return { exists: false, error: cast.error.message };
+  }
+
+  return { exists: true };
+}
+
+async function columnQuery(
+  client: {
+    from: (table: string) => {
+      select: (columns: string) => {
+        limit: (count: number) => Promise<{ data: unknown[] | null; error?: { message?: unknown } | null }>;
+      };
+    };
+  },
+  table: string,
+  columns: string
+): Promise<boolean> {
+  const response = await client.from(table).select(columns).limit(1);
+  const cast = asQueryResult(response);
+  return !cast.error;
 }
 
 function safeStripHtml(raw: string): string {
@@ -198,63 +262,69 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     const { createClient } = await import('@supabase/supabase-js');
     const client = createClient(rawUrl, rawKey, { auth: { persistSession: false } });
 
-    const { data, error } = await client
-      .from('estimate_sessions')
-      .select('session_id')
-      .limit(1);
+    const [estimateSessionsResult, trainingDataResult, agentModelSettingsResult] = await Promise.all([
+      tableQuery(client, 'estimate_sessions', 'session_id'),
+      tableQuery(client, 'training_data', 'id'),
+      tableQuery(client, 'agent_model_settings', 'id'),
+    ]);
 
-    if (error) {
-      const classification = classifyError(error.message);
-      const sampleError = normalizeSampleError(error.message);
+    const [estimateSessionsVersionColumnExists, agentModelSettingsVoiceModelColumnExists] = await Promise.all([
+      columnQuery(client, 'estimate_sessions', 'session_id,version'),
+      columnQuery(client, 'agent_model_settings', 'id,voice_model'),
+    ]);
 
-      if (isMissingTableError(error.message)) {
-        res.status(200).json({
-          ok: false,
-          message:
-            'Supabase is reachable, but table `estimate_sessions` is missing. Create the table or use migration SQL.',
-          errorCategory: classification.errorCategory,
-          errorCode: classification.errorCode,
-          remediationHint: classification.remediationHint,
-          projectHealthUrl: classification.projectHealthUrl,
-          config,
-          probe: {
-            reachable: true,
-            estimateSessionsTableExists: false,
-            sampleError,
-          },
-        } as Diagnostics);
-        return;
-      }
+    const probe: Diagnostics['probe'] = {
+      reachable: true,
+      estimateSessionsTableExists: estimateSessionsResult.exists,
+      trainingDataTableExists: trainingDataResult.exists,
+      agentModelSettingsTableExists: agentModelSettingsResult.exists,
+      estimateSessionsVersionColumnExists: estimateSessionsResult.exists && estimateSessionsVersionColumnExists,
+      agentModelSettingsVoiceModelColumnExists: agentModelSettingsResult.exists && agentModelSettingsVoiceModelColumnExists,
+      sampleError: undefined,
+    };
+
+    const checks: string[] = [];
+    if (!estimateSessionsResult.exists && estimateSessionsResult.error) {
+      checks.push(estimateSessionsResult.error);
+    }
+    if (!trainingDataResult.exists && trainingDataResult.error) {
+      checks.push(trainingDataResult.error);
+    }
+    if (!agentModelSettingsResult.exists && agentModelSettingsResult.error) {
+      checks.push(agentModelSettingsResult.error);
+    }
+    if (estimateSessionsResult.exists && !estimateSessionsVersionColumnExists) {
+      checks.push('estimate_sessions table exists but missing version column.');
+    }
+    if (agentModelSettingsResult.exists && !agentModelSettingsVoiceModelColumnExists) {
+      checks.push('agent_model_settings table exists but missing voice_model column.');
+    }
+
+    if (checks.length > 0) {
+      const sampleError = normalizeSampleError(checks[0]);
+      const classification = classifyError(sampleError);
+      probe.sampleError = sampleError;
 
       res.status(200).json({
         ok: false,
-        message: buildErrorMessage(error.message).includes('query failed')
-          ? 'Supabase connection established but query failed.'
-          : buildErrorMessage(error.message),
+        message:
+          'Supabase is reachable, but required tables or columns are missing. Run the SQL migrations in server/sql.',
         errorCategory: classification.errorCategory,
         errorCode: classification.errorCode,
-        remediationHint: classification.remediationHint,
+        remediationHint:
+          'Run server/sql/estimate_sessions.sql, server/sql/training_data.sql, and server/sql/agent_model_settings.sql. If the project is paused in Supabase, resume it and retry.',
         projectHealthUrl: classification.projectHealthUrl,
         config,
-        probe: {
-          reachable: true,
-          estimateSessionsTableExists: false,
-          sampleError,
-        },
+        probe,
       } as Diagnostics);
-        return;
+      return;
     }
 
     res.status(200).json({
       ok: true,
-      message:
-        'Supabase env vars are present and the estimate_sessions table is reachable.',
+      message: 'Supabase env vars are present and required tables/columns are reachable.',
       config,
-      probe: {
-        reachable: true,
-        estimateSessionsTableExists: true,
-        sampleError: data ? undefined : undefined,
-      },
+      probe,
     } as Diagnostics);
     return;
   } catch (error) {

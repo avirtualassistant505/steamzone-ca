@@ -1372,7 +1372,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     }
 
     const engine = await getEngine();
-    const strictMode = asBool((asRecord(body)?.strict ?? true) as unknown, true);
+    const strictMode = sendEmailRequested ? true : asBool((asRecord(body)?.strict ?? true) as unknown, true);
     const detectedZone = engine.detectZoneFromPostalCode(postalCode);
     const zone = pickEnum(answersRec.zone, ['zoneA', 'zoneB', 'zoneC', 'zoneD'] as const, detectedZone);
 

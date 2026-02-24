@@ -25,8 +25,6 @@ interface PostagentResponse {
 type RealtimeEventPayload = Record<string, unknown>;
 
 const VOICE_SESSION_STORAGE_KEY = 'steamzone_estimate_voice_lab_session_id';
-const DEDUPE_WINDOW_MS = 20_000;
-const DEDUPE_RETENTION_MS = 120_000;
 
 function randomId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -89,15 +87,6 @@ function parseApiErrorMessage(raw: string): string {
     // Keep raw text when server did not return JSON.
   }
   return text;
-}
-
-function normalizeForDedup(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9 ]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
 }
 
 function uniqueNonEmpty(values: string[]): string[] {
@@ -261,7 +250,6 @@ export default function EstimateVoiceLabPage() {
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const pendingToolCallsRef = useRef<Set<string>>(new Set());
   const sessionIdRef = useRef(sessionId);
-  const recentTurnsRef = useRef<Array<{ role: 'user' | 'assistant' | 'tool'; canonical: string; at: number }>>([]);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -309,51 +297,6 @@ export default function EstimateVoiceLabPage() {
     }
 
     return payload;
-  }
-
-  async function persistConversationTurn(
-    role: 'user' | 'assistant' | 'tool',
-    content: string,
-    metadata?: Record<string, unknown>
-  ): Promise<void> {
-    const line = content.trim();
-    if (!line) return;
-    const canonical = normalizeForDedup(line);
-    if (!canonical) return;
-
-    const nowMs = Date.now();
-    recentTurnsRef.current = recentTurnsRef.current.filter((entry) => nowMs - entry.at <= DEDUPE_RETENTION_MS);
-    if (recentTurnsRef.current.some((entry) => entry.role === role && entry.canonical === canonical && nowMs - entry.at <= DEDUPE_WINDOW_MS)) {
-      return;
-    }
-    recentTurnsRef.current.push({ role, canonical, at: nowMs });
-
-    try {
-      const response = await fetch('/api/postagent/log', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          session_id: sessionIdRef.current,
-          role,
-          content: line,
-          channel: 'voice',
-          metadata,
-        }),
-      });
-
-      if (!response.ok) {
-        appendTranscript('system', 'Voice log persistence warning: unable to save this turn.');
-      } else {
-        const parsed = await parseJsonResponse<{ ok?: boolean; storage_mode?: string; message?: string }>(response);
-        if (parsed.payload?.ok === false) {
-          appendTranscript('system', parsed.payload.message || 'Voice log persistence warning: write was not confirmed.');
-        }
-      }
-    } catch {
-      appendTranscript('system', 'Voice log persistence warning: request failed.');
-    }
   }
 
   async function handleToolCall(callId: string, name: string, argumentsText: string): Promise<void> {
@@ -416,9 +359,6 @@ export default function EstimateVoiceLabPage() {
       }
       const assistantText = asString(turn.assistant_message).trim();
       if (assistantText) {
-        void persistConversationTurn('assistant', assistantText, {
-          source: 'postagent_turn',
-        });
         appendTranscript('assistant', assistantText);
         setTurnCount((prev) => prev + 1);
       }
@@ -515,7 +455,6 @@ export default function EstimateVoiceLabPage() {
     setConnectionStage('Requesting microphone access');
     setTranscript([]);
     setTurnCount(0);
-    recentTurnsRef.current = [];
 
     const newId = newSessionId();
     sessionIdRef.current = newId;
@@ -632,9 +571,7 @@ export default function EstimateVoiceLabPage() {
         if (type === 'conversation.item.input_audio_transcription.completed') {
           const transcriptText = asString(payload.transcript).trim();
           if (transcriptText) {
-            void persistConversationTurn('user', transcriptText, {
-              source: 'realtime_transcription',
-            });
+            appendTranscript('system', transcriptText);
           }
           return;
         }
@@ -656,9 +593,7 @@ export default function EstimateVoiceLabPage() {
         ) {
           const assistantText = extractAssistantText(payload);
           if (assistantText) {
-            void persistConversationTurn('assistant', assistantText, {
-              source: type,
-            });
+            appendTranscript('system', assistantText);
           }
         }
 
@@ -731,7 +666,6 @@ export default function EstimateVoiceLabPage() {
     setSessionId(newId);
     setTranscript([]);
     setTurnCount(0);
-    recentTurnsRef.current = [];
     setErrorMessage('');
     setConnectionStage('Idle');
     setStatus('idle');

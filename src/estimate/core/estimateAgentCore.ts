@@ -71,6 +71,8 @@ interface SessionRecord {
   asked_keys: string[];
   transcript?: unknown[];
   last_question_key: string | null;
+  mode?: 'support' | 'estimate' | 'handoff';
+  processed_turn_ids?: string[];
   created_at?: string;
   updated_at?: string;
 }
@@ -106,6 +108,8 @@ type EstimateAgentRuntimeModule = {
     asked_keys: string[];
     transcript?: unknown[];
     last_question_key: string | null;
+    mode?: 'support' | 'estimate' | 'handoff';
+    processed_turn_ids?: string[];
     created_at?: string;
     updated_at?: string;
   }>;
@@ -143,6 +147,11 @@ type EstimateAgentRuntimeModule = {
     answers: Record<string, unknown>;
     asked_keys: string[];
     last_question_key: string | null;
+    mode?: 'support' | 'estimate' | 'handoff';
+    processed_turn_ids?: string[];
+    finalized_record_id?: string | null;
+    finalized_quote_hash?: string | null;
+    finalized_at?: string | null;
     created_at?: string;
     updated_at?: string;
   }>;
@@ -152,6 +161,11 @@ type EstimateAgentRuntimeModule = {
     asked_keys: string[];
     transcript?: unknown[];
     last_question_key: string | null;
+    mode?: 'support' | 'estimate' | 'handoff';
+    processed_turn_ids?: string[];
+    finalized_record_id?: string | null;
+    finalized_quote_hash?: string | null;
+    finalized_at?: string | null;
     created_at?: string;
     updated_at?: string;
   }) => Promise<{
@@ -160,6 +174,11 @@ type EstimateAgentRuntimeModule = {
     asked_keys: string[];
     transcript?: unknown[];
     last_question_key: string | null;
+    mode?: 'support' | 'estimate' | 'handoff';
+    processed_turn_ids?: string[];
+    finalized_record_id?: string | null;
+    finalized_quote_hash?: string | null;
+    finalized_at?: string | null;
     created_at?: string;
     updated_at?: string;
   }>;
@@ -168,6 +187,12 @@ type EstimateAgentRuntimeModule = {
     answers: Record<string, unknown>;
     asked_keys: string[];
     last_question_key: string | null;
+    transcript?: unknown[];
+    mode?: 'support' | 'estimate' | 'handoff';
+    processed_turn_ids?: string[];
+    finalized_record_id?: string | null;
+    finalized_quote_hash?: string | null;
+    finalized_at?: string | null;
     created_at?: string;
     updated_at?: string;
   }>;
@@ -520,9 +545,6 @@ async function resolveModelProviderConfig(channel?: PostagentChannel): Promise<A
 
 const ESTIMATE_INTENT_CUES = /\b(estimate|quote|pricing|price|cost|book|booking|schedule|appointment)\b/i;
 const INFO_QUESTION_CUES = /\?|\b(what|where|who|when|why|how|do|does|can|could|is|are|tell me|i want to know|would you)\b/i;
-const SESSION_MODE_KEY = '__session_mode';
-const SESSION_PROCESSED_TURNS_KEY = '__processed_turn_ids';
-
 type SessionMode = 'support' | 'estimate' | 'handoff';
 
 function stripInternalAnswerKeys(value: unknown): unknown {
@@ -549,8 +571,12 @@ function sanitizedAnswersForClient(answers: Record<string, unknown>): Record<str
   return stripInternalAnswerKeys(answers) as Record<string, unknown>;
 }
 
-function getSessionMode(answers: Record<string, unknown>): SessionMode {
-  const mode = String(answers[SESSION_MODE_KEY] ?? '').trim().toLowerCase();
+function getSessionMode(state: SessionRecord): SessionMode {
+  if (state.mode === 'estimate' || state.mode === 'handoff') {
+    return state.mode;
+  }
+
+  const mode = String(state.answers['__session_mode'] ?? '').trim().toLowerCase();
   if (mode === 'estimate' || mode === 'handoff') {
     return mode;
   }
@@ -558,17 +584,24 @@ function getSessionMode(answers: Record<string, unknown>): SessionMode {
 }
 
 function withSessionMode(
-  answers: Record<string, unknown>,
+  state: SessionRecord,
   mode: SessionMode
-): Record<string, unknown> {
+): { answers: Record<string, unknown>; mode: SessionMode } {
   return {
-    ...answers,
-    [SESSION_MODE_KEY]: mode,
+    answers: {
+      ...state.answers,
+      ['__session_mode']: mode,
+    },
+    mode,
   };
 }
 
-function readProcessedTurnIds(answers: Record<string, unknown>): string[] {
-  const raw = answers[SESSION_PROCESSED_TURNS_KEY];
+function readProcessedTurnIds(state: SessionRecord): string[] {
+  if (state.processed_turn_ids && state.processed_turn_ids.length > 0) {
+    return [...state.processed_turn_ids];
+  }
+
+  const raw = state.answers['__processed_turn_ids'];
   if (!Array.isArray(raw)) {
     return [];
   }
@@ -579,17 +612,23 @@ function readProcessedTurnIds(answers: Record<string, unknown>): string[] {
 }
 
 function withProcessedTurn(
-  answers: Record<string, unknown>,
+  state: SessionRecord,
   turnId: string
-): Record<string, unknown> {
+): { answers: Record<string, unknown>; processed_turn_ids: string[] } {
   const normalized = turnId.trim();
   if (!normalized) {
-    return answers;
+    return {
+      answers: state.answers,
+      processed_turn_ids: state.processed_turn_ids ?? [],
+    };
   }
-  const next = [...readProcessedTurnIds(answers), normalized];
+  const next = [...readProcessedTurnIds(state), normalized];
   return {
-    ...answers,
-    [SESSION_PROCESSED_TURNS_KEY]: next.slice(-50),
+    answers: {
+      ...state.answers,
+      ['__processed_turn_ids']: next.slice(-50),
+    },
+    processed_turn_ids: next.slice(-50),
   };
 }
 
@@ -1516,8 +1555,8 @@ export async function runEstimateAgentCore(
   const turnId = readTurnId(request);
 
   const initialSession = await runtime.getSession(sessionId);
-  let mode = getSessionMode(initialSession.answers);
-  const alreadyProcessed = turnId ? readProcessedTurnIds(initialSession.answers).includes(turnId) : false;
+  let mode = getSessionMode(initialSession);
+  const alreadyProcessed = turnId ? readProcessedTurnIds(initialSession).includes(turnId) : false;
 
   if (alreadyProcessed) {
     const cleanedAnswers = sanitizedAnswersForClient(initialSession.answers);
@@ -1626,17 +1665,24 @@ export async function runEstimateAgentCore(
   }
 
   const finalStateBeforeMeta = await runtime.getSession(sessionId);
-  let metaAnswers = withSessionMode(finalStateBeforeMeta.answers, mode);
+  let meta = withSessionMode(finalStateBeforeMeta, mode);
+  let patchedAnswers = meta.answers;
+  let patchedProcessedIds = finalStateBeforeMeta.processed_turn_ids ?? [];
   if (turnId) {
-    metaAnswers = withProcessedTurn(metaAnswers, turnId);
+    const withTurn = withProcessedTurn(finalStateBeforeMeta, turnId);
+    patchedAnswers = withTurn.answers;
+    patchedProcessedIds = withTurn.processed_turn_ids;
   }
 
   const finalState =
-    JSON.stringify(metaAnswers) === JSON.stringify(finalStateBeforeMeta.answers)
+    JSON.stringify(patchedAnswers) === JSON.stringify(finalStateBeforeMeta.answers) &&
+    JSON.stringify(patchedProcessedIds) === JSON.stringify(finalStateBeforeMeta.processed_turn_ids ?? [])
       ? finalStateBeforeMeta
       : await runtime.saveSession({
           ...finalStateBeforeMeta,
-          answers: metaAnswers,
+          answers: patchedAnswers,
+          mode: meta.mode,
+          processed_turn_ids: patchedProcessedIds,
         });
 
   const done = loopResult.done;
