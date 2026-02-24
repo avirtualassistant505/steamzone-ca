@@ -132,7 +132,7 @@ function getSpeechRecognitionCtor(): {
 
 const SESSION_STORAGE_KEY = 'steamzone_estimate_bot_lab_session_id';
 const VOICE_SESSION_STORAGE_KEY = 'steamzone_estimate_bot_lab_voice_session_id';
-const WARM_OPENER = 'Hello';
+const WARM_OPENER = 'Hi, how are you? What can I help you with today?';
 
 const ESTIMATE_INTENT_REGEX = /\b(estimate|quote|pricing|price|cost|book|booking|schedule|appointment)\b/i;
 
@@ -311,6 +311,7 @@ export default function EstimateBotLabPage() {
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioAbortRef = useRef<AbortController | null>(null);
   const finalizedSessionRef = useRef<Set<string>>(new Set());
+  const greetedSessionRef = useRef<Set<string>>(new Set());
   const isBusyRef = useRef(false);
   const isVoiceCallActiveRef = useRef(false);
   const isSpeechRecognitionSupported =
@@ -673,9 +674,17 @@ export default function EstimateBotLabPage() {
   }
 
   useEffect(() => {
-    if (messages.length === 0 && !isBusy) {
-      void sendMessage(WARM_OPENER, { silentUserBubble: true, channel: 'web' });
+    const targetSessionId = sessionIdRef.current;
+    if (messages.length !== 0 || isBusy || !targetSessionId) {
+      return;
     }
+
+    if (greetedSessionRef.current.has(targetSessionId)) {
+      return;
+    }
+
+    greetedSessionRef.current.add(targetSessionId);
+    void sendMessage(WARM_OPENER, { silentUserBubble: true, channel: 'web', sessionId: targetSessionId });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
@@ -702,6 +711,9 @@ export default function EstimateBotLabPage() {
 
     const id = newSessionId();
     const voiceId = newSessionId();
+    greetedSessionRef.current.delete(priorSessionId);
+    greetedSessionRef.current.delete(priorVoiceSessionId);
+    sessionIdRef.current = id;
 
     saveSessionId(SESSION_STORAGE_KEY, id);
     setSessionId(id);
@@ -724,6 +736,7 @@ export default function EstimateBotLabPage() {
     finalizedSessionRef.current.delete(id);
     setHasUserTurn(false);
     setEstimateEngaged(false);
+    setIsThinking(false);
     setIsVoiceCallActive(false);
     stopListening();
     stopSpeaking();

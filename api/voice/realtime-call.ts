@@ -10,123 +10,32 @@ type ApiResponse = {
   send?: (body: unknown) => void;
 };
 
-type SessionConfig = Record<string, unknown>;
 type TransportMode = 'form' | 'json';
-
 type RealtimeAttempt = {
-  config: SessionConfig;
+  id: string;
   transport: TransportMode;
+  sdp: string;
+  model: string;
+  voice: string;
+  includeTranscription: boolean;
 };
 
-function normalizeErrorBody(rawBody: string): string {
-  if (!rawBody) {
-    return 'OpenAI returned an empty response.';
-  }
-
-  const trimmed = rawBody.trim();
-  try {
-    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-    const error = parsed?.error;
-    if (error && typeof error === 'object') {
-      const maybeMessage = (error as Record<string, unknown>).message;
-      if (typeof maybeMessage === 'string' && maybeMessage.trim()) {
-        const code = typeof (error as Record<string, unknown>).code === 'string' ? (error as Record<string, unknown>).code : '';
-        return `OpenAI realtime call failed: ${maybeMessage}${code ? ` (${code})` : ''}`;
-      }
-    }
-  } catch {
-    // Keep the raw text.
-  }
-
-  return trimmed;
-}
-
-function readSdpBody(body: unknown): string {
-  if (typeof body === 'string') {
-    return body;
-  }
-
-  if (body && typeof body === 'object' && !Array.isArray(body)) {
-    const maybe = (body as Record<string, unknown>).sdp;
-    if (typeof maybe === 'string') {
-      return maybe;
-    }
-  }
-
-  return '';
-}
-
-function buildRealtimeSessionConfigs(model: string, voice: string): SessionConfig[] {
-  const baseTools = [
-    {
-      type: 'function',
-      name: 'postagent_estimate_turn',
-      description:
-        'Run one shared estimate-agent turn using the existing Steam Zone postagent logic and shared training data.',
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          session_id: { type: 'string' },
-          user_text: { type: 'string' },
-        },
-        required: ['session_id', 'user_text'],
+const BASE_TOOLS = [
+  {
+    type: 'function',
+    name: 'postagent_estimate_turn',
+    description: 'Run one shared estimate-agent turn using the existing Steam Zone postagent logic and shared training data.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        session_id: { type: 'string' },
+        user_text: { type: 'string' },
       },
+      required: ['session_id', 'user_text'],
     },
-  ];
-
-  const modernConfig = {
-    model,
-    instructions: REALTIME_INSTRUCTIONS,
-    modalities: ['text', 'audio'],
-    voice,
-    input_audio_format: 'pcm16',
-    output_audio_format: 'pcm16',
-    input_audio_transcription: {
-      model: 'whisper-1',
-    },
-    turn_detection: {
-      type: 'server_vad',
-    },
-    tools: baseTools,
-    tool_choice: 'auto',
-  };
-
-  return [modernConfig];
-}
-
-function isUnknownParameterError(text: string): boolean {
-  return text.includes('unknown_parameter') || text.includes('Unknown parameter');
-}
-
-function normalizeTransportConfig(
-  sdp: string,
-  config: SessionConfig,
-  transport: TransportMode
-): { body: BodyInit; headers: Record<string, string> } {
-  const headers: Record<string, string> = {
-    Authorization: '',
-    'OpenAI-Beta': 'realtime=v1',
-  };
-
-  if (transport === 'json') {
-    return {
-      body: JSON.stringify({
-        sdp,
-        session: config,
-      }),
-      headers: { ...headers, 'Content-Type': 'application/json' },
-    };
-  }
-
-  const form = new FormData();
-  form.set('sdp', sdp);
-  form.set('session', JSON.stringify(config));
-  return {
-    body: form,
-    headers,
-  };
-}
+  },
+] as const;
 
 const REALTIME_INSTRUCTIONS = [
   'You are Steam Zone AI Voice Receptionist.',
@@ -140,6 +49,161 @@ const REALTIME_INSTRUCTIONS = [
   'If the user asks an informational question, answer it first using the tool result.',
   'Do not invent pricing; only use pricing from tool outputs.',
 ].join('\n');
+
+function parseJsonBody(rawBody: unknown): Record<string, unknown> | null {
+  if (!rawBody || typeof rawBody !== 'object' || Array.isArray(rawBody)) {
+    return null;
+  }
+
+  return rawBody as Record<string, unknown>;
+}
+
+function readSdpBody(body: unknown): string {
+  if (typeof body === 'string') {
+    return body;
+  }
+  const parsed = parseJsonBody(body);
+  if (!parsed) return '';
+  const candidate = parsed.sdp;
+  return typeof candidate === 'string' ? candidate : '';
+}
+
+function parseError(rawBody: string): string {
+  if (!rawBody) {
+    return 'OpenAI returned an empty response.';
+  }
+
+  try {
+    const parsed = JSON.parse(rawBody.trim()) as { error?: Record<string, unknown> };
+    const message = parsed?.error?.message;
+    if (typeof message === 'string' && message.trim()) {
+      const code = typeof parsed.error?.code === 'string' ? ` (${parsed.error.code})` : '';
+      return `OpenAI realtime call failed: ${message.trim()}${code}`;
+    }
+  } catch {
+    // Keep raw response.
+  }
+
+  return rawBody.trim();
+}
+
+function extractUnknownParameter(message: string): string | null {
+  if (!message || !message.toLowerCase().includes('unknown parameter')) {
+    return null;
+  }
+  const match = message.match(/unknown parameter(?: field)?\s*[:'"-]?\s*([a-z0-9_.]+)/i);
+  return match?.[1] ? match[1].trim() : '';
+}
+
+function normalizeRealtimeModels(raw: string): string[] {
+  const lowered = raw.trim().toLowerCase();
+  const base = lowered.replace(/^openai\//, '');
+  if (!base) {
+    return ['gpt-realtime', 'gpt-4o-realtime-preview'];
+  }
+
+  if (base === 'gpt-audio-mini' || base === 'gpt-audio') {
+    return ['gpt-realtime', 'gpt-4o-realtime-preview'];
+  }
+
+  if (base.includes('realtime')) {
+    return [base];
+  }
+
+  if (base === 'gpt-4o') {
+    return ['gpt-4o-realtime-preview', 'gpt-realtime'];
+  }
+
+  return ['gpt-realtime', 'gpt-4o-realtime-preview'];
+}
+
+function buildSessionConfig(model: string, voice: string, includeTranscription: boolean): Record<string, unknown> {
+  const sessionConfig: Record<string, unknown> = {
+    model,
+    instructions: REALTIME_INSTRUCTIONS,
+    modalities: ['text', 'audio'],
+    tools: BASE_TOOLS,
+    tool_choice: 'auto',
+    input_audio_format: 'pcm16',
+    output_audio_format: 'pcm16',
+    turn_detection: { type: 'server_vad' },
+    voice,
+  };
+
+  if (includeTranscription) {
+    sessionConfig.input_audio_transcription = { model: 'whisper-1' };
+  }
+
+  return sessionConfig;
+}
+
+function buildRequestBody(attempt: RealtimeAttempt): BodyInit {
+  const config = buildSessionConfig(attempt.model, attempt.voice, attempt.includeTranscription);
+  const wrapped = {
+    sdp: attempt.sdp,
+    session: config,
+  };
+  if (attempt.transport === 'json') {
+    return JSON.stringify(wrapped);
+  }
+  const form = new FormData();
+  form.set('sdp', attempt.sdp);
+  form.set('session', JSON.stringify(config));
+  return form;
+}
+
+function buildAttempts(sdp: string, voice: string, rawModels: string[]): RealtimeAttempt[] {
+  const transcriptionModes = [true, false];
+  const attempts: RealtimeAttempt[] = [];
+
+  for (const model of rawModels) {
+    for (const includeTranscription of transcriptionModes) {
+      attempts.push({
+        id: `${model}-${includeTranscription ? 'withTranscription' : 'noTranscription'}-json`,
+        transport: 'json',
+        sdp,
+        model,
+        voice,
+        includeTranscription,
+      });
+    }
+  }
+
+  // Form-based fallback for legacy wrapped payload.
+  for (const model of rawModels) {
+    attempts.push({
+      id: `${model}-withTranscription-form`,
+      transport: 'form',
+      sdp,
+      model,
+      voice,
+      includeTranscription: true,
+    });
+    attempts.push({
+      id: `${model}-noTranscription-form`,
+      transport: 'form',
+      sdp,
+      model,
+      voice,
+      includeTranscription: false,
+    });
+  }
+
+  return attempts;
+}
+
+function headersForTransport(transport: TransportMode): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: '',
+    'OpenAI-Beta': 'realtime=v1',
+  };
+  if (transport === 'json') {
+    headers['Content-Type'] = 'application/json';
+  }
+  return headers;
+}
+
+const DEFAULT_VOICE_FALLBACK = 'alloy';
 
 export default async function handler(req: ApiRequest, res: ApiResponse): Promise<void> {
   if (req.method !== 'POST') {
@@ -156,7 +220,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   }
 
   const sdp = readSdpBody(req.body);
-  if (!sdp || !sdp.trim()) {
+  if (!sdp.trim()) {
     res.status(400).json({ message: 'Missing SDP body.' });
     return;
   }
@@ -164,89 +228,66 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   const storedModelConfig = await import('../../server/agentModelStore.js')
     .then((mod) => mod.getAgentModelConfig())
     .catch(() => null);
-  const storedVoiceModel = storedModelConfig?.voiceModel?.trim() ?? '';
-  const inferredRealtimeModel =
-    storedVoiceModel && storedVoiceModel.toLowerCase().includes('realtime')
-      ? storedVoiceModel.replace(/^openai\//i, '')
-      : '';
-
-  const model =
+  const configuredVoice = process.env.OPENAI_REALTIME_VOICE?.trim() || DEFAULT_VOICE_FALLBACK;
+  const rawModel =
     process.env.OPENAI_REALTIME_MODEL?.trim() ||
-    inferredRealtimeModel ||
+    storedModelConfig?.voiceModel?.trim() ||
     'gpt-realtime';
-  const voice = process.env.OPENAI_REALTIME_VOICE?.trim() || 'marin';
-  const preferredConfigs = buildRealtimeSessionConfigs(model, voice);
-  const attempts: RealtimeAttempt[] = preferredConfigs.flatMap((config) => [
-    { config, transport: 'json' },
-    { config, transport: 'form' },
-  ]);
+  const voice = configuredVoice || DEFAULT_VOICE_FALLBACK;
+  const models = normalizeRealtimeModels(rawModel);
+  const uniqueModels = Array.from(new Set(models.filter(Boolean)));
 
-  const fallbackModel = model === 'gpt-realtime' ? 'gpt-4o-realtime-preview' : model;
-  if (fallbackModel !== model) {
-    const fallbackConfigs = buildRealtimeSessionConfigs(fallbackModel, voice);
-    for (const config of fallbackConfigs) {
-      attempts.push({ config, transport: 'form' });
-      attempts.push({ config, transport: 'json' });
-    }
-  }
+  const attempts = buildAttempts(sdp, voice, uniqueModels);
+  let lastError = 'OpenAI realtime call failed.';
 
   try {
-    let lastError = 'OpenAI realtime call failed.';
     for (const attempt of attempts) {
-      const request = normalizeTransportConfig(sdp, attempt.config, attempt.transport);
-      const openAiResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
+      const response = await fetch('https://api.openai.com/v1/realtime/calls', {
         method: 'POST',
         headers: {
-          ...request.headers,
+          ...headersForTransport(attempt.transport),
           Authorization: `Bearer ${apiKey}`,
         },
-        body: request.body,
+        body: buildRequestBody(attempt),
       });
 
-      const raw = await openAiResponse.text();
-      if (!openAiResponse.ok) {
-        const message = normalizeErrorBody(raw);
-        if (!message) {
+      const raw = await response.text();
+      if (!response.ok) {
+        const message = parseError(raw);
+        lastError = message || 'OpenAI realtime call failed.';
+
+        const unknown = extractUnknownParameter(message);
+        if (unknown) {
+          // Continue to next candidate shape; do not retry modified variants for the same payload family.
           continue;
         }
-        lastError = message;
-        if (!isUnknownParameterError(message) && openAiResponse.status >= 500) {
+
+        if (response.status >= 500) {
           break;
         }
         continue;
       }
 
-      if (typeof raw !== 'string' || !raw.trim().startsWith('v=')) {
-        lastError =
-          'OpenAI returned an invalid SDP answer. Retrying with alternate session payload.';
+      if (!raw.trim().startsWith('v=')) {
+        lastError = `OpenAI returned an invalid SDP answer (unexpected payload for attempt ${attempt.id}).`;
         continue;
       }
-
-      const usedConfig = attempt.config;
-      const usedModel = typeof usedConfig.model === 'string' && usedConfig.model.trim() ? usedConfig.model : model;
-      const usedVoice =
-        typeof usedConfig.voice === 'string' && usedConfig.voice.trim() ? usedConfig.voice : voice;
 
       if (typeof res.setHeader === 'function') {
         res.setHeader('Content-Type', 'application/sdp');
         res.setHeader('Cache-Control', 'no-store');
-        res.setHeader('X-Realtime-Model', usedModel);
-        res.setHeader('X-Realtime-Voice', usedVoice);
-        res.setHeader('X-Realtime-Transport', attempt.transport);
+        res.setHeader('X-Realtime-Model', attempt.model);
       }
 
       if (typeof res.send === 'function') {
         res.status(200).send(raw);
-        return;
+      } else {
+        res.status(200).json({ sdp: raw });
       }
-
-      res.status(200).json({ sdp: raw, model: usedModel, voice: usedVoice });
       return;
     }
 
-    res.status(502).json({
-      message: lastError || `OpenAI realtime call failed (all payload variants rejected).`,
-    });
+    res.status(502).json({ message: lastError });
   } catch (error) {
     res.status(500).json({
       message: error instanceof Error ? error.message : 'Failed to initialize realtime call.',

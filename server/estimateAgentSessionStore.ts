@@ -494,8 +494,13 @@ export async function getSession(sessionId: string): Promise<EstimateSessionReco
   try {
     const loaded = await loadSessionRowFromDbWithSupport(supabase, sessionId);
     if (!loaded.row) {
-      setStorageMode('database');
-      return loadFromMemory(sessionId);
+      const seeded = createEmptySession(sessionId);
+      try {
+        return await saveSession(seeded);
+      } catch {
+        setStorageMode('database');
+        return loadFromMemory(sessionId);
+      }
     }
 
     setStorageMode('database');
