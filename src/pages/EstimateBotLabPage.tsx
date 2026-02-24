@@ -62,6 +62,13 @@ interface AgentResponse {
   };
 }
 
+interface ResetResponse {
+  session_id: string;
+  deleted: boolean;
+  storage_mode: 'database' | 'memory_fallback';
+  message: string;
+}
+
 type SupportedChannel = 'web' | 'voice' | 'sms' | 'test';
 type SendMessageOptions = {
   silentUserBubble?: boolean;
@@ -186,6 +193,30 @@ function readSessionId(storageKey: string): string {
 function saveSessionId(storageKey: string, id: string): void {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(storageKey, id);
+}
+
+async function resetPostagentSession(sessionId?: string): Promise<boolean> {
+  const target = sessionId?.trim() ?? '';
+  if (!target) {
+    return true;
+  }
+
+  try {
+    const response = await fetch('/api/postagent/reset', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ session_id: target }),
+    });
+    const parsed = await parseJsonResponse<ResetResponse>(response);
+    if (!parsed.ok || !response.ok || !parsed.payload) {
+      return false;
+    }
+    return parsed.payload.deleted;
+  } catch {
+    return false;
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -656,12 +687,18 @@ export default function EstimateBotLabPage() {
     void sendMessage(value, { channel: isVoiceCallActive ? 'voice' : 'web' });
   }
 
-  function startOver(): void {
+  async function startOver(): Promise<void> {
     requestSequenceRef.current += 1;
     if (activeRequestRef.current) {
       activeRequestRef.current.abort();
       activeRequestRef.current = null;
     }
+
+    const priorSessionId = sessionIdRef.current;
+    const priorVoiceSessionId = voiceSessionIdRef.current;
+    await Promise.all([resetPostagentSession(priorSessionId), resetPostagentSession(priorVoiceSessionId)]).catch(() => {
+      // Ignore reset failures for local start-over.
+    });
 
     const id = newSessionId();
     const voiceId = newSessionId();
@@ -806,7 +843,9 @@ export default function EstimateBotLabPage() {
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={startOver}
+              onClick={() => {
+                void startOver();
+              }}
               className="inline-flex items-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
             >
               <RotateCcw className="mr-2 h-4 w-4" />

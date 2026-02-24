@@ -22,9 +22,17 @@ interface PostagentResponse {
   };
 }
 
+interface ResetResponse {
+  session_id: string;
+  deleted: boolean;
+  storage_mode: 'database' | 'memory_fallback';
+  message: string;
+}
+
 type RealtimeEventPayload = Record<string, unknown>;
 
 const VOICE_SESSION_STORAGE_KEY = 'steamzone_estimate_voice_lab_session_id';
+const VOICE_WARM_OPENER = 'Hi, how are you? What can I help you with today?';
 
 function randomId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -125,6 +133,32 @@ function extractContentText(content: unknown[]): string {
     chunks.push(...extractTextFragments(record));
   }
   return uniqueNonEmpty(chunks).join(' ').trim();
+}
+
+async function resetPostagentSession(sessionId?: string): Promise<boolean> {
+  const target = sessionId?.trim() ?? '';
+  if (!target) {
+    return true;
+  }
+
+  try {
+    const response = await fetch('/api/postagent/reset', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ session_id: target }),
+    });
+
+    const parsed = await parseJsonResponse<ResetResponse>(response);
+    if (!parsed.ok || !response.ok || !parsed.payload) {
+      return false;
+    }
+
+    return parsed.payload.deleted;
+  } catch {
+    return false;
+  }
 }
 
 function extractAssistantTextFromItem(item: Record<string, unknown>): string {
@@ -264,8 +298,6 @@ export default function EstimateVoiceLabPage() {
   }, [isListening, status]);
 
   function appendTranscript(role: TranscriptRole, content: string): void {
-    // Keep voice mode disconnected from chat transcript rendering.
-    if (role !== 'system') return;
     const trimmed = content.trim();
     if (!trimmed) return;
     setTranscript((prev) => [...prev, { id: randomId(), role, content: trimmed }]);
@@ -297,6 +329,51 @@ export default function EstimateVoiceLabPage() {
     }
 
     return payload;
+  }
+
+  async function announceVoiceGreeting(): Promise<void> {
+    const channel = dataChannelRef.current;
+    if (!channel || channel.readyState !== 'open') {
+      return;
+    }
+
+    let assistantText = VOICE_WARM_OPENER;
+    try {
+      const turn = await runPostagentTurn(assistantText);
+      assistantText = asString(turn.assistant_message).trim() || assistantText;
+      if (turn.session_id && turn.session_id !== sessionIdRef.current) {
+        sessionIdRef.current = turn.session_id;
+        setSessionId(turn.session_id);
+      }
+    } catch {
+      // Keep generic opener if postagent tool is unavailable.
+    }
+
+    if (!assistantText) {
+      return;
+    }
+
+    appendTranscript('assistant', assistantText);
+    sendRealtimeEvent({
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'assistant',
+        content: [
+          {
+            type: 'output_text',
+            text: assistantText,
+          },
+        ],
+      },
+    });
+    sendRealtimeEvent({
+      type: 'response.create',
+      response: {
+        modalities: ['audio', 'text'],
+        instructions: assistantText,
+      },
+    });
   }
 
   async function handleToolCall(callId: string, name: string, argumentsText: string): Promise<void> {
@@ -456,6 +533,9 @@ export default function EstimateVoiceLabPage() {
     setTranscript([]);
     setTurnCount(0);
 
+    const previousId = sessionIdRef.current;
+    await resetPostagentSession(previousId);
+
     const newId = newSessionId();
     sessionIdRef.current = newId;
     setSessionId(newId);
@@ -515,23 +595,16 @@ export default function EstimateVoiceLabPage() {
           type: 'conversation.item.create',
           item: {
             type: 'message',
-            role: 'user',
+            role: 'system',
             content: [
               {
-                type: 'input_text',
-                text: 'Please greet the caller now in English and ask one short opening question.',
+                type: 'output_text',
+                text: 'Voice channel started.',
               },
             ],
           },
         });
-        sendRealtimeEvent({
-          type: 'response.create',
-          response: {
-            modalities: ['audio', 'text'],
-            instructions:
-              'Speak in English. Say exactly: "Hi, thanks for calling Steam Zone. How can I help you today?" Then wait for the caller.',
-          },
-        });
+        void announceVoiceGreeting();
       };
 
       dataChannel.onclose = () => {
@@ -571,7 +644,7 @@ export default function EstimateVoiceLabPage() {
         if (type === 'conversation.item.input_audio_transcription.completed') {
           const transcriptText = asString(payload.transcript).trim();
           if (transcriptText) {
-            appendTranscript('system', transcriptText);
+            appendTranscript('user', transcriptText);
           }
           return;
         }
@@ -593,7 +666,7 @@ export default function EstimateVoiceLabPage() {
         ) {
           const assistantText = extractAssistantText(payload);
           if (assistantText) {
-            appendTranscript('system', assistantText);
+            appendTranscript('assistant', assistantText);
           }
         }
 
@@ -658,8 +731,9 @@ export default function EstimateVoiceLabPage() {
     }
   }
 
-  function startOver(): void {
+  async function startOver(): Promise<void> {
     stopCall();
+    await resetPostagentSession(sessionIdRef.current);
     const newId = newSessionId();
     sessionIdRef.current = newId;
     saveVoiceSessionId(newId);
@@ -675,7 +749,6 @@ export default function EstimateVoiceLabPage() {
     return () => {
       stopCall();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const canStart = status !== 'connecting' && status !== 'connected';
@@ -696,7 +769,9 @@ export default function EstimateVoiceLabPage() {
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={startOver}
+              onClick={() => {
+                void startOver();
+              }}
               className="inline-flex items-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
             >
               <RotateCcw className="mr-2 h-4 w-4" />

@@ -1690,7 +1690,7 @@ export async function runEstimateAgentCore(
   }
 
   const finalStateBeforeMeta = await runtime.getSession(sessionId);
-  let meta = withSessionMode(finalStateBeforeMeta, mode);
+  const meta = withSessionMode(finalStateBeforeMeta, mode);
   let patchedAnswers = meta.answers;
   let patchedProcessedIds = finalStateBeforeMeta.processed_turn_ids ?? [];
   if (turnId) {
