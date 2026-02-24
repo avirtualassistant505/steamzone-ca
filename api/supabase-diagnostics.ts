@@ -102,8 +102,8 @@ function buildErrorMessage(message: string): string {
 async function tableQuery(
   client: {
     from: (table: string) => {
-      select: (columns: string) => {
-        limit: (count: number) => Promise<{ data: unknown[] | null; error?: { message?: unknown } | null }>;
+        select: (columns: string) => {
+        limit: (count: number) => PromiseLike<{ data: unknown[] | null; error?: { message?: unknown } | null }>;
       };
     };
   },
@@ -122,8 +122,8 @@ async function tableQuery(
 async function columnQuery(
   client: {
     from: (table: string) => {
-      select: (columns: string) => {
-        limit: (count: number) => Promise<{ data: unknown[] | null; error?: { message?: unknown } | null }>;
+        select: (columns: string) => {
+        limit: (count: number) => PromiseLike<{ data: unknown[] | null; error?: { message?: unknown } | null }>;
       };
     };
   },

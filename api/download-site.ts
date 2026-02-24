@@ -200,7 +200,7 @@ function getPositiveIntEnv(name: string, fallback: number): number {
   return Math.floor(parsed);
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+async function withTimeout<T>(promise: PromiseLike<T>, timeoutMs: number, message: string): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -512,8 +512,11 @@ async function exportDbTable(supabase: Awaited<ReturnType<typeof getSupabaseAdmi
 
   try {
     const dbTableTimeoutMs = getPositiveIntEnv('SITE_BACKUP_DB_TABLE_TIMEOUT_MS', DEFAULT_DB_TABLE_TIMEOUT_MS);
-    const result = await withTimeout(
-      supabase.from(table).select('*'),
+    const result = await withTimeout<{
+      data: unknown;
+      error?: { message?: string } | null;
+    }>(
+      supabase.from(table).select('*') as PromiseLike<{ data: unknown; error?: { message?: string } | null }>,
       dbTableTimeoutMs,
       `Timed out reading table "${table}" after ${dbTableTimeoutMs}ms.`
     );

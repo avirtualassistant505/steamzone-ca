@@ -241,7 +241,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     res.status(200).json({
       ok: true,
       session_id: sessionId,
-      quote,
       quote_hash: quoteHash,
       record_id: recordId || null,
       quote_number: quoteNumber || null,

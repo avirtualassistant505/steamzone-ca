@@ -312,15 +312,20 @@ export async function setConversationReviewState(
 
   const store = await estimateSessionStore();
   const current = await store.getSession(normalizedSessionId);
-  const next: EstimateSessionRecord = {
-    ...(current as Record<string, unknown>),
-    review_notes: notes === undefined ? ((current as { review_notes?: unknown }).review_notes ?? '') : notes,
-    review_status:
+  const normalizedNotes = notes === undefined ? normalizeReviewNotes((current as { review_notes?: unknown }).review_notes) : notes;
+  const normalizedStatus =
+    coerceReviewStatus(
       reviewStatus === undefined
-        ? notes === undefined || normalizeReviewNotes(notes) === ''
-          ? (current as { review_status?: unknown }).review_status
-          : 'ready'
-        : reviewStatus,
+        ? (notes === undefined || normalizeReviewNotes(notes) === ''
+            ? ((current as { review_status?: unknown }).review_status ?? DEFAULT_REVIEW_STATUS)
+            : 'ready')
+        : reviewStatus
+    );
+
+  const next: EstimateSessionRecord = {
+    ...(current as EstimateSessionRecord),
+    review_notes: normalizedNotes,
+    review_status: normalizedStatus,
     updated_at: nowIso(),
   };
 
