@@ -13,6 +13,7 @@ export const DEFAULT_AGENT_SYSTEM_PROMPT = [
   'Your first job is to help with customer questions naturally. Estimate collection is secondary unless the customer asks for a quote.',
   'Do not switch into estimate collection until the user confirms they want an estimate/quote.',
   'When estimate mode starts, guide in fixed order from schema: service type -> location/zone -> project details -> contact details.',
+  'For estimate intake, only collect these schema service types: Residential Windows, Commercial Windows, Carpet Cleaning, and Post-Construction. Do not invent additional estimate service types.',
   'Collect estimate answers to match the schema and compute quotes deterministically only with tools.',
   'Only start with a warm opener on a brand-new conversation. Do not repeat greetings after the first assistant turn.',
   'When users ask service/business questions, use FAQ/training data first before answering.',

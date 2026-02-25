@@ -1,6 +1,7 @@
 import {
   getFieldOptions,
   getRequiredVisibleFieldsInOrder,
+  getSchemaField,
   isAnswered,
   type EstimateFormSchema,
   type SchemaField,
@@ -395,6 +396,20 @@ const CORE_PROMPT_PREFIX = DEFAULT_AGENT_SYSTEM_PROMPT;
 
 const DEFAULT_USER_START = 'Hi, how are you? What can I help you with today?';
 const CORRECTION_CUES = /\b(actually|instead|change|replace|correction|corrections|update|correct|correcting)\b/i;
+const DIRECT_ESTIMATE_INTENT_CUES =
+  /\b(estimate|estimates|quote|quotes|quotation|quotations|pricing|price|cost|costs|how much)\b/i;
+const AGGRESSIVE_BUYING_SIGNAL_CUES =
+  /\b(book|booking|booked|schedule|scheduled|appointment|appointments|service|services|cleaning|clean)\b/i;
+const AFFIRMATIVE_INTENT_CUES =
+  /\b(yes|yeah|yep|yup|sure|okay|ok|please do|do it|that is my desire yes|confirm|confirmed|correct)\b/i;
+const NEGATIVE_INTENT_CUES = /\b(no|nope|nah|not now|later|never mind|nevermind|cancel|stop)\b/i;
+const WANTS_SERVICES_LIST_CUES =
+  /\b(what services|which services|services do you offer|what do you offer|what can you clean)\b/i;
+const UNSUPPORTED_ESTIMATE_SERVICE_CUES =
+  /\b(grout|tile|tiles|upholstery|sofa|couch|mattress|duct|chimney|pressure wash|power wash)\b/i;
+const PENDING_ESTIMATE_CONFIRMATION_KEY = '__pending_estimate_confirmation';
+const PENDING_ESTIMATE_CONFIRMATION_AT_KEY = '__pending_estimate_confirmation_at';
+const PENDING_ESTIMATE_CONFIRMATION_CONTEXT_KEY = '__pending_estimate_context';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -560,9 +575,9 @@ async function resolveModelProviderConfig(channel?: PostagentChannel): Promise<A
   };
 }
 
-const ESTIMATE_INTENT_CUES = /\b(estimate|quote|pricing|price|cost|book|booking|schedule|appointment)\b/i;
 const INFO_QUESTION_CUES = /\?|\b(what|where|who|when|why|how|do|does|can|could|is|are|tell me|i want to know|would you)\b/i;
 type SessionMode = 'support' | 'estimate' | 'handoff';
+type PendingEstimateContext = 'direct_intent' | 'aggressive_signal' | null;
 
 function stripInternalAnswerKeys(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -611,6 +626,44 @@ function withSessionMode(
     },
     mode,
   };
+}
+
+function readPendingEstimateContext(state: SessionRecord): PendingEstimateContext {
+  const value = String(state.answers[PENDING_ESTIMATE_CONFIRMATION_CONTEXT_KEY] ?? '')
+    .trim()
+    .toLowerCase();
+  if (value === 'direct_intent' || value === 'aggressive_signal') {
+    return value;
+  }
+  return null;
+}
+
+function hasPendingEstimateConfirmation(state: SessionRecord): boolean {
+  return state.answers[PENDING_ESTIMATE_CONFIRMATION_KEY] === true;
+}
+
+function withPendingEstimateConfirmation(
+  state: SessionRecord,
+  context: Exclude<PendingEstimateContext, null>
+): { answers: Record<string, unknown> } {
+  return {
+    answers: {
+      ...state.answers,
+      [PENDING_ESTIMATE_CONFIRMATION_KEY]: true,
+      [PENDING_ESTIMATE_CONFIRMATION_AT_KEY]: nowIso(),
+      [PENDING_ESTIMATE_CONFIRMATION_CONTEXT_KEY]: context,
+    },
+  };
+}
+
+function clearPendingEstimateConfirmation(
+  answers: Record<string, unknown>
+): Record<string, unknown> {
+  const next = { ...answers };
+  delete next[PENDING_ESTIMATE_CONFIRMATION_KEY];
+  delete next[PENDING_ESTIMATE_CONFIRMATION_AT_KEY];
+  delete next[PENDING_ESTIMATE_CONFIRMATION_CONTEXT_KEY];
+  return next;
 }
 
 function readProcessedTurnIds(state: SessionRecord): string[] {
@@ -703,8 +756,83 @@ function isLikelyInfoQuestion(inputText: string): boolean {
   return INFO_QUESTION_CUES.test(inputText);
 }
 
-function hasEstimateIntent(inputText: string): boolean {
-  return ESTIMATE_INTENT_CUES.test(inputText);
+function hasDirectEstimateIntent(inputText: string): boolean {
+  return DIRECT_ESTIMATE_INTENT_CUES.test(inputText);
+}
+
+function hasAggressiveBuyingSignal(inputText: string): boolean {
+  return AGGRESSIVE_BUYING_SIGNAL_CUES.test(inputText);
+}
+
+function hasAffirmativeIntent(inputText: string): boolean {
+  return AFFIRMATIVE_INTENT_CUES.test(inputText);
+}
+
+function hasNegativeIntent(inputText: string): boolean {
+  return NEGATIVE_INTENT_CUES.test(inputText);
+}
+
+function asksForServiceCatalog(inputText: string): boolean {
+  return WANTS_SERVICES_LIST_CUES.test(inputText);
+}
+
+function mentionsUnsupportedEstimateService(inputText: string): boolean {
+  return UNSUPPORTED_ESTIMATE_SERVICE_CUES.test(inputText);
+}
+
+function findServiceTypeFromInput(inputText: string): ServiceType | null {
+  const normalized = inputText.trim().toLowerCase();
+  if (!normalized) return null;
+
+  if (/\b(commercial|storefront|office|business)\b/.test(normalized) && /\bwindow/.test(normalized)) {
+    return 'commercialWindow';
+  }
+  if (/\b(residential|home|house)\b/.test(normalized) && /\bwindow/.test(normalized)) {
+    return 'window';
+  }
+  if (/\bwindow|windows\b/.test(normalized)) {
+    return 'window';
+  }
+  if (/\bcarpet|carpets\b/.test(normalized)) {
+    return 'carpet';
+  }
+  if (/\b(post[\s-]*construction|construction cleanup)\b/.test(normalized)) {
+    return 'postConstruction';
+  }
+
+  return null;
+}
+
+function estimateServiceOptionsText(): string {
+  const serviceField = getSchemaField('serviceType');
+  const options = serviceField ? getFieldOptions(serviceField, undefined) : [];
+  if (options.length === 0) {
+    return 'Residential Windows, Commercial Windows, Carpet Cleaning, and Post-Construction';
+  }
+  if (options.length === 1) {
+    return options[0].label;
+  }
+  if (options.length === 2) {
+    return `${options[0].label} and ${options[1].label}`;
+  }
+
+  const head = options.slice(0, -1).map((option) => option.label).join(', ');
+  return `${head}, and ${options[options.length - 1].label}`;
+}
+
+function buildServiceCatalogResponse(): string {
+  return `We currently provide instant estimates for ${estimateServiceOptionsText()}. Would you like a quote for one of these?`;
+}
+
+function buildEstimateConfirmationQuestion(context: Exclude<PendingEstimateContext, null>): string {
+  if (context === 'direct_intent') {
+    return 'Perfect. Do you want to start your estimate now?';
+  }
+  return 'I can help with an estimate. Do you want to start one now?';
+}
+
+function buildUnsupportedEstimateServiceMessage(): string {
+  return `I can only provide instant estimates for ${estimateServiceOptionsText()}. Which one would you like?`;
 }
 
 function normalizeAssistantMessage(text: string): string {
@@ -835,23 +963,27 @@ function applyResponseGuardrails(
   assistantMessage: string,
   inputText: string,
   faqMatches: KnowledgeMatch[],
-  hadPriorAssistantTurn: boolean
+  hadPriorAssistantTurn: boolean,
+  mode: SessionMode,
+  estimateContinuationQuestion?: string
 ): string {
   let next = normalizeAssistantMessage(assistantMessage);
+  const greetingPrefix = /^(?:hi|hello|hey|hi there|hello there)[,! ]+/i;
 
-  if (!next) return next;
+  if (hadPriorAssistantTurn) {
+    next = next.replace(greetingPrefix, '').trim();
+  }
+
+  if (!next) {
+    if (mode === 'estimate') {
+      return estimateContinuationQuestion?.trim() || 'Please share the next estimate detail.';
+    }
+    return 'Got it. What can I help you with?';
+  }
 
   const topMatch = faqMatches[0];
   const likelyInfoQuestion = isLikelyInfoQuestion(inputText);
-  const estimateIntent = hasEstimateIntent(inputText);
-
-  if (
-    hadPriorAssistantTurn &&
-    /^hi[,! ]/i.test(next) &&
-    likelyInfoQuestion
-  ) {
-    next = next.replace(/^hi[,! ]\s*/i, '').trim();
-  }
+  const estimateIntent = hasDirectEstimateIntent(inputText);
 
   if (
     likelyInfoQuestion &&
@@ -875,7 +1007,14 @@ function applyResponseGuardrails(
 
   next = enforceSingleQuestion(next);
 
-  return next;
+  const normalized = next.trim();
+  if (normalized) {
+    return normalized;
+  }
+  if (mode === 'estimate') {
+    return estimateContinuationQuestion?.trim() || 'Please share the next estimate detail.';
+  }
+  return 'Got it. What can I help you with?';
 }
 
 function readAssistantText(response: OpenAIResponse): string {
@@ -1421,7 +1560,7 @@ async function maybeComputeQuote(
 
 function shouldSearchKnowledge(inputText: string): boolean {
   const text = inputText.trim();
-  return text.length > 0 && (isLikelyInfoQuestion(text) || hasEstimateIntent(text));
+  return text.length > 0 && (isLikelyInfoQuestion(text) || hasDirectEstimateIntent(text) || asksForServiceCatalog(text));
 }
 
 function buildAgentRequestPayload(
@@ -1492,6 +1631,19 @@ async function runAgentLoop(
     estimateFlowActive
   );
   const useInfoOnlyTools = !estimateFlowActive;
+
+  if (!estimateFlowActive && asksForServiceCatalog(inputText)) {
+    return {
+      assistant_message: buildServiceCatalogResponse(),
+      assistant_reasoning: buildReasoningText([
+        `I reviewed your latest message: “${inputText.replace(/\s+/g, ' ').trim().slice(0, 200)}”.`,
+        'I answered with the deterministic schema service list to avoid unsupported service hallucinations.',
+      ]),
+      quote: null,
+      next_hint: { done: true },
+      done: false,
+    };
+  }
 
   let response = await callOpenAIWithFallback(
     modelConfig,
@@ -1579,7 +1731,7 @@ async function runAgentLoop(
     }
   }
 
-  assistantMessage = applyResponseGuardrails(assistantMessage, inputText, faqMatches, hadPriorAssistantTurn);
+  assistantMessage = applyResponseGuardrails(assistantMessage, inputText, faqMatches, hadPriorAssistantTurn, 'support');
   const assistantReasoning = buildReasoningText(reasoningSteps);
 
   return {
@@ -1687,10 +1839,64 @@ export async function runEstimateAgentCore(
     return dedupedResponse;
   }
 
+  let stagedAnswers = { ...initialSession.answers };
+  let modeDecisionChanged = false;
+  let forcedSupportMessage: string | null = null;
+  const pendingEstimateContext = readPendingEstimateContext(initialSession);
+  const pendingEstimateConfirmation = hasPendingEstimateConfirmation(initialSession);
+  const directEstimateIntent = hasDirectEstimateIntent(inputText);
+  const aggressiveBuyingSignal = hasAggressiveBuyingSignal(inputText);
+  const affirmativeIntent = hasAffirmativeIntent(inputText);
+  const negativeIntent = hasNegativeIntent(inputText);
+  const likelyInfoQuestion = isLikelyInfoQuestion(inputText);
+  const serviceMention = findServiceTypeFromInput(inputText);
+
   if (mode === 'estimate' && isEstimateCancellationIntent(inputText)) {
     mode = 'support';
-  } else if (mode === 'support' && hasEstimateIntent(inputText)) {
-    mode = 'estimate';
+    stagedAnswers = clearPendingEstimateConfirmation(stagedAnswers);
+    modeDecisionChanged = true;
+  } else if (mode === 'support') {
+    if (pendingEstimateConfirmation) {
+      if (negativeIntent) {
+        stagedAnswers = clearPendingEstimateConfirmation(stagedAnswers);
+        modeDecisionChanged = true;
+        forcedSupportMessage = 'No problem. What would you like help with today?';
+      } else if (affirmativeIntent || directEstimateIntent || serviceMention) {
+        mode = 'estimate';
+        stagedAnswers = clearPendingEstimateConfirmation(stagedAnswers);
+        modeDecisionChanged = true;
+      } else {
+        forcedSupportMessage = buildEstimateConfirmationQuestion(pendingEstimateContext ?? 'direct_intent');
+      }
+    } else if (directEstimateIntent) {
+      if (serviceMention) {
+        mode = 'estimate';
+        stagedAnswers = clearPendingEstimateConfirmation(stagedAnswers);
+        modeDecisionChanged = true;
+      } else {
+        stagedAnswers = {
+          ...stagedAnswers,
+          ...withPendingEstimateConfirmation(initialSession, 'direct_intent').answers,
+        };
+        modeDecisionChanged = true;
+        forcedSupportMessage = buildEstimateConfirmationQuestion('direct_intent');
+      }
+    } else if (aggressiveBuyingSignal && !likelyInfoQuestion) {
+      stagedAnswers = {
+        ...stagedAnswers,
+        ...withPendingEstimateConfirmation(initialSession, 'aggressive_signal').answers,
+      };
+      modeDecisionChanged = true;
+      forcedSupportMessage = buildEstimateConfirmationQuestion('aggressive_signal');
+    }
+  }
+
+  if (modeDecisionChanged) {
+    initialSession = await runtime.saveSession({
+      ...initialSession,
+      answers: stagedAnswers,
+      mode,
+    });
   }
 
   const userTranscriptAt = nowIso();
@@ -1712,48 +1918,85 @@ export async function runEstimateAgentCore(
 
   if (mode === 'estimate') {
     const schema = await runtime.toolGetSchema();
-    const state = await runtime.toolGetState(sessionId);
-    const nextHint = await runtime.peekNextQuestion(sessionId);
-    const parseResult = await normalizeAndSetAnswersFromInput(runtime, sessionId, inputText, schema, state, nextHint);
+    let state = await runtime.toolGetState(sessionId);
+    let nextHint = await runtime.peekNextQuestion(sessionId);
+    const unresolvedServiceType = nextHint.next_field_key === 'serviceType' && !state.answers.serviceType;
+    const detectedServiceType = findServiceTypeFromInput(inputText);
 
-    const afterParse = await runtime.getSession(sessionId);
-    const missingRequired = runtime.validateRequiredAnswers(sanitizedAnswersForClient(afterParse.answers));
-    const done = missingRequired.length === 0;
-    const quote = done ? await runtime.toolComputeQuote(sessionId) : null;
-
-    let deterministicMessage = '';
-    let deterministicNextHint: NextHint = { done: true };
-    if (done && quote) {
-      const quoteRecord = asRecord(quote) ?? {};
-      const totalText = asNumericText(quoteRecord.total);
-      const contact = asRecord(afterParse.answers.contact) ?? {};
-      const email = String(contact.email ?? '').trim();
-      deterministicMessage = totalText
-        ? `Thanks, I have everything for your estimate. The subtotal is ${totalText}.${
-            email ? ` I can email the quote to ${email}.` : ''
-          }`
-        : 'Thanks, I have everything for your estimate. Your quote is ready.';
-      deterministicNextHint = { done: true };
-    } else if (parseResult.ambiguity.length > 0 && parseResult.applied.length === 0) {
-      deterministicMessage = parseResult.ambiguity[0];
-      deterministicNextHint = await runtime.peekNextQuestion(sessionId);
-    } else {
-      deterministicNextHint = await runtime.toolNextQuestion(sessionId);
-      deterministicMessage = deterministicNextHint.question_text ?? 'Please share the next estimate detail.';
+    if (unresolvedServiceType && detectedServiceType) {
+      await runtime.toolSetAnswer(sessionId, 'serviceType', detectedServiceType);
+      state = await runtime.toolGetState(sessionId);
+      nextHint = await runtime.peekNextQuestion(sessionId);
     }
 
+    if (unresolvedServiceType && !detectedServiceType && mentionsUnsupportedEstimateService(inputText)) {
+      const deterministicNextHint = await runtime.peekNextQuestion(sessionId);
+      loopResult = {
+        assistant_message: buildUnsupportedEstimateServiceMessage(),
+        assistant_reasoning: buildReasoningText([
+          `Estimate mode is active for session ${sessionId}.`,
+          'User requested an unsupported estimate service while service type is unresolved.',
+          'Kept flow on serviceType and returned deterministic allowed options.',
+        ]),
+        quote: null,
+        next_hint: deterministicNextHint,
+        done: false,
+      };
+    } else {
+      const parseResult = await normalizeAndSetAnswersFromInput(runtime, sessionId, inputText, schema, state, nextHint);
+
+      const afterParse = await runtime.getSession(sessionId);
+      const missingRequired = runtime.validateRequiredAnswers(sanitizedAnswersForClient(afterParse.answers));
+      const done = missingRequired.length === 0;
+      const quote = done ? await runtime.toolComputeQuote(sessionId) : null;
+
+      let deterministicMessage = '';
+      let deterministicNextHint: NextHint = { done: true };
+      if (done && quote) {
+        const quoteRecord = asRecord(quote) ?? {};
+        const totalText = asNumericText(quoteRecord.total);
+        const contact = asRecord(afterParse.answers.contact) ?? {};
+        const email = String(contact.email ?? '').trim();
+        deterministicMessage = totalText
+          ? `Thanks, I have everything for your estimate. The subtotal is ${totalText}.${
+              email ? ` I can email the quote to ${email}.` : ''
+            }`
+          : 'Thanks, I have everything for your estimate. Your quote is ready.';
+        deterministicNextHint = { done: true };
+      } else if (parseResult.ambiguity.length > 0 && parseResult.applied.length === 0) {
+        deterministicMessage = parseResult.ambiguity[0];
+        deterministicNextHint = await runtime.peekNextQuestion(sessionId);
+      } else {
+        deterministicNextHint = await runtime.toolNextQuestion(sessionId);
+        deterministicMessage = deterministicNextHint.question_text ?? 'Please share the next estimate detail.';
+      }
+
+      loopResult = {
+        assistant_message: normalizeAssistantMessage(deterministicMessage),
+        assistant_reasoning: buildReasoningText([
+          `Estimate mode is active for session ${sessionId}.`,
+          `Parsed ${parseResult.applied.length} field update(s) from this turn.`,
+          done
+            ? 'All required estimate fields are complete; quote computed deterministically.'
+            : `Missing required fields remain; next question key is ${deterministicNextHint.next_field_key ?? 'unknown'}.`,
+        ]),
+        quote,
+        next_hint: deterministicNextHint,
+        done,
+      };
+    }
+  } else if (forcedSupportMessage) {
     loopResult = {
-      assistant_message: normalizeAssistantMessage(deterministicMessage),
+      assistant_message: forcedSupportMessage,
       assistant_reasoning: buildReasoningText([
-        `Estimate mode is active for session ${sessionId}.`,
-        `Parsed ${parseResult.applied.length} field update(s) from this turn.`,
-        done
-          ? 'All required estimate fields are complete; quote computed deterministically.'
-          : `Missing required fields remain; next question key is ${deterministicNextHint.next_field_key ?? 'unknown'}.`,
+        `Support mode active for session ${sessionId}.`,
+        pendingEstimateConfirmation
+          ? 'Awaiting estimate-confirmation response; used deterministic confirmation handling.'
+          : 'Detected buying signal and requested explicit estimate confirmation.',
       ]),
-      quote,
-      next_hint: deterministicNextHint,
-      done,
+      quote: null,
+      next_hint: { done: true },
+      done: false,
     };
   } else {
     const modelConfig = await resolveModelProviderConfig(channel);

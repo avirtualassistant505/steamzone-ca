@@ -193,6 +193,128 @@ describe('POST /api/postagent/estimate', () => {
     expect(nextPayload.assistant_message).toMatch(/postal|address|estimate/i);
   });
 
+  it('handles plural estimate intent by asking deterministic confirmation first', async () => {
+    const sessionId = 'postagent-plural-estimate-intent-1';
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'Do you provide estimates?',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { assistant_message: string; state: { mode: string; answers: Record<string, unknown> } };
+    expect(payload.state.mode).toBe('support');
+    expect(payload.state.answers.serviceType).toBeUndefined();
+    expect(payload.assistant_message).toMatch(/start.*estimate|estimate.*now/i);
+  });
+
+  it('asks confirmation first for aggressive booking signal', async () => {
+    const sessionId = 'postagent-aggressive-confirmation-1';
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'I want to book cleaning this week.',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { assistant_message: string; state: { mode: string } };
+    expect(payload.state.mode).toBe('support');
+    expect(payload.assistant_message).toMatch(/start.*estimate|estimate.*now/i);
+  });
+
+  it('enters estimate mode after user confirms pending estimate prompt', async () => {
+    const sessionId = 'postagent-confirmation-enter-estimate-1';
+
+    const first = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'I want to book cleaning this week.',
+        },
+      },
+      first
+    );
+    expect(first.code).toBe(200);
+
+    const second = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'yes',
+        },
+      },
+      second
+    );
+
+    expect(second.code).toBe(200);
+    const payload = second.payload as { assistant_message: string; state: { mode: string } };
+    expect(payload.state.mode).toBe('estimate');
+    expect(payload.assistant_message).toMatch(/what service are you looking to estimate/i);
+  });
+
+  it('keeps estimate flow on serviceType when unsupported service is requested', async () => {
+    const sessionId = 'postagent-unsupported-estimate-service-1';
+
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'I need an estimate.',
+        },
+      },
+      makeRes()
+    );
+
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'yes',
+        },
+      },
+      makeRes()
+    );
+
+    const third = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'grout',
+        },
+      },
+      third
+    );
+
+    expect(third.code).toBe(200);
+    const payload = third.payload as { assistant_message: string; state: { mode: string }; next_question?: { key: string } };
+    expect(payload.state.mode).toBe('estimate');
+    expect(payload.assistant_message).toMatch(/only provide instant estimates/i);
+    expect(payload.assistant_message).toMatch(/Residential Windows/i);
+    expect(payload.next_question?.key).toBe('serviceType');
+  });
+
   it('returns ambiguity for range-like numeric input', async () => {
     const sessionId = 'postagent-range-1';
     const schema = await loadSchema();
@@ -330,6 +452,100 @@ describe('POST /api/postagent/estimate', () => {
     const payload = res.payload as { assistant_message: string };
     expect(payload.assistant_message).toMatch(/team member/i);
     expect(payload.assistant_message).toMatch(/call|text|email/i);
+  });
+
+  it('suppresses mid-session greeting reset responses', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    const sessionId = 'postagent-mid-session-greeting-1';
+
+    mockOpenAIMessage('Thanks for reaching out. What can I help with?');
+    const first = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'Hello',
+        },
+      },
+      first
+    );
+    expect(first.code).toBe(200);
+
+    mockOpenAIMessage('Hi, how are you? What can I help you with today?');
+    const second = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'Winnipeg',
+        },
+      },
+      second
+    );
+
+    expect(second.code).toBe(200);
+    const payload = second.payload as { assistant_message: string };
+    expect(payload.assistant_message).not.toMatch(/^hi[,! ]/i);
+    expect(payload.assistant_message.trim().length).toBeGreaterThan(0);
+  });
+
+  it('does not reset to warm greeting on location answer during estimate mode', async () => {
+    const sessionId = 'postagent-estimate-no-greeting-reset-1';
+    const seeded = await estimateAgentRuntime.getSession(sessionId);
+    await estimateAgentRuntime.saveSession({
+      ...seeded,
+      answers: {
+        ...seeded.answers,
+        __session_mode: 'estimate',
+        serviceType: 'window',
+      },
+      mode: 'estimate',
+    });
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'Winnipeg',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { assistant_message: string; state: { mode: string } };
+    expect(payload.state.mode).toBe('estimate');
+    expect(payload.assistant_message).not.toMatch(/^hi[,! ]/i);
+    expect(payload.assistant_message).toMatch(/postal code|zone/i);
+  });
+
+  it('returns bounded schema service catalog for service list questions', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    mockOpenAIMessage('We offer tile and grout cleaning and upholstery.');
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: 'postagent-bounded-services-1',
+          input_text: 'What services do you offer?',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { assistant_message: string };
+    expect(payload.assistant_message).toMatch(/Residential Windows/i);
+    expect(payload.assistant_message).toMatch(/Commercial Windows/i);
+    expect(payload.assistant_message).toMatch(/Carpet Cleaning/i);
+    expect(payload.assistant_message).toMatch(/Post-Construction/i);
+    expect(payload.assistant_message).not.toMatch(/grout|tile|upholstery/i);
   });
 
   it('strips markdown emphasis characters from assistant messages', async () => {
