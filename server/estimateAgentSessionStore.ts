@@ -520,6 +520,12 @@ function saveToMemory(session: EstimateSessionRecord): EstimateSessionRecord {
 }
 
 export async function getSession(sessionId: string): Promise<EstimateSessionRecord> {
+  // When DB writes are failing and we already have a local in-memory snapshot for this
+  // session, prefer it so same-request tool calls do not regress to stale DB rows.
+  if (storageMode === 'memory_fallback' && memoryStore.has(sessionId)) {
+    return loadFromMemory(sessionId);
+  }
+
   const supabase = await getSupabaseAdminClient();
   if (!supabase) {
     setStorageMode('memory_fallback');
