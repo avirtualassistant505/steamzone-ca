@@ -49,6 +49,7 @@ type SessionLoadResult = {
   row: EstimateSessionRecord | null;
   supportsVersion: boolean;
   querySupportsReview: boolean;
+  supportsExtendedColumns: boolean;
 };
 
 function nowIso(): string {
@@ -170,6 +171,19 @@ function isMissingReviewColumnError(message: string): boolean {
   return (
     text.includes('column') &&
     (text.includes('review_notes') || text.includes('review_status')) &&
+    (
+      text.includes('does not exist') ||
+      text.includes("doesn't exist") ||
+      text.includes('unknown column') ||
+      text.includes('could not find')
+    )
+  );
+}
+
+function isMissingColumnError(message: string): boolean {
+  const text = message.toLowerCase();
+  return (
+    text.includes('column') &&
     (
       text.includes('does not exist') ||
       text.includes("doesn't exist") ||
@@ -349,28 +363,35 @@ function asQueryErrorMessage(error: unknown): string | null {
   return message || null;
 }
 
-function queryFallbackOrder(supportsReview: boolean, supportsVersion: boolean): Array<{ columns: string; supportsReview: boolean; supportsVersion: boolean }> {
+function queryFallbackOrder(
+  supportsReview: boolean,
+  supportsVersion: boolean
+): Array<{ columns: string; supportsReview: boolean; supportsVersion: boolean; supportsExtendedColumns: boolean }> {
   if (supportsReview && supportsVersion) {
     return [
       {
         columns: SESSION_COLUMNS_WITH_VERSION_REVIEW,
         supportsReview: true,
         supportsVersion: true,
+        supportsExtendedColumns: true,
       },
       {
         columns: SESSION_COLUMNS_WITH_VERSION_NO_REVIEW,
         supportsReview: false,
         supportsVersion: true,
+        supportsExtendedColumns: true,
       },
       {
         columns: SESSION_COLUMNS_NO_VERSION_REVIEW,
         supportsReview: true,
         supportsVersion: false,
+        supportsExtendedColumns: true,
       },
       {
         columns: SESSION_COLUMNS_LEGACY_NO_REVIEW,
         supportsReview: false,
         supportsVersion: false,
+        supportsExtendedColumns: false,
       },
     ];
   }
@@ -381,11 +402,13 @@ function queryFallbackOrder(supportsReview: boolean, supportsVersion: boolean): 
         columns: SESSION_COLUMNS_WITH_VERSION_NO_REVIEW,
         supportsReview: false,
         supportsVersion: true,
+        supportsExtendedColumns: true,
       },
       {
         columns: SESSION_COLUMNS_LEGACY_NO_REVIEW,
         supportsReview: false,
         supportsVersion: false,
+        supportsExtendedColumns: false,
       },
     ];
   }
@@ -395,11 +418,13 @@ function queryFallbackOrder(supportsReview: boolean, supportsVersion: boolean): 
       columns: SESSION_COLUMNS_NO_VERSION_REVIEW,
       supportsReview: true,
       supportsVersion: false,
+      supportsExtendedColumns: true,
     },
     {
       columns: SESSION_COLUMNS_LEGACY_NO_REVIEW,
       supportsReview: false,
       supportsVersion: false,
+      supportsExtendedColumns: false,
     },
   ];
 }
@@ -425,6 +450,7 @@ async function loadSessionRowFromDbWithSupport(
             row: null,
             supportsVersion: attempt.supportsVersion,
             querySupportsReview: attempt.supportsReview,
+            supportsExtendedColumns: attempt.supportsExtendedColumns,
           };
         }
 
@@ -432,6 +458,7 @@ async function loadSessionRowFromDbWithSupport(
           row: toEstimateSessionRecord(result.data, sessionId),
           supportsVersion: attempt.supportsVersion,
           querySupportsReview: attempt.supportsReview,
+          supportsExtendedColumns: attempt.supportsExtendedColumns,
         };
       }
 
@@ -444,11 +471,17 @@ async function loadSessionRowFromDbWithSupport(
         continue;
       }
 
+      if (isMissingColumnError(normalizedMessage)) {
+        // Legacy schemas may be missing mode/finalize/review columns.
+        continue;
+      }
+
       if (isMissingTableOrTransient(normalizedMessage)) {
         return {
           row: null,
           supportsVersion: attempt.supportsVersion,
           querySupportsReview: attempt.supportsReview,
+          supportsExtendedColumns: attempt.supportsExtendedColumns,
         };
       }
 
@@ -456,17 +489,19 @@ async function loadSessionRowFromDbWithSupport(
         row: null,
         supportsVersion: attempt.supportsVersion,
         querySupportsReview: attempt.supportsReview,
+        supportsExtendedColumns: attempt.supportsExtendedColumns,
       };
     } catch {
       return {
         row: null,
         supportsVersion: attempt.supportsVersion,
         querySupportsReview: attempt.supportsReview,
+        supportsExtendedColumns: attempt.supportsExtendedColumns,
       };
     }
   }
 
-  return { row: null, supportsVersion: true, querySupportsReview: true };
+  return { row: null, supportsVersion: true, querySupportsReview: true, supportsExtendedColumns: true };
 }
 
 function saveToMemory(session: EstimateSessionRecord): EstimateSessionRecord {
@@ -578,7 +613,8 @@ function buildDbPayload(
   session: EstimateSessionRecord,
   includeVersion: boolean,
   version: number,
-  includeReview: boolean
+  includeReview: boolean,
+  includeExtendedColumns: boolean
 ): Record<string, unknown> {
   const payload = {
     session_id: session.session_id,
@@ -586,14 +622,17 @@ function buildDbPayload(
     asked_keys: session.asked_keys,
     transcript: session.transcript,
     last_question_key: session.last_question_key,
-    mode: session.mode,
-    processed_turn_ids: session.processed_turn_ids,
-    finalized_record_id: session.finalized_record_id,
-    finalized_quote_hash: session.finalized_quote_hash,
-    finalized_at: session.finalized_at,
     created_at: session.created_at,
     updated_at: session.updated_at,
   } as Record<string, unknown>;
+
+  if (includeExtendedColumns) {
+    payload.mode = session.mode;
+    payload.processed_turn_ids = session.processed_turn_ids;
+    payload.finalized_record_id = session.finalized_record_id;
+    payload.finalized_quote_hash = session.finalized_quote_hash;
+    payload.finalized_at = session.finalized_at;
+  }
 
   if (includeReview) {
     payload.review_notes = session.review_notes;
@@ -634,7 +673,8 @@ export async function saveSession(session: EstimateSessionRecord): Promise<Estim
         current,
         loaded.supportsVersion,
         loaded.supportsVersion ? nextVersion : coerceVersion(current.version),
-        loaded.querySupportsReview
+        loaded.querySupportsReview,
+        loaded.supportsExtendedColumns
       );
       const payloadWithoutReview =
         loaded.querySupportsReview &&
@@ -642,7 +682,8 @@ export async function saveSession(session: EstimateSessionRecord): Promise<Estim
           current,
           loaded.supportsVersion,
           loaded.supportsVersion ? nextVersion : coerceVersion(current.version),
-          false
+          false,
+          loaded.supportsExtendedColumns
         );
 
       try {
@@ -700,8 +741,10 @@ export async function saveSession(session: EstimateSessionRecord): Promise<Estim
 
     if (!loaded.supportsVersion) {
       const merged = mergeSessionRows(latest, current);
-      const payload = buildDbPayload(merged, false, merged.version, loaded.querySupportsReview);
-      const payloadWithoutReview = loaded.querySupportsReview && buildDbPayload(merged, false, merged.version, false);
+      const payload = buildDbPayload(merged, false, merged.version, loaded.querySupportsReview, loaded.supportsExtendedColumns);
+      const payloadWithoutReview =
+        loaded.querySupportsReview &&
+        buildDbPayload(merged, false, merged.version, false, loaded.supportsExtendedColumns);
 
       try {
         const performUpsert = async (data: Record<string, unknown>) =>
@@ -750,11 +793,12 @@ export async function saveSession(session: EstimateSessionRecord): Promise<Estim
     const merged = mergeSessionRows(latest, current);
     const expectedVersion = latest.version;
     const nextVersion = expectedVersion + 1;
-    const payloadWithoutReview =
-      loaded.querySupportsReview && buildDbPayload(merged, true, nextVersion, false);
+      const payloadWithoutReview =
+        loaded.querySupportsReview &&
+        buildDbPayload(merged, true, nextVersion, false, loaded.supportsExtendedColumns);
 
     try {
-      const payload = buildDbPayload(merged, true, nextVersion, loaded.querySupportsReview);
+      const payload = buildDbPayload(merged, true, nextVersion, loaded.querySupportsReview, loaded.supportsExtendedColumns);
 
       const { data, error } = await supabase
         .from(TABLE_NAME)
