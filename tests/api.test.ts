@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import quoteHandler from '../api/quote';
 import estimateAgentChatHandler from '../api/estimate-agent/chat';
 import transcriptsCleanupHandler from '../api/transcripts-cleanup';
+import transcriptsGetHandler from '../api/transcripts-get';
+import { appendConversationTurn } from '../server/conversationLogStore';
 
 interface MockRes {
   code: number;
@@ -183,5 +185,66 @@ describe('API routes', () => {
     expect(res.code).toBe(400);
     const payload = res.payload as { message: string };
     expect(payload.message).toMatch(/confirm=\"cleanup\"/i);
+  });
+
+  it('GET /api/transcripts-get hides assistant-only bootstrap sessions by default', async () => {
+    const bootstrapSessionId = `bootstrap-only-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const normalSessionId = `normal-session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const base = Date.now();
+
+    await appendConversationTurn(bootstrapSessionId, {
+      role: 'assistant',
+      content: 'Hi there, thanks for reaching out to Steam Zone. How can I help today?',
+      at: new Date(base).toISOString(),
+      channel: 'web',
+    });
+
+    await appendConversationTurn(normalSessionId, {
+      role: 'assistant',
+      content: 'Hi there, thanks for reaching out to Steam Zone. How can I help today?',
+      at: new Date(base + 1000).toISOString(),
+      channel: 'web',
+    });
+    await appendConversationTurn(normalSessionId, {
+      role: 'user',
+      content: 'I need a quote for windows.',
+      at: new Date(base + 2000).toISOString(),
+      channel: 'web',
+    });
+
+    const filteredRes = makeRes();
+    await transcriptsGetHandler(
+      {
+        method: 'GET',
+        query: {
+          limit: '100',
+        },
+      },
+      filteredRes
+    );
+
+    expect(filteredRes.code).toBe(200);
+    const filteredPayload = filteredRes.payload as { sessions: Array<{ session_id: string }>; storage_mode: string };
+    const filteredIds = filteredPayload.sessions.map((item) => item.session_id);
+    expect(filteredIds).toContain(normalSessionId);
+    expect(filteredIds).not.toContain(bootstrapSessionId);
+
+    const includeRes = makeRes();
+    await transcriptsGetHandler(
+      {
+        method: 'GET',
+        query: {
+          limit: '100',
+          include_bootstrap_only: 'true',
+        },
+      },
+      includeRes
+    );
+
+    expect(includeRes.code).toBe(200);
+    const includePayload = includeRes.payload as { sessions: Array<{ session_id: string }>; storage_mode: string };
+    const includeIds = includePayload.sessions.map((item) => item.session_id);
+    expect(includeIds).toContain(normalSessionId);
+    expect(includeIds).toContain(bootstrapSessionId);
   });
 });

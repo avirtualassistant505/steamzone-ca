@@ -123,6 +123,17 @@ function summarizeSession(session: {
   };
 }
 
+function isAssistantOnlyStarterSession(session: {
+  transcript: Array<{ role: Role; content: string; at: string; channel?: string; reasoning?: string }>;
+}): boolean {
+  const turns = toConversationTurns(session.transcript || []);
+  if (turns.length !== 1) {
+    return false;
+  }
+
+  return turns[0]?.role === 'assistant';
+}
+
 export default async function handler(req: ApiRequest, res: ApiResponse): Promise<void> {
   if (req.method !== 'GET') {
     res.status(405).json({ message: 'Method not allowed.' });
@@ -134,6 +145,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     const rawStatus = asText(req.query?.status);
     const limitRaw = Number(asText(req.query?.limit) || '100');
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.round(limitRaw))) : 100;
+    const includeStarterOnlyRaw = asText(req.query?.include_bootstrap_only).toLowerCase();
+    const includeStarterOnly =
+      includeStarterOnlyRaw === '1' ||
+      includeStarterOnlyRaw === 'true' ||
+      includeStarterOnlyRaw === 'yes';
     const normalizedStatus =
       rawStatus === 'processed' || rawStatus === 'ready' || rawStatus === 'unprocessed' ? rawStatus : undefined;
 
@@ -158,9 +174,15 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       return;
     }
 
-    const sessions = await listConversationSessions(limit, normalizedStatus);
+    const fetchLimit = includeStarterOnly ? limit : Math.min(500, Math.max(limit * 5, limit));
+    const sessions = await listConversationSessions(fetchLimit, normalizedStatus);
     const storageMode = getConversationStorageMode();
-    const summaries = sessions
+    const filteredSessions = includeStarterOnly
+      ? sessions
+      : sessions.filter((session) => !isAssistantOnlyStarterSession({
+          transcript: session.transcript as Array<{ role: Role; content: string; at: string; channel?: string; reasoning?: string }>,
+        }));
+    const summaries = filteredSessions
       .filter((session) => session.session_id)
       .map((session) =>
         summarizeSession({
@@ -172,7 +194,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
           review_status: session.review_status,
           review_notes: session.review_notes,
         })
-      );
+      )
+      .slice(0, limit);
 
     res.status(200).json({ sessions: summaries, storage_mode: storageMode });
   } catch (error) {
