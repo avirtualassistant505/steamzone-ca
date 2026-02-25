@@ -28,6 +28,12 @@ export interface PostagentEstimateRequest {
   input_text: string;
   channel?: PostagentChannel;
   turn_id?: string;
+  state_hint?: {
+    answers?: Record<string, unknown>;
+    asked_keys?: string[];
+    last_question_key?: string | null;
+    mode?: 'support' | 'estimate' | 'handoff';
+  };
   metadata?: Record<string, unknown>;
 }
 
@@ -39,6 +45,7 @@ export interface PostagentEstimateResponse {
     answers: Record<string, unknown>;
     asked_keys: string[];
     last_question_key: string | null;
+    mode: 'support' | 'estimate' | 'handoff';
     done: boolean;
   };
   quote: unknown | null;
@@ -1063,11 +1070,19 @@ function summarizeStateForResponse(state: {
   answers: Record<string, unknown>;
   asked_keys: string[];
   last_question_key: string | null;
-}, done: boolean) {
+  mode?: 'support' | 'estimate' | 'handoff';
+}, done: boolean): {
+  answers: Record<string, unknown>;
+  asked_keys: string[];
+  last_question_key: string | null;
+  mode: 'support' | 'estimate' | 'handoff';
+  done: boolean;
+} {
   return {
     answers: sanitizedAnswersForClient(state.answers),
     asked_keys: state.asked_keys,
     last_question_key: state.last_question_key,
+    mode: state.mode === 'estimate' || state.mode === 'handoff' ? state.mode : 'support',
     done,
   };
 }
@@ -1595,8 +1610,43 @@ export async function runEstimateAgentCore(
   const inputText = String(request.input_text || '').trim() || DEFAULT_USER_START;
   const channel = request.channel;
   const turnId = readTurnId(request);
+  let initialSession = await runtime.getSession(sessionId);
+  const stateHint = request.state_hint;
+  const hintedAnswers = asRecord(stateHint?.answers);
+  const hintedAskedKeys = Array.isArray(stateHint?.asked_keys)
+    ? stateHint!.asked_keys
+        .map((entry) => String(entry ?? '').trim())
+        .filter((entry, index, list) => entry.length > 0 && list.indexOf(entry) === index)
+    : [];
+  const hintedLastQuestion =
+    typeof stateHint?.last_question_key === 'string' && stateHint.last_question_key.trim().length > 0
+      ? stateHint.last_question_key.trim()
+      : null;
+  const hintedMode =
+    stateHint?.mode === 'estimate' || stateHint?.mode === 'handoff' || stateHint?.mode === 'support'
+      ? stateHint.mode
+      : undefined;
+  const serverSessionIsEmpty =
+    Object.keys(initialSession.answers ?? {}).length === 0 &&
+    (initialSession.asked_keys?.length ?? 0) === 0 &&
+    (initialSession.transcript?.length ?? 0) === 0;
 
-  const initialSession = await runtime.getSession(sessionId);
+  if (serverSessionIsEmpty && (hintedAnswers || hintedAskedKeys.length > 0 || hintedLastQuestion || hintedMode)) {
+    const hydratedAnswers = {
+      ...initialSession.answers,
+      ...(hintedAnswers ?? {}),
+    };
+    if (hintedMode === 'estimate' || hintedMode === 'handoff' || hintedMode === 'support') {
+      hydratedAnswers['__session_mode'] = hintedMode;
+    }
+    initialSession = await runtime.saveSession({
+      ...initialSession,
+      answers: hydratedAnswers,
+      asked_keys: hintedAskedKeys.length > 0 ? hintedAskedKeys : initialSession.asked_keys,
+      last_question_key: hintedLastQuestion ?? initialSession.last_question_key,
+      mode: hintedMode ?? initialSession.mode,
+    });
+  }
   let mode = getSessionMode(initialSession);
   const alreadyProcessed = turnId ? readProcessedTurnIds(initialSession).includes(turnId) : false;
 
@@ -1620,6 +1670,7 @@ export async function runEstimateAgentCore(
           answers: initialSession.answers,
           asked_keys: initialSession.asked_keys,
           last_question_key: initialSession.last_question_key,
+          mode,
         },
         done
       ),
@@ -1777,6 +1828,7 @@ export async function runEstimateAgentCore(
         answers: finalState.answers,
         asked_keys: finalState.asked_keys,
         last_question_key: finalState.last_question_key,
+        mode: finalState.mode,
       },
       done
     ),
@@ -1867,6 +1919,7 @@ export async function handlerForEstimateAgentPost(
       input_text: inputText,
       channel: (payload?.channel as PostagentChannel | undefined) ?? 'web',
       turn_id: rawTurnId || undefined,
+      state_hint: asRecord(payload?.state_hint) as PostagentEstimateRequest['state_hint'],
       metadata: asRecord(payload?.metadata) ?? {},
     });
 

@@ -30,6 +30,7 @@ interface AgentState {
   answers: Record<string, unknown>;
   asked_keys: string[];
   last_question_key: string | null;
+  mode?: 'support' | 'estimate' | 'handoff';
 }
 
 interface InputUiHint {
@@ -559,6 +560,15 @@ export default function EstimateBotLabPage() {
           input_text: trimmed || WARM_OPENER,
           channel: requestedChannel,
           turn_id: newMessageId(),
+          state_hint:
+            state && !isVoiceTurn
+              ? {
+                  answers: state.answers,
+                  asked_keys: state.asked_keys,
+                  last_question_key: state.last_question_key,
+                  mode: state.mode ?? (estimateEngaged ? 'estimate' : 'support'),
+                }
+              : undefined,
           metadata: {
             request_id: requestId,
           },
