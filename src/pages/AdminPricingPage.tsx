@@ -2605,8 +2605,14 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
               )}
               {conversationStorageMode === 'memory_fallback' && (
                 <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                  Logs are currently using memory fallback, not database persistence. Configure `SUPABASE_URL` and
-                  `SUPABASE_SERVICE_ROLE_KEY` in Vercel to keep logs across deployments/invocations.
+                  Logs are currently using memory fallback, not database persistence.
+                  {' '}
+                  {supabaseDiagResult
+                    ? supabaseDiagResult.remediationHint ||
+                      (supabaseDiagResult.config.hasUrl && supabaseDiagResult.config.hasServiceRoleKey
+                        ? 'Supabase env vars are present, so the issue is likely missing tables/columns. Run Supabase Diagnostics and apply the SQL migrations shown there.'
+                        : 'Configure SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel, then redeploy.')
+                    : 'Run Supabase Diagnostics below to see whether env vars are missing or migrations are incomplete.'}
                 </p>
               )}
 

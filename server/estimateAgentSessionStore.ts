@@ -584,6 +584,12 @@ export async function listSessions(limit = 100): Promise<EstimateSessionRecord[]
           continue;
         }
 
+        if (isMissingColumnError(message)) {
+          // Legacy table shape may not include mode/finalize/review/version fields.
+          // Keep probing until we reach the legacy-safe select list.
+          continue;
+        }
+
         setStorageMode('memory_fallback');
         return Array.from(memoryStore.values())
           .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
