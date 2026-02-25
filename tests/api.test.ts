@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import quoteHandler from '../api/quote';
 import estimateAgentChatHandler from '../api/estimate-agent/chat';
+import transcriptsCleanupHandler from '../api/transcripts-cleanup';
 
 interface MockRes {
   code: number;
@@ -143,5 +144,44 @@ describe('API routes', () => {
     expect(payload.state).toBeTruthy();
     expect(Array.isArray(payload.state.asked_keys)).toBe(true);
     expect(typeof payload.done).toBe('boolean');
+  });
+
+  it('POST /api/transcripts-cleanup defaults to dry_run and returns a result', async () => {
+    const res = makeRes();
+    await transcriptsCleanupHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: `cleanup-api-${Date.now()}`,
+          min_turns: 1,
+          max_turns: 10,
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { dry_run: boolean; scanned: number };
+    expect(payload.dry_run).toBe(true);
+    expect(payload.scanned).toBeGreaterThanOrEqual(1);
+  });
+
+  it('POST /api/transcripts-cleanup rejects execute mode without explicit confirmation', async () => {
+    const res = makeRes();
+    await transcriptsCleanupHandler(
+      {
+        method: 'POST',
+        body: {
+          dry_run: false,
+          session_id: `cleanup-api-${Date.now()}`,
+          min_turns: 1,
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(400);
+    const payload = res.payload as { message: string };
+    expect(payload.message).toMatch(/confirm=\"cleanup\"/i);
   });
 });
