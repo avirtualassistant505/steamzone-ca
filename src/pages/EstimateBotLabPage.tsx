@@ -541,6 +541,8 @@ export default function EstimateBotLabPage() {
     if (!effectiveSessionId) {
       throw new Error('Missing session id for message.');
     }
+    const isStaleRequest = () =>
+      requestId !== requestSequenceRef.current || requestController.signal.aborted;
 
     if (!options?.silentUserBubble && trimmed) {
       setMessages((prev) => [...prev, { id: newMessageId(), role: 'user', content: trimmed }]);
@@ -580,6 +582,9 @@ export default function EstimateBotLabPage() {
 
       if (preThinkingMs > 0) {
         await sleep(preThinkingMs);
+        if (isStaleRequest()) {
+          return;
+        }
         setIsThinking(true);
       }
 
@@ -590,7 +595,7 @@ export default function EstimateBotLabPage() {
         throw new Error(parsed.textError ?? payload?.message ?? 'Unable to reach estimate agent.');
       }
 
-      if (requestId !== requestSequenceRef.current || requestController.signal.aborted) {
+      if (isStaleRequest()) {
         return;
       }
 
@@ -606,6 +611,13 @@ export default function EstimateBotLabPage() {
       const cappedDelayMs = isVoiceTurn ? delayMs : Math.min(delayMs, 900);
       if (cappedDelayMs > 0) {
         await sleep(cappedDelayMs);
+        if (isStaleRequest()) {
+          return;
+        }
+      }
+
+      if (isStaleRequest()) {
+        return;
       }
 
       setMessages((prev) => [...prev, { id: newMessageId(), role: 'assistant', content: assistantText }]);
@@ -654,11 +666,11 @@ export default function EstimateBotLabPage() {
         }
       }
 
-      if (requestId !== requestSequenceRef.current || requestController.signal.aborted) {
+      if (isStaleRequest()) {
         return;
       }
     } catch (error) {
-      if (error instanceof DOMException || requestController.signal.aborted) {
+      if (error instanceof DOMException || isStaleRequest()) {
         return;
       }
 
@@ -677,8 +689,10 @@ export default function EstimateBotLabPage() {
         await speakText(spokenFallback);
       }
     } finally {
-      setIsThinking(false);
-      setIsBusy(false);
+      if (requestId === requestSequenceRef.current) {
+        setIsThinking(false);
+        setIsBusy(false);
+      }
       if (activeRequestRef.current === requestController) {
         activeRequestRef.current = null;
       }
