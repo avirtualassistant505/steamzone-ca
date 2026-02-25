@@ -57,7 +57,7 @@ async function completeWindowAnswers(sessionId: string): Promise<void> {
   await runEstimateAgentCore({
     session_id: sessionId,
     input_text:
-      'Need window cleaning. postal code R5G2X3, zone zoneA, storey bungalow, size bracket under1000, scope exterior, screens none, tracks basic, hard reach no, hard water no, construction debris no, sliding removal none, patio doors none, skylights none, railing glass none, french panes none, sunroom no, walkout no, my name is Jane Test, phone 2365066570, email jane@example.com, consent yes',
+      'I need a quote for window cleaning. postal code R5G2X3, zone zoneA, storey bungalow, size bracket under1000, scope exterior, screens none, tracks basic, hard reach no, hard water no, construction debris no, sliding removal none, patio doors none, skylights none, railing glass none, french panes none, sunroom no, walkout no, my name is Jane Test, phone 2365066570, email jane@example.com, consent yes',
     channel: 'test',
   });
 }
@@ -88,6 +88,50 @@ describe('POST /api/postagent/estimate', () => {
     expect(payload.session_id).toBeTruthy();
     expect(payload.assistant_message).toMatch(/service|estimate/i);
     expect(payload.done).toBe(false);
+  });
+
+  it('returns assistant bootstrap opener without creating a fake user opener turn', async () => {
+    const sessionId = `postagent-bootstrap-${Date.now()}`;
+    const res = makeRes();
+
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: '',
+          bootstrap: true,
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { assistant_message: string };
+    expect(payload.assistant_message).toMatch(/thanks for reaching out to Steam Zone/i);
+
+    const session = await estimateAgentRuntime.getSession(sessionId);
+    expect(session.transcript.length).toBeGreaterThan(0);
+    expect(session.transcript[0]?.role).toBe('assistant');
+    expect(session.transcript[0]?.content).toMatch(/thanks for reaching out to Steam Zone/i);
+  });
+
+  it('rejects empty input when bootstrap is false', async () => {
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: `postagent-empty-${Date.now()}`,
+          input_text: '',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(400);
+    const payload = res.payload as { message: string };
+    expect(payload.message).toMatch(/input_text is required/i);
   });
 
   it('extracts multiple answers from a single turn when possible', async () => {
@@ -411,6 +455,18 @@ describe('POST /api/postagent/estimate', () => {
     }
   });
 
+  it('clears pending confirmation metadata on completed estimates', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    mockOpenAIMessage('Thanks, I have that.');
+    const sessionId = `postagent-clear-pending-complete-${Date.now()}`;
+    await completeWindowAnswers(sessionId);
+
+    const complete = await estimateAgentRuntime.getSession(sessionId);
+    expect(complete.answers.__pending_estimate_confirmation).toBe(false);
+    expect(complete.answers.__pending_estimate_context).toBeNull();
+    expect(complete.answers.__pending_estimate_confirmation_at).toBeNull();
+  });
+
   it('uses Steam Zone FAQ knowledge for direct business info questions', async () => {
     process.env.OPENAI_API_KEY = 'test-key';
     mockOpenAIMessage('Hi, how are you? What city/area are you looking for?');
@@ -452,6 +508,28 @@ describe('POST /api/postagent/estimate', () => {
     const payload = res.payload as { assistant_message: string };
     expect(payload.assistant_message).toMatch(/team member/i);
     expect(payload.assistant_message).toMatch(/call|text|email/i);
+  });
+
+  it('responds naturally for vague conversational prompts without callback fallback', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    mockOpenAIMessage("I don't have that in QA.");
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: `postagent-vague-${Date.now()}`,
+          input_text: 'What is happening?',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { assistant_message: string };
+    expect(payload.assistant_message).toMatch(/here and ready to help/i);
+    expect(payload.assistant_message).not.toMatch(/team member follow up|best contact/i);
   });
 
   it('suppresses mid-session greeting reset responses', async () => {
@@ -546,6 +624,111 @@ describe('POST /api/postagent/estimate', () => {
     expect(payload.assistant_message).toMatch(/Carpet Cleaning/i);
     expect(payload.assistant_message).toMatch(/Post-Construction/i);
     expect(payload.assistant_message).not.toMatch(/grout|tile|upholstery/i);
+  });
+
+  it('does not auto-fill contact.phone from square footage-style numeric tokens', async () => {
+    const sessionId = `postagent-phone-overfill-${Date.now()}`;
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'serviceType', 'postConstruction');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'postalCode', 'R5G 2X3');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'zone', 'zoneA');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'projectType', 'commercial');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'buildType', 'newBuild');
+
+    const schema = await loadSchema();
+    const state = await estimateAgentRuntime.toolGetState(sessionId);
+    const next = await estimateAgentRuntime.peekNextQuestion(sessionId);
+
+    const result = await normalizeAndSetAnswersFromInput(
+      estimateAgentRuntime,
+      sessionId,
+      '1000to2500',
+      schema,
+      state,
+      next
+    );
+
+    const updated = await estimateAgentRuntime.toolGetState(sessionId);
+    expect(result.applied.some((entry) => entry.field_key === 'sqftBracket')).toBe(true);
+    expect(updated.answers['contact.phone']).toBeUndefined();
+    expect((updated.answers.contact as { phone?: string } | undefined)?.phone).toBeUndefined();
+  });
+
+  it('limits simple yes/no replies to current question instead of boolean fan-out', async () => {
+    const sessionId = `postagent-yes-fanout-${Date.now()}`;
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'serviceType', 'postConstruction');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'postalCode', 'R5G 2X3');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'zone', 'zoneA');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'projectType', 'commercial');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'buildType', 'newBuild');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'sqftBracket', '1000to2500');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'floors', 2);
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'stage', 'light');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'interiorWindows', 'large');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'scraping', 'lots');
+    const baseState = await estimateAgentRuntime.toolGetState(sessionId);
+    await estimateAgentRuntime.saveSession({
+      ...baseState,
+      last_question_key: 'insideCabinets',
+      asked_keys: baseState.asked_keys.includes('insideCabinets')
+        ? baseState.asked_keys
+        : [...baseState.asked_keys, 'insideCabinets'],
+    });
+
+    const schema = await loadSchema();
+    const state = await estimateAgentRuntime.toolGetState(sessionId);
+    const next = {
+      done: false,
+      next_field_key: 'insideCabinets',
+      question_text: 'Inside cabinets / drawers? (Yes/No)',
+    };
+
+    const result = await normalizeAndSetAnswersFromInput(
+      estimateAgentRuntime,
+      sessionId,
+      'yes',
+      schema,
+      state,
+      next
+    );
+
+    expect(result.applied.length).toBe(1);
+    expect(result.applied[0]?.field_key).toBe('insideCabinets');
+
+    const updated = await estimateAgentRuntime.toolGetState(sessionId);
+    expect(updated.answers.insideCabinets).toBe(true);
+    expect(updated.answers.multiTenantAccess).toBeUndefined();
+    expect(updated.answers.specialDetailing).toBeUndefined();
+    expect(updated.answers.appliances).toBeUndefined();
+  });
+
+  it('clears pending estimate confirmation metadata after entering estimate mode', async () => {
+    const sessionId = `postagent-clear-pending-${Date.now()}`;
+
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'I would like an estimate.',
+        },
+      },
+      makeRes()
+    );
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'yes',
+        },
+      },
+      makeRes()
+    );
+
+    const session = await estimateAgentRuntime.getSession(sessionId);
+    expect(session.answers.__pending_estimate_confirmation).toBe(false);
+    expect(session.answers.__pending_estimate_context).toBeNull();
+    expect(session.answers.__pending_estimate_confirmation_at).toBeNull();
   });
 
   it('strips markdown emphasis characters from assistant messages', async () => {

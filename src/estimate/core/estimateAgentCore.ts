@@ -27,6 +27,7 @@ export type PostagentChannel = 'web' | 'voice' | 'sms' | 'test';
 export interface PostagentEstimateRequest {
   session_id?: string;
   input_text: string;
+  bootstrap?: boolean;
   channel?: PostagentChannel;
   turn_id?: string;
   state_hint?: {
@@ -395,6 +396,7 @@ const TOOL_DEFS_INFO_ONLY = [
 const CORE_PROMPT_PREFIX = DEFAULT_AGENT_SYSTEM_PROMPT;
 
 const DEFAULT_USER_START = 'Hi, how are you? What can I help you with today?';
+const DEFAULT_ASSISTANT_BOOTSTRAP_OPENER = 'Hi there, thanks for reaching out to Steam Zone. How can I help today?';
 const CORRECTION_CUES = /\b(actually|instead|change|replace|correction|corrections|update|correct|correcting)\b/i;
 const DIRECT_ESTIMATE_INTENT_CUES =
   /\b(estimate|estimates|quote|quotes|quotation|quotations|pricing|price|cost|costs|how much)\b/i;
@@ -405,6 +407,8 @@ const AFFIRMATIVE_INTENT_CUES =
 const NEGATIVE_INTENT_CUES = /\b(no|nope|nah|not now|later|never mind|nevermind|cancel|stop)\b/i;
 const WANTS_SERVICES_LIST_CUES =
   /\b(what services|which services|services do you offer|what do you offer|what can you clean)\b/i;
+const GENERIC_CONVERSATION_PROMPT_CUES =
+  /\b(what is happening|what's happening|whats happening|what.?s up|how.?s it going|how is it going|hello|hi there|hey there)\b/i;
 const UNSUPPORTED_ESTIMATE_SERVICE_CUES =
   /\b(grout|tile|tiles|upholstery|sofa|couch|mattress|duct|chimney|pressure wash|power wash)\b/i;
 const PENDING_ESTIMATE_CONFIRMATION_KEY = '__pending_estimate_confirmation';
@@ -659,11 +663,12 @@ function withPendingEstimateConfirmation(
 function clearPendingEstimateConfirmation(
   answers: Record<string, unknown>
 ): Record<string, unknown> {
-  const next = { ...answers };
-  delete next[PENDING_ESTIMATE_CONFIRMATION_KEY];
-  delete next[PENDING_ESTIMATE_CONFIRMATION_AT_KEY];
-  delete next[PENDING_ESTIMATE_CONFIRMATION_CONTEXT_KEY];
-  return next;
+  return {
+    ...answers,
+    [PENDING_ESTIMATE_CONFIRMATION_KEY]: false,
+    [PENDING_ESTIMATE_CONFIRMATION_AT_KEY]: null,
+    [PENDING_ESTIMATE_CONFIRMATION_CONTEXT_KEY]: null,
+  };
 }
 
 function readProcessedTurnIds(state: SessionRecord): string[] {
@@ -774,6 +779,14 @@ function hasNegativeIntent(inputText: string): boolean {
 
 function asksForServiceCatalog(inputText: string): boolean {
   return WANTS_SERVICES_LIST_CUES.test(inputText);
+}
+
+function isGenericConversationPrompt(inputText: string): boolean {
+  const normalized = inputText.trim().toLowerCase();
+  if (!normalized) return false;
+  if (GENERIC_CONVERSATION_PROMPT_CUES.test(normalized)) return true;
+  if (normalized.length <= 24 && /\b(what|how|hi|hello|hey)\b/.test(normalized)) return true;
+  return false;
 }
 
 function mentionsUnsupportedEstimateService(inputText: string): boolean {
@@ -999,6 +1012,13 @@ function applyResponseGuardrails(
     likelyInfoQuestion &&
     !estimateIntent &&
     faqMatches.length === 0 &&
+    isGenericConversationPrompt(inputText)
+  ) {
+    next = "I'm here and ready to help. What can I help you with today?";
+  } else if (
+    likelyInfoQuestion &&
+    !estimateIntent &&
+    faqMatches.length === 0 &&
     !hasFollowUpOffer(next)
   ) {
     next =
@@ -1105,11 +1125,32 @@ const STRING_HINTS: Record<string, string[]> = {
   estimateMode: ['estimate mode', 'type', 'by rooms', 'by sqft', 'square foot'],
 };
 
+const BOOLEAN_HINTS: Record<string, string[]> = {
+  hardToReach: ['hard', 'ladder', 'reach'],
+  hardWater: ['hard water', 'mineral', 'spot'],
+  constructionDebris: ['construction', 'debris'],
+  sunroom: ['sunroom'],
+  walkout: ['walkout'],
+  multiTenantAccess: ['multi tenant', 'tenant', 'occupied'],
+  afterHours: ['after hours', 'after-hours', 'evening'],
+  elevatorAccess: ['elevator'],
+  furnitureMoving: ['furniture', 'move furniture'],
+  petTreatment: ['pet', 'urine'],
+  stainProtection: ['stain protection', 'protectant'],
+  deodorizer: ['deodorizer', 'odor', 'smell'],
+  appliances: ['appliances', 'fridge', 'stove'],
+  insideCabinets: ['cabinet', 'drawer'],
+  specialDetailing: ['special detailing', 'detailing'],
+};
+
 function fieldHasExplicitSignal(field: SchemaField, raw: string, state: SessionRecord): boolean {
   const lowered = raw.toLowerCase();
 
   if (field.type === 'boolean') {
-    return hasBooleanCue(raw);
+    if (!hasBooleanCue(raw)) return false;
+    if (state.last_question_key === field.key) return true;
+    const hints = BOOLEAN_HINTS[field.key] ?? [];
+    return hints.some((hint) => lowered.includes(hint));
   }
 
   if (field.type === 'postalCode') {
@@ -1121,7 +1162,9 @@ function fieldHasExplicitSignal(field: SchemaField, raw: string, state: SessionR
   }
 
   if (field.type === 'phone') {
-    return /\d/.test(raw);
+    if (!/\d/.test(raw)) return false;
+    if (state.last_question_key === field.key) return true;
+    return (STRING_HINTS[field.key] ?? []).some((word) => lowered.includes(word));
   }
 
   if (field.type === 'select') {
@@ -1203,6 +1246,24 @@ function collectCandidateFieldKeys(
   }
 
   return Array.from(set);
+}
+
+function isSimpleReplyInput(inputText: string): boolean {
+  const trimmed = inputText.trim();
+  if (!trimmed) return false;
+  if (trimmed.length > 28) return false;
+  if (/[,:;\n]/.test(trimmed)) return false;
+  const tokens = trimmed.split(/\s+/).filter(Boolean);
+  return tokens.length <= 2;
+}
+
+function isExplicitMultiAnswerInput(inputText: string): boolean {
+  const lowered = inputText.toLowerCase();
+  if (/[,\n;]/.test(lowered)) return true;
+  if (/\b(and|also|plus)\b/.test(lowered) && /\b(postal|zone|email|phone|name|service|scope|screens|tracks)\b/.test(lowered)) {
+    return true;
+  }
+  return false;
 }
 
 function summarizeStateForResponse(state: {
@@ -1519,13 +1580,32 @@ export async function normalizeAndSetAnswersFromInput(
   nextHint?: NextHint
 ): Promise<{ applied: Array<{ field_key: string; normalized_value: unknown }>; ambiguity: string[] }> {
   const lower = inputText.toLowerCase();
-  const candidates = collectCandidateFieldKeys(state, schema, nextHint?.done ? undefined : nextHint?.next_field_key, lower);
+  const initialCandidates = collectCandidateFieldKeys(
+    state,
+    schema,
+    nextHint?.done ? undefined : nextHint?.next_field_key,
+    lower
+  );
+  const simpleReply = isSimpleReplyInput(inputText);
+  const explicitMulti = isExplicitMultiAnswerInput(inputText);
+  const strictTargets = [state.last_question_key, nextHint?.next_field_key]
+    .map((value) => String(value ?? '').trim())
+    .filter((value, index, list) => value.length > 0 && list.indexOf(value) === index);
+
+  const candidates =
+    simpleReply && !explicitMulti && strictTargets.length > 0
+      ? strictTargets
+      : initialCandidates;
 
   const ambiguity: string[] = [];
   const applied: Array<{ field_key: string; normalized_value: unknown }> = [];
+  const maxApplies = simpleReply && !explicitMulti ? 1 : 6;
 
   let currentState = state;
   for (const fieldKey of candidates) {
+    if (applied.length >= maxApplies) {
+      break;
+    }
     if (!schema.fields.some((field) => field.key === fieldKey)) {
       continue;
     }
@@ -1759,7 +1839,8 @@ export async function runEstimateAgentCore(
 ): Promise<PostagentEstimateResponse> {
   const runtime = await getRuntime();
   const sessionId = request.session_id?.trim() || newSessionId();
-  const inputText = String(request.input_text || '').trim() || DEFAULT_USER_START;
+  const inputText = String(request.input_text || '').trim();
+  const isBootstrap = request.bootstrap === true;
   const channel = request.channel;
   const turnId = readTurnId(request);
   let initialSession = await runtime.getSession(sessionId);
@@ -1799,6 +1880,39 @@ export async function runEstimateAgentCore(
       mode: hintedMode ?? initialSession.mode,
     });
   }
+
+  if (isBootstrap && !inputText) {
+    const priorAssistant = latestAssistantText(initialSession.transcript);
+    const openerText = priorAssistant || DEFAULT_ASSISTANT_BOOTSTRAP_OPENER;
+    if (!priorAssistant) {
+      await runtime.appendTranscript(sessionId, {
+        role: 'assistant',
+        content: openerText,
+        at: nowIso(),
+        channel: channel ?? 'web',
+        reasoning: 'Bootstrap opener for new session.',
+      });
+      initialSession = await runtime.getSession(sessionId);
+    }
+
+    return {
+      session_id: sessionId,
+      assistant_message: openerText,
+      assistant_reasoning: ['Bootstrap opener emitted as assistant turn.'],
+      state: summarizeStateForResponse(
+        {
+          answers: initialSession.answers,
+          asked_keys: initialSession.asked_keys,
+          last_question_key: initialSession.last_question_key,
+          mode: getSessionMode(initialSession),
+        },
+        false
+      ),
+      quote: null,
+      done: false,
+    };
+  }
+
   let mode = getSessionMode(initialSession);
   const alreadyProcessed = turnId ? readProcessedTurnIds(initialSession).includes(turnId) : false;
 
@@ -2008,7 +2122,9 @@ export async function runEstimateAgentCore(
 
   const finalStateBeforeMeta = await runtime.getSession(sessionId);
   const meta = withSessionMode(finalStateBeforeMeta, mode);
-  let patchedAnswers = meta.answers;
+  let patchedAnswers = loopResult.done && mode === 'estimate'
+    ? clearPendingEstimateConfirmation(meta.answers)
+    : meta.answers;
   let patchedProcessedIds = finalStateBeforeMeta.processed_turn_ids ?? [];
   if (turnId) {
     const withTurn = withProcessedTurn(finalStateBeforeMeta, turnId);
@@ -2149,6 +2265,7 @@ export async function handlerForEstimateAgentPost(
   const rawSessionId = String(payload.session_id ?? '').trim();
   const inputText = String(payload.input_text ?? payload.user_message ?? '').trim();
   const rawTurnId = String(payload.turn_id ?? '').trim();
+  const bootstrap = payload.bootstrap === true;
   const hasSession = rawSessionId.length > 0;
 
   if (!createSessionWhenMissing && !hasSession) {
@@ -2156,10 +2273,16 @@ export async function handlerForEstimateAgentPost(
     return;
   }
 
+  if (!bootstrap && !inputText) {
+    res.status(400).json({ message: 'input_text is required.' });
+    return;
+  }
+
   try {
     const response = await runEstimateAgentCore({
       session_id: hasSession ? rawSessionId : undefined,
       input_text: inputText,
+      bootstrap,
       channel: (payload?.channel as PostagentChannel | undefined) ?? 'web',
       turn_id: rawTurnId || undefined,
       state_hint: asRecord(payload?.state_hint) as PostagentEstimateRequest['state_hint'],

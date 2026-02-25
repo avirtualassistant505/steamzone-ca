@@ -75,6 +75,7 @@ type SendMessageOptions = {
   silentUserBubble?: boolean;
   channel?: SupportedChannel;
   sessionId?: string;
+  bootstrap?: boolean;
 };
 
 interface SpeechRecognitionLike {
@@ -133,7 +134,6 @@ function getSpeechRecognitionCtor(): {
 
 const SESSION_STORAGE_KEY = 'steamzone_estimate_bot_lab_session_id';
 const VOICE_SESSION_STORAGE_KEY = 'steamzone_estimate_bot_lab_voice_session_id';
-const WARM_OPENER = 'Hi, how are you? What can I help you with today?';
 
 const ESTIMATE_INTENT_REGEX = /\b(estimate|quote|pricing|price|cost|book|booking|schedule|appointment)\b/i;
 
@@ -515,6 +515,7 @@ export default function EstimateBotLabPage() {
   ): Promise<void> {
     const requestId = ++requestSequenceRef.current;
     const trimmed = userText.trim();
+    const bootstrap = options?.bootstrap === true;
     if (!trimmed && !options?.silentUserBubble) {
       return;
     }
@@ -557,9 +558,10 @@ export default function EstimateBotLabPage() {
         },
         body: JSON.stringify({
           session_id: effectiveSessionId,
-          input_text: trimmed || WARM_OPENER,
+          input_text: bootstrap ? '' : trimmed,
+          bootstrap: bootstrap || undefined,
           channel: requestedChannel,
-          turn_id: newMessageId(),
+          turn_id: bootstrap ? undefined : newMessageId(),
           state_hint:
             state && !isVoiceTurn
               ? {
@@ -694,7 +696,7 @@ export default function EstimateBotLabPage() {
     }
 
     greetedSessionRef.current.add(targetSessionId);
-    void sendMessage(WARM_OPENER, { silentUserBubble: true, channel: 'web', sessionId: targetSessionId });
+    void sendMessage('', { silentUserBubble: true, channel: 'web', sessionId: targetSessionId, bootstrap: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
@@ -752,7 +754,7 @@ export default function EstimateBotLabPage() {
     stopSpeaking();
 
     greetedSessionRef.current.add(id);
-    void sendMessage(WARM_OPENER, { silentUserBubble: true, channel: 'web', sessionId: id });
+    void sendMessage('', { silentUserBubble: true, channel: 'web', sessionId: id, bootstrap: true });
   }
 
   async function copyQuoteSummary(): Promise<void> {
