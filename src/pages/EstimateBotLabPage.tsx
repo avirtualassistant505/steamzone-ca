@@ -289,6 +289,7 @@ export default function EstimateBotLabPage() {
   const [isBusy, setIsBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [state, setState] = useState<AgentState | null>(null);
+  const [stateSessionId, setStateSessionId] = useState<string | null>(null);
   const [quote, setQuote] = useState<QuotePayload | null>(null);
   const [done, setDone] = useState(false);
   const [hint, setHint] = useState<InputUiHint | null>(null);
@@ -541,6 +542,14 @@ export default function EstimateBotLabPage() {
     if (!effectiveSessionId) {
       throw new Error('Missing session id for message.');
     }
+    const canSendStateHint =
+      !bootstrap &&
+      !isVoiceTurn &&
+      Boolean(state) &&
+      typeof stateSessionId === 'string' &&
+      stateSessionId === effectiveSessionId &&
+      effectiveSessionId === sessionIdRef.current;
+    const stateForHint = canSendStateHint ? state : null;
     const isStaleRequest = () =>
       requestId !== requestSequenceRef.current || requestController.signal.aborted;
 
@@ -564,15 +573,15 @@ export default function EstimateBotLabPage() {
           bootstrap: bootstrap || undefined,
           channel: requestedChannel,
           turn_id: bootstrap ? undefined : newMessageId(),
-          state_hint:
-            state && !isVoiceTurn
-              ? {
-                  answers: state.answers,
-                  asked_keys: state.asked_keys,
-                  last_question_key: state.last_question_key,
-                  mode: state.mode ?? (estimateEngaged ? 'estimate' : 'support'),
-                }
-              : undefined,
+          state_hint: stateForHint
+            ? {
+                session_id: stateSessionId,
+                answers: stateForHint.answers,
+                asked_keys: stateForHint.asked_keys,
+                last_question_key: stateForHint.last_question_key,
+                mode: stateForHint.mode ?? (estimateEngaged ? 'estimate' : 'support'),
+              }
+            : undefined,
           metadata: {
             request_id: requestId,
           },
@@ -622,6 +631,7 @@ export default function EstimateBotLabPage() {
 
       setMessages((prev) => [...prev, { id: newMessageId(), role: 'assistant', content: assistantText }]);
       setState(payload.state);
+      setStateSessionId(payload.session_id ?? expectedSessionId);
       setQuote(payload.quote ?? null);
       setDone(Boolean(payload.done));
       setHint(payload.next_question?.input_ui_hint ?? null);
@@ -749,6 +759,7 @@ export default function EstimateBotLabPage() {
     setInput('');
     setErrorMessage('');
     setState(null);
+    setStateSessionId(null);
     setQuote(null);
     setDone(false);
     setHint(null);

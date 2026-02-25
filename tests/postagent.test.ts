@@ -116,6 +116,45 @@ describe('POST /api/postagent/estimate', () => {
     expect(session.transcript[0]?.content).toMatch(/thanks for reaching out to Steam Zone/i);
   });
 
+  it('ignores bootstrap state_hint hydration and keeps new session empty', async () => {
+    const sessionId = `postagent-bootstrap-nohydrate-${Date.now()}`;
+    const res = makeRes();
+
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: '',
+          bootstrap: true,
+          state_hint: {
+            session_id: sessionId,
+            answers: {
+              serviceType: 'window',
+              postalCode: 'R5G 2X3',
+              contact: { email: 'stale@example.com' },
+            },
+            asked_keys: ['serviceType', 'postalCode'],
+            last_question_key: 'zone',
+            mode: 'estimate',
+          },
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { state: { answers: Record<string, unknown>; mode: string } };
+    expect(payload.state.mode).toBe('support');
+    expect(payload.state.answers.serviceType).toBeUndefined();
+    expect(payload.state.answers.postalCode).toBeUndefined();
+
+    const session = await estimateAgentRuntime.getSession(sessionId);
+    expect(session.answers.serviceType).toBeUndefined();
+    expect(session.answers.postalCode).toBeUndefined();
+    expect(session.transcript[0]?.role).toBe('assistant');
+  });
+
   it('rejects empty input when bootstrap is false', async () => {
     const res = makeRes();
     await postagentHandler(
@@ -132,6 +171,46 @@ describe('POST /api/postagent/estimate', () => {
     expect(res.code).toBe(400);
     const payload = res.payload as { message: string };
     expect(payload.message).toMatch(/input_text is required/i);
+  });
+
+  it('ignores state_hint when state_hint.session_id does not match request session_id', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    mockOpenAIMessage('I can help with that.');
+    const sessionId = `postagent-mismatch-hint-${Date.now()}`;
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'What is the temperature today?',
+          state_hint: {
+            session_id: 'different-session-id',
+            answers: {
+              serviceType: 'window',
+              postalCode: 'R5G 2X3',
+              contact: { email: 'stale@example.com' },
+            },
+            asked_keys: ['serviceType', 'postalCode'],
+            last_question_key: 'zone',
+            mode: 'estimate',
+          },
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as {
+      quote: unknown;
+      done: boolean;
+      state: { mode: string; answers: Record<string, unknown> };
+    };
+    expect(payload.done).toBe(false);
+    expect(payload.quote).toBeNull();
+    expect(payload.state.mode).toBe('support');
+    expect(payload.state.answers.serviceType).toBeUndefined();
   });
 
   it('extracts multiple answers from a single turn when possible', async () => {
@@ -237,6 +316,69 @@ describe('POST /api/postagent/estimate', () => {
     expect(nextPayload.assistant_message).toMatch(/postal|address|estimate/i);
   });
 
+  it('does not carry completed estimate state into a brand-new session after bootstrap', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    const oldSessionId = `postagent-old-complete-${Date.now()}`;
+    await completeWindowAnswers(oldSessionId);
+    const oldSession = await estimateAgentRuntime.getSession(oldSessionId);
+    expect(oldSession.answers.serviceType).toBe('window');
+
+    const newSessionId = `postagent-new-clean-${Date.now()}`;
+    const bootstrap = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: newSessionId,
+          input_text: '',
+          bootstrap: true,
+          state_hint: {
+            session_id: oldSessionId,
+            answers: oldSession.answers,
+            asked_keys: oldSession.asked_keys,
+            last_question_key: oldSession.last_question_key,
+            mode: 'estimate',
+          },
+        },
+      },
+      bootstrap
+    );
+    expect(bootstrap.code).toBe(200);
+
+    mockOpenAIMessage('Sure, what can I help with?');
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: newSessionId,
+          input_text: 'What is the temperature today?',
+          state_hint: {
+            session_id: oldSessionId,
+            answers: oldSession.answers,
+            asked_keys: oldSession.asked_keys,
+            last_question_key: oldSession.last_question_key,
+            mode: 'estimate',
+          },
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as {
+      assistant_message: string;
+      quote: unknown;
+      done: boolean;
+      state: { mode: string; answers: Record<string, unknown> };
+    };
+    expect(payload.done).toBe(false);
+    expect(payload.quote).toBeNull();
+    expect(payload.state.mode).toBe('support');
+    expect(payload.state.answers.serviceType).toBeUndefined();
+    expect(payload.assistant_message).not.toMatch(/everything for your estimate|subtotal/i);
+  });
+
   it('handles plural estimate intent by asking deterministic confirmation first', async () => {
     const sessionId = 'postagent-plural-estimate-intent-1';
 
@@ -257,6 +399,45 @@ describe('POST /api/postagent/estimate', () => {
     expect(payload.state.mode).toBe('support');
     expect(payload.state.answers.serviceType).toBeUndefined();
     expect(payload.assistant_message).toMatch(/start.*estimate|estimate.*now/i);
+  });
+
+  it('keeps a freshly bootstrapped session in support mode until estimate is explicitly requested', async () => {
+    process.env.OPENAI_API_KEY = 'test-key';
+    mockOpenAIMessage('Absolutely, what can I help you with?');
+    const sessionId = `postagent-fresh-support-${Date.now()}`;
+
+    const bootstrap = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: '',
+          bootstrap: true,
+        },
+      },
+      bootstrap
+    );
+    expect(bootstrap.code).toBe(200);
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'Do you clean windows for offices?',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { state: { mode: string; answers: Record<string, unknown> }; done: boolean; quote: unknown };
+    expect(payload.state.mode).toBe('support');
+    expect(payload.state.answers.serviceType).toBeUndefined();
+    expect(payload.done).toBe(false);
+    expect(payload.quote).toBeNull();
   });
 
   it('asks confirmation first for aggressive booking signal', async () => {

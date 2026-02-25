@@ -31,6 +31,7 @@ export interface PostagentEstimateRequest {
   channel?: PostagentChannel;
   turn_id?: string;
   state_hint?: {
+    session_id?: string;
     answers?: Record<string, unknown>;
     asked_keys?: string[];
     last_question_key?: string | null;
@@ -1845,18 +1846,27 @@ export async function runEstimateAgentCore(
   const turnId = readTurnId(request);
   let initialSession = await runtime.getSession(sessionId);
   const stateHint = request.state_hint;
-  const hintedAnswers = asRecord(stateHint?.answers);
-  const hintedAskedKeys = Array.isArray(stateHint?.asked_keys)
-    ? stateHint!.asked_keys
-        .map((entry) => String(entry ?? '').trim())
-        .filter((entry, index, list) => entry.length > 0 && list.indexOf(entry) === index)
-    : [];
+  const hintedSessionId =
+    typeof stateHint?.session_id === 'string' && stateHint.session_id.trim().length > 0
+      ? stateHint.session_id.trim()
+      : '';
+  const allowStateHintHydration = !isBootstrap && hintedSessionId.length > 0 && hintedSessionId === sessionId;
+  const hintedAnswers = allowStateHintHydration ? asRecord(stateHint?.answers) : null;
+  const hintedAskedKeys =
+    allowStateHintHydration && Array.isArray(stateHint?.asked_keys)
+      ? stateHint.asked_keys
+          .map((entry) => String(entry ?? '').trim())
+          .filter((entry, index, list) => entry.length > 0 && list.indexOf(entry) === index)
+      : [];
   const hintedLastQuestion =
-    typeof stateHint?.last_question_key === 'string' && stateHint.last_question_key.trim().length > 0
+    allowStateHintHydration &&
+    typeof stateHint?.last_question_key === 'string' &&
+    stateHint.last_question_key.trim().length > 0
       ? stateHint.last_question_key.trim()
       : null;
   const hintedMode =
-    stateHint?.mode === 'estimate' || stateHint?.mode === 'handoff' || stateHint?.mode === 'support'
+    allowStateHintHydration &&
+    (stateHint?.mode === 'estimate' || stateHint?.mode === 'handoff' || stateHint?.mode === 'support')
       ? stateHint.mode
       : undefined;
   const serverSessionIsEmpty =
