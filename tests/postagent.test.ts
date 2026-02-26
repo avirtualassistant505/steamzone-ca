@@ -669,6 +669,32 @@ describe('POST /api/postagent/estimate', () => {
     expect(payload.assistant_message).toMatch(/120 Parkside Crescent/i);
   });
 
+  it('answers high-confidence FAQ info questions without calling model API', async () => {
+    delete process.env.OPENAI_API_KEY;
+    const fetchSpy = vi.fn(async () => {
+      throw new Error('Model API should not be called for FAQ fast path.');
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: `postagent-fastpath-faq-${Date.now()}`,
+          input_text: 'What is your business address?',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { assistant_message: string; state: { mode: string } };
+    expect(payload.assistant_message).toMatch(/120 Parkside Crescent/i);
+    expect(payload.state.mode).toBe('support');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('offers team follow-up instead of guessing when answer is not in FAQ data', async () => {
     process.env.OPENAI_API_KEY = 'test-key';
     mockOpenAIMessage("I don't have reliable public info on that.");
@@ -689,6 +715,33 @@ describe('POST /api/postagent/estimate', () => {
     const payload = res.payload as { assistant_message: string };
     expect(payload.assistant_message).toMatch(/team member/i);
     expect(payload.assistant_message).toMatch(/call|text|email/i);
+  });
+
+  it('uses deterministic no-match support fallback without calling model API', async () => {
+    delete process.env.OPENAI_API_KEY;
+    const fetchSpy = vi.fn(async () => {
+      throw new Error('Model API should not be called for no-match support fallback.');
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: `postagent-fastpath-nomatch-${Date.now()}`,
+          input_text: 'Who owns this company?',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { assistant_message: string; state: { mode: string } };
+    expect(payload.assistant_message).toMatch(/team member/i);
+    expect(payload.assistant_message).toMatch(/call|text|email/i);
+    expect(payload.state.mode).toBe('support');
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('responds naturally for vague conversational prompts without callback fallback', async () => {
@@ -921,8 +974,8 @@ describe('POST /api/postagent/estimate', () => {
       {
         method: 'POST',
         body: {
-          session_id: 'postagent-markdown-cleanup-1',
-          input_text: 'What areas do you serve?',
+          session_id: `postagent-markdown-cleanup-${Date.now()}`,
+          input_text: 'test markdown cleanup',
         },
       },
       res

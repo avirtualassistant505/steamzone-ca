@@ -1713,19 +1713,6 @@ async function runAgentLoop(
   );
   const useInfoOnlyTools = !estimateFlowActive;
 
-  if (!estimateFlowActive && asksForServiceCatalog(inputText)) {
-    return {
-      assistant_message: buildServiceCatalogResponse(),
-      assistant_reasoning: buildReasoningText([
-        `I reviewed your latest message: “${inputText.replace(/\s+/g, ' ').trim().slice(0, 200)}”.`,
-        'I answered with the deterministic schema service list to avoid unsupported service hallucinations.',
-      ]),
-      quote: null,
-      next_hint: { done: true },
-      done: false,
-    };
-  }
-
   let response = await callOpenAIWithFallback(
     modelConfig,
     buildAgentRequestPayload(
@@ -1822,6 +1809,94 @@ async function runAgentLoop(
     next_hint: done ? { done: true } : nextHint,
     done,
   };
+}
+
+async function tryDeterministicSupportFastPath(
+  runtime: EstimateAgentRuntimeModule,
+  sessionId: string,
+  inputText: string
+): Promise<{ assistant_message: string; assistant_reasoning: string[]; quote: null; next_hint: NextHint; done: false } | null> {
+  const normalizedInput = inputText.replace(/\s+/g, ' ').trim();
+  if (!normalizedInput) {
+    return null;
+  }
+
+  const likelyInfoQuestion = isLikelyInfoQuestion(normalizedInput);
+  const directEstimateIntent = hasDirectEstimateIntent(normalizedInput);
+  const faqMatches = shouldSearchKnowledge(normalizedInput)
+    ? await searchSteamZoneKnowledgeAsync(normalizedInput, 3)
+    : [];
+  const topMatch = faqMatches[0];
+  const sessionContext = await runtime.toolGetState(sessionId);
+  const hadPriorAssistantTurn = Boolean(
+    sessionContext.transcript?.some((entry) => asRecord(entry)?.role === 'assistant')
+  );
+
+  if (asksForServiceCatalog(normalizedInput)) {
+    return {
+      assistant_message: applyResponseGuardrails(
+        buildServiceCatalogResponse(),
+        normalizedInput,
+        faqMatches,
+        hadPriorAssistantTurn,
+        'support'
+      ),
+      assistant_reasoning: buildReasoningText([
+        `I reviewed your latest message: “${normalizedInput.slice(0, 200)}”.`,
+        'I returned the deterministic service list directly from schema to avoid unsupported claims.',
+      ]),
+      quote: null,
+      next_hint: { done: true },
+      done: false,
+    };
+  }
+
+  // Conservative threshold to keep direct FAQ answers fast without increasing hallucination risk.
+  if (likelyInfoQuestion && !directEstimateIntent && topMatch && topMatch.score >= 3) {
+    const message = applyResponseGuardrails(
+      `${topMatch.answer}\n\nIf you'd like, I can also help with a quick estimate.`,
+      normalizedInput,
+      faqMatches,
+      hadPriorAssistantTurn,
+      'support'
+    );
+
+    return {
+      assistant_message: message,
+      assistant_reasoning: buildReasoningText([
+        `I reviewed your latest message: “${normalizedInput.slice(0, 200)}”.`,
+        `I found a high-confidence FAQ match (score ${topMatch.score.toFixed(3)}) and answered directly without a model round-trip.`,
+      ]),
+      quote: null,
+      next_hint: { done: true },
+      done: false,
+    };
+  }
+
+  if (likelyInfoQuestion && !directEstimateIntent && faqMatches.length === 0) {
+    const deterministicFallback = isGenericConversationPrompt(normalizedInput)
+      ? "I'm here and ready to help. What can I help you with today?"
+      : "I want to make sure I give you accurate information, and I don't have that confirmed in our Steam Zone QA yet. I can have a team member follow up by call, text, or email. What is the best contact for you?";
+
+    return {
+      assistant_message: applyResponseGuardrails(
+        deterministicFallback,
+        normalizedInput,
+        faqMatches,
+        hadPriorAssistantTurn,
+        'support'
+      ),
+      assistant_reasoning: buildReasoningText([
+        `I reviewed your latest message: “${normalizedInput.slice(0, 200)}”.`,
+        'No reliable FAQ match was found, so I used the deterministic support fallback immediately instead of waiting on a model call.',
+      ]),
+      quote: null,
+      next_hint: { done: true },
+      done: false,
+    };
+  }
+
+  return null;
 }
 
 export async function decideNextAssistantTurn(
@@ -2123,11 +2198,16 @@ export async function runEstimateAgentCore(
       done: false,
     };
   } else {
-    const modelConfig = await resolveModelProviderConfig(channel);
-    loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, channel, false);
-    loopResult.done = false;
-    loopResult.quote = null;
-    loopResult.next_hint = { done: true };
+    const deterministicSupportResult = await tryDeterministicSupportFastPath(runtime, sessionId, inputText);
+    if (deterministicSupportResult) {
+      loopResult = deterministicSupportResult;
+    } else {
+      const modelConfig = await resolveModelProviderConfig(channel);
+      loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, channel, false);
+      loopResult.done = false;
+      loopResult.quote = null;
+      loopResult.next_hint = { done: true };
+    }
   }
 
   const finalStateBeforeMeta = await runtime.getSession(sessionId);
