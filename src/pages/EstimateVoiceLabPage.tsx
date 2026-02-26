@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Mic, Phone, PhoneOff, RotateCcw } from 'lucide-react';
 import { parseJsonResponse } from '../lib/responseParsing';
+import { langText, useSiteLanguage } from '../i18n/siteLanguage';
 
 type RealtimeStatus = 'idle' | 'connecting' | 'connected' | 'error';
 type TranscriptRole = 'user' | 'assistant' | 'system';
@@ -32,7 +33,12 @@ interface ResetResponse {
 type RealtimeEventPayload = Record<string, unknown>;
 
 const VOICE_SESSION_STORAGE_KEY = 'steamzone_estimate_voice_lab_session_id';
-const VOICE_WARM_OPENER = 'Hi, how are you? What can I help you with today?';
+function voiceWarmOpener(language: 'en' | 'es'): string {
+  return langText(language, {
+    en: 'Hi there, thanks for calling Steam Zone. How can I help today?',
+    es: 'Hola, gracias por llamar a Steam Zone. ¿Cómo puedo ayudarte hoy?',
+  });
+}
 
 function randomId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -270,6 +276,7 @@ function extractFunctionCall(event: Record<string, unknown>): { callId: string; 
 }
 
 export default function EstimateVoiceLabPage() {
+  const { language } = useSiteLanguage();
   const [status, setStatus] = useState<RealtimeStatus>('idle');
   const [errorMessage, setErrorMessage] = useState('');
   const [connectionStage, setConnectionStage] = useState('Idle');
@@ -290,12 +297,14 @@ export default function EstimateVoiceLabPage() {
   }, [sessionId]);
 
   const connectionLabel = useMemo(() => {
-    if (status === 'connecting') return 'Connecting...';
-    if (status === 'connected' && isListening) return 'Connected, listening';
-    if (status === 'connected') return 'Connected';
-    if (status === 'error') return 'Connection failed';
-    return 'Not connected';
-  }, [isListening, status]);
+    if (status === 'connecting') return langText(language, { en: 'Connecting...', es: 'Conectando...' });
+    if (status === 'connected' && isListening) {
+      return langText(language, { en: 'Connected, listening', es: 'Conectado, escuchando' });
+    }
+    if (status === 'connected') return langText(language, { en: 'Connected', es: 'Conectado' });
+    if (status === 'error') return langText(language, { en: 'Connection failed', es: 'Conexión fallida' });
+    return langText(language, { en: 'Not connected', es: 'Sin conexión' });
+  }, [isListening, language, status]);
 
   function appendTranscript(role: TranscriptRole, content: string): void {
     const trimmed = content.trim();
@@ -319,6 +328,7 @@ export default function EstimateVoiceLabPage() {
         session_id: sessionIdRef.current,
         input_text: userText,
         channel: 'voice',
+        language,
       }),
     });
 
@@ -337,7 +347,7 @@ export default function EstimateVoiceLabPage() {
       return;
     }
 
-    let assistantText = VOICE_WARM_OPENER;
+    let assistantText = voiceWarmOpener(language);
     try {
       const turn = await runPostagentTurn(assistantText);
       assistantText = asString(turn.assistant_message).trim() || assistantText;
@@ -697,7 +707,7 @@ export default function EstimateVoiceLabPage() {
         headers: {
           'content-type': 'application/json',
         },
-        body: JSON.stringify({ sdp: sdpBody }),
+        body: JSON.stringify({ sdp: sdpBody, language }),
       });
 
       if (!answerResponse.ok) {
@@ -759,10 +769,17 @@ export default function EstimateVoiceLabPage() {
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-wide text-cyan-700">Sandbox Route</p>
-            <h1 className="text-3xl font-bold text-gray-900">Realtime Voice Agent Lab</h1>
+            <p className="text-sm font-semibold uppercase tracking-wide text-cyan-700">
+              {langText(language, { en: 'Sandbox Route', es: 'Ruta Sandbox' })}
+            </p>
+            <h1 className="text-3xl font-bold text-gray-900">
+              {langText(language, { en: 'Realtime Voice Agent Lab', es: 'Laboratorio de Agente de Voz en Tiempo Real' })}
+            </h1>
             <p className="mt-1 text-sm text-gray-600">
-              Dedicated OpenAI realtime voice agent, isolated from text chat session state.
+              {langText(language, {
+                en: 'Dedicated OpenAI realtime voice agent, isolated from text chat session state.',
+                es: 'Agente de voz en tiempo real de OpenAI, aislado del estado de la sesión de chat de texto.',
+              })}
             </p>
           </div>
 
@@ -775,13 +792,13 @@ export default function EstimateVoiceLabPage() {
               className="inline-flex items-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
             >
               <RotateCcw className="mr-2 h-4 w-4" />
-              Start Over
+              {langText(language, { en: 'Start Over', es: 'Empezar de Nuevo' })}
             </button>
             <a
               href="/estimate-bot-lab"
               className="inline-flex items-center rounded-lg border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 hover:bg-cyan-100"
             >
-              Back To Text Lab
+              {langText(language, { en: 'Back To Text Lab', es: 'Volver al Laboratorio de Texto' })}
             </a>
           </div>
         </header>
@@ -791,7 +808,10 @@ export default function EstimateVoiceLabPage() {
             <div className="h-[56vh] overflow-y-auto rounded-xl border border-gray-100 bg-slate-50 p-3">
               {transcript.length === 0 && (
                 <p className="text-sm text-gray-500">
-                  Voice mode is active-only. Call transcript bubbles are hidden to keep it separate from text chat.
+                  {langText(language, {
+                    en: 'Voice mode is active-only. Call transcript bubbles are hidden to keep it separate from text chat.',
+                    es: 'El modo voz está activo únicamente. Las burbujas de transcripción de llamada están ocultas para mantenerlo separado del chat de texto.',
+                  })}
                 </p>
               )}
 
@@ -828,18 +848,28 @@ export default function EstimateVoiceLabPage() {
 
           <aside className="space-y-4">
             <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-              <h2 className="text-base font-semibold text-gray-900">Session</h2>
+              <h2 className="text-base font-semibold text-gray-900">
+                {langText(language, { en: 'Session', es: 'Sesión' })}
+              </h2>
               <p className="mt-1 break-all text-xs text-gray-600">{sessionId}</p>
-              <p className="mt-2 text-xs text-gray-500">Turns completed: {turnCount}</p>
+              <p className="mt-2 text-xs text-gray-500">
+                {langText(language, { en: 'Turns completed:', es: 'Turnos completados:' })} {turnCount}
+              </p>
             </div>
 
             <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-              <h2 className="text-base font-semibold text-gray-900">Voice Status</h2>
+              <h2 className="text-base font-semibold text-gray-900">
+                {langText(language, { en: 'Voice Status', es: 'Estado de Voz' })}
+              </h2>
               <p className="mt-2 text-sm text-gray-700">{connectionLabel}</p>
-              <p className="mt-1 text-xs text-gray-500">Stage: {connectionStage}</p>
+              <p className="mt-1 text-xs text-gray-500">
+                {langText(language, { en: 'Stage:', es: 'Etapa:' })} {connectionStage}
+              </p>
               <p className="mt-1 inline-flex items-center text-xs text-gray-600">
                 <Mic className="mr-1 h-3.5 w-3.5" />
-                {isListening ? 'Caller speech detected' : 'Waiting for speech'}
+                {isListening
+                  ? langText(language, { en: 'Caller speech detected', es: 'Se detectó voz del cliente' })
+                  : langText(language, { en: 'Waiting for speech', es: 'Esperando voz' })}
               </p>
 
               <div className="mt-3 grid gap-2">
@@ -852,7 +882,9 @@ export default function EstimateVoiceLabPage() {
                   className="inline-flex w-full items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
                 >
                   <Phone className="mr-2 h-4 w-4" />
-                  {status === 'connecting' ? 'Connecting...' : 'Start Realtime Voice Call'}
+                  {status === 'connecting'
+                    ? langText(language, { en: 'Connecting...', es: 'Conectando...' })
+                    : langText(language, { en: 'Start Realtime Voice Call', es: 'Iniciar Llamada de Voz en Tiempo Real' })}
                 </button>
 
                 <button
@@ -862,7 +894,7 @@ export default function EstimateVoiceLabPage() {
                   className="inline-flex w-full items-center justify-center rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-60"
                 >
                   <PhoneOff className="mr-2 h-4 w-4" />
-                  Stop Voice Call
+                  {langText(language, { en: 'Stop Voice Call', es: 'Detener Llamada de Voz' })}
                 </button>
               </div>
             </div>

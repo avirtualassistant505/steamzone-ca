@@ -16,14 +16,31 @@ export interface NormalizeValidateResult {
   clarification_question?: string;
 }
 
-const yesTokens = new Set(['y', 'yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'affirmative', 'true', '1', 'please do']);
-const noTokens = new Set(['n', 'no', 'nope', 'nah', 'negative', 'false', '0', 'dont', "don't"]);
+const yesTokens = new Set(['y', 'yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'affirmative', 'true', '1', 'please do', 'si', 'sí', 'claro']);
+const noTokens = new Set(['n', 'no', 'nope', 'nah', 'negative', 'false', '0', 'dont', "don't", 'no gracias']);
 
 const serviceSynonyms: Record<ServiceType, string[]> = {
-  window: ['window', 'windows', 'residential window', 'residential windows', 'house windows'],
-  commercialWindow: ['commercial window', 'commercial windows', 'storefront', 'office windows', 'business windows'],
-  carpet: ['carpet', 'carpets', 'carpet cleaning'],
-  postConstruction: ['post construction', 'post-construction', 'post construction cleaning', 'construction cleanup'],
+  window: ['window', 'windows', 'residential window', 'residential windows', 'house windows', 'ventana', 'ventanas', 'ventanas residenciales'],
+  commercialWindow: [
+    'commercial window',
+    'commercial windows',
+    'storefront',
+    'office windows',
+    'business windows',
+    'ventanas comerciales',
+    'comercial ventanas',
+  ],
+  carpet: ['carpet', 'carpets', 'carpet cleaning', 'alfombra', 'alfombras', 'limpieza de alfombras'],
+  postConstruction: [
+    'post construction',
+    'post-construction',
+    'post construction cleaning',
+    'construction cleanup',
+    'post construccion',
+    'post-construccion',
+    'post-construcción',
+    'limpieza de obra',
+  ],
 };
 
 const numberWordValues: Record<string, number> = {
@@ -199,8 +216,8 @@ function parseYesNo(input: string): boolean | null {
   if (yesTokens.has(normalized)) return true;
   if (noTokens.has(normalized)) return false;
 
-  if (/(^|\b)(yes|yep|yeah|sure|absolutely|certainly|correct|right|works)($|\b)/i.test(normalized)) return true;
-  if (/(^|\b)(no|nope|nah|not really|dont|don't|decline|stop)($|\b)/i.test(normalized)) return false;
+  if (/(^|\b)(yes|yep|yeah|sure|absolutely|certainly|correct|right|works|si|sí|claro)($|\b)/i.test(normalized)) return true;
+  if (/(^|\b)(no|nope|nah|not really|dont|don't|decline|stop|no gracias)($|\b)/i.test(normalized)) return false;
 
   return null;
 }
@@ -406,6 +423,8 @@ function coerceSelect(field: SchemaField, input: string, answersSoFar: Record<st
   // Small synonym support.
   if (field.key === 'scope') {
     if (normalized.includes('inside') && normalized.includes('outside')) return 'both';
+    if (normalized.includes('interior') && normalized.includes('exterior')) return 'both';
+    if (normalized.includes('ambos')) return 'both';
     if (normalized.includes('interior')) return 'interior';
     if (normalized.includes('exterior') || normalized.includes('outside')) return 'exterior';
   }

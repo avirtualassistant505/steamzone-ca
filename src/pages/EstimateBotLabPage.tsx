@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent 
 import { Copy, RotateCcw, SendHorizonal } from 'lucide-react';
 import { formatCurrency } from '../lib/estimateEngine';
 import { parseJsonResponse } from '../lib/responseParsing';
+import { langText, useSiteLanguage } from '../i18n/siteLanguage';
 
 type ChatRole = 'user' | 'assistant';
 
@@ -168,6 +169,34 @@ function hasEstimateIntent(input: string): boolean {
   return ESTIMATE_INTENT_REGEX.test(input);
 }
 
+function translateOptionLabel(label: string, language: 'en' | 'es'): string {
+  if (language !== 'es') {
+    return label;
+  }
+
+  const key = label.trim().toLowerCase();
+  const map: Record<string, string> = {
+    yes: 'Sí',
+    no: 'No',
+    'residential windows': 'Ventanas Residenciales',
+    'commercial windows': 'Ventanas Comerciales',
+    'carpet cleaning': 'Limpieza de Alfombras',
+    'post-construction': 'Post-Construcción',
+    'zone a - steinbach + 15km': 'Zona A - Steinbach + 15 km',
+    'zone b - 15km to 35km': 'Zona B - de 15 km a 35 km',
+    'zone c - winnipeg trips': 'Zona C - viajes a Winnipeg',
+    'zone d - extended rural': 'Zona D - rural extendida',
+    none: 'Ninguno',
+    some: 'Algunos',
+    all: 'Todos',
+    basic: 'Básico',
+    detailed: 'Detallado',
+    'interior + exterior': 'Interior + Exterior',
+  };
+
+  return map[key] ?? label;
+}
+
 function newMessageId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID();
@@ -226,17 +255,29 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-function speechRecognitionErrorMessage(errorCode: string): string {
+function speechRecognitionErrorMessage(errorCode: string, language: 'en' | 'es'): string {
   switch (errorCode) {
     case 'not-allowed':
     case 'service-not-allowed':
-      return 'Microphone access is blocked. Allow microphone permission in Chrome site settings, then start voice mode again.';
+      return langText(language, {
+        en: 'Microphone access is blocked. Allow microphone permission in Chrome site settings, then start voice mode again.',
+        es: 'El acceso al micrófono está bloqueado. Permite el micrófono en la configuración de Chrome e inicia voz nuevamente.',
+      });
     case 'audio-capture':
-      return 'No microphone was detected. Connect a microphone and try voice mode again.';
+      return langText(language, {
+        en: 'No microphone was detected. Connect a microphone and try voice mode again.',
+        es: 'No se detectó micrófono. Conecta un micrófono y prueba otra vez.',
+      });
     case 'network':
-      return 'Speech recognition had a network issue. Please try voice mode again.';
+      return langText(language, {
+        en: 'Speech recognition had a network issue. Please try voice mode again.',
+        es: 'El reconocimiento de voz tuvo un problema de red. Inténtalo de nuevo.',
+      });
     default:
-      return 'Voice recognition could not start. Try again or use text mode.';
+      return langText(language, {
+        en: 'Voice recognition could not start. Try again or use text mode.',
+        es: 'No se pudo iniciar el reconocimiento de voz. Inténtalo de nuevo o usa texto.',
+      });
   }
 }
 
@@ -283,6 +324,7 @@ function getResponseDelayMs(replyText: string, isVoiceTurn: boolean): number {
 }
 
 export default function EstimateBotLabPage() {
+  const { language } = useSiteLanguage();
   const [sessionId, setSessionId] = useState<string>(() => readSessionId(SESSION_STORAGE_KEY));
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -387,7 +429,7 @@ export default function EstimateBotLabPage() {
 
     try {
       const recognition = new Ctor();
-      recognition.lang = 'en-US';
+      recognition.lang = language === 'es' ? 'es-ES' : 'en-US';
       recognition.interimResults = false;
       recognition.maxAlternatives = 3;
       recognition.continuous = false;
@@ -398,7 +440,7 @@ export default function EstimateBotLabPage() {
         setIsListening(false);
         const errorCode = typeof event?.error === 'string' ? event.error : '';
         if (errorCode && errorCode !== 'aborted' && errorCode !== 'no-speech') {
-          setErrorMessage(speechRecognitionErrorMessage(errorCode));
+          setErrorMessage(speechRecognitionErrorMessage(errorCode, language));
         }
         if (errorCode === 'not-allowed' || errorCode === 'service-not-allowed' || errorCode === 'audio-capture') {
           setIsVoiceCallActive(false);
@@ -426,7 +468,12 @@ export default function EstimateBotLabPage() {
       recognition.start();
     } catch {
       setIsListening(false);
-      setErrorMessage('Voice recognition could not start. Please check microphone permissions and try again.');
+      setErrorMessage(
+        langText(language, {
+          en: 'Voice recognition could not start. Please check microphone permissions and try again.',
+          es: 'No se pudo iniciar el reconocimiento de voz. Revisa permisos del micrófono e inténtalo de nuevo.',
+        })
+      );
       setIsVoiceCallActive(false);
     }
   }
@@ -447,6 +494,7 @@ export default function EstimateBotLabPage() {
         },
         body: JSON.stringify({
           text: safeText,
+          language,
         }),
         signal: controller.signal,
       });
@@ -479,7 +527,7 @@ export default function EstimateBotLabPage() {
           utterance.rate = 1.02;
           utterance.pitch = 1;
           utterance.volume = 1;
-          utterance.lang = 'en-US';
+          utterance.lang = language === 'es' ? 'es-ES' : 'en-US';
           utterance.onend = () => resolve();
           utterance.onerror = () => resolve();
           window.speechSynthesis.speak(utterance);
@@ -571,6 +619,7 @@ export default function EstimateBotLabPage() {
           session_id: effectiveSessionId,
           input_text: bootstrap ? '' : trimmed,
           bootstrap: bootstrap || undefined,
+          language,
           channel: requestedChannel,
           turn_id: bootstrap ? undefined : newMessageId(),
           state_hint: stateForHint
@@ -784,7 +833,7 @@ export default function EstimateBotLabPage() {
 
   async function copyQuoteSummary(): Promise<void> {
     if (!quote) {
-      setCopyStatus('No quote to copy yet.');
+      setCopyStatus(langText(language, { en: 'No quote to copy yet.', es: 'Todavía no hay cotización para copiar.' }));
       return;
     }
 
@@ -809,9 +858,9 @@ export default function EstimateBotLabPage() {
 
     try {
       await navigator.clipboard.writeText(summary);
-      setCopyStatus('Quote summary copied.');
+      setCopyStatus(langText(language, { en: 'Quote summary copied.', es: 'Resumen de cotización copiado.' }));
     } catch {
-      setCopyStatus('Unable to copy to clipboard.');
+      setCopyStatus(langText(language, { en: 'Unable to copy to clipboard.', es: 'No se pudo copiar al portapapeles.' }));
     }
   }
 
@@ -842,18 +891,30 @@ export default function EstimateBotLabPage() {
         response
       );
       if (!parsed.ok || !response.ok || !parsed.payload) {
-        throw new Error(parsed.textError ?? parsed.payload?.message ?? 'Unable to finalize quote.');
+        throw new Error(
+          parsed.textError ??
+            parsed.payload?.message ??
+            langText(language, { en: 'Unable to finalize quote.', es: 'No se pudo finalizar la cotización.' })
+        );
       }
 
       const emailMessage = parsed.payload.email?.message ?? '';
       const quoteNumber = parsed.payload.quote_number ?? '';
       setFinalizeStatus(
         quoteNumber
-          ? `Finalized as ${quoteNumber}. ${emailMessage || 'Quote email has been sent.'}`
-          : emailMessage || 'Quote email has been sent.'
+          ? `${langText(language, { en: 'Finalized as', es: 'Finalizado como' })} ${quoteNumber}. ${
+              emailMessage ||
+              langText(language, { en: 'Quote email has been sent.', es: 'Se envió el correo de cotización.' })
+            }`
+          : emailMessage ||
+              langText(language, { en: 'Quote email has been sent.', es: 'Se envió el correo de cotización.' })
       );
     } catch (error) {
-      setFinalizeStatus(error instanceof Error ? error.message : 'Unable to finalize quote.');
+      setFinalizeStatus(
+        error instanceof Error
+          ? error.message
+          : langText(language, { en: 'Unable to finalize quote.', es: 'No se pudo finalizar la cotización.' })
+      );
       if (currentSessionId) {
         finalizedSessionRef.current.delete(currentSessionId);
       }
@@ -867,21 +928,34 @@ export default function EstimateBotLabPage() {
 
     if (hint.type === 'boolean') {
       return [
-        { label: 'Yes', value: 'yes' },
-        { label: 'No', value: 'no' },
+        { label: langText(language, { en: 'Yes', es: 'Sí' }), value: 'yes' },
+        { label: langText(language, { en: 'No', es: 'No' }), value: 'no' },
       ];
     }
 
     if (hint.type === 'select' && hint.options) {
-      return hint.options.map((opt) => ({ label: opt.label, value: opt.value }));
+      return hint.options.map((opt) => ({ label: translateOptionLabel(opt.label, language), value: opt.value }));
     }
 
     return [] as Array<{ label: string; value: string }>;
-  }, [done, estimateEngaged, hint, isBusy]);
+  }, [done, estimateEngaged, hint, isBusy, language]);
 
   const showPrompt = hasUserTurn && estimateEngaged && !done && Boolean(lastQuestionText);
-  const inputPlaceholder = estimateEngaged ? hint?.placeholder ?? 'Type your answer...' : 'Ask a question or request an estimate...';
-  const statusLabel = done ? 'Complete' : estimateEngaged ? 'Collecting estimate details' : 'Waiting for your question';
+  const inputPlaceholder = estimateEngaged
+    ? hint?.placeholder ??
+      langText(language, {
+        en: 'Type your answer...',
+        es: 'Escribe tu respuesta...',
+      })
+    : langText(language, {
+        en: 'Ask a question or request an estimate...',
+        es: 'Haz una pregunta o solicita una cotización...',
+      });
+  const statusLabel = done
+    ? langText(language, { en: 'Complete', es: 'Completo' })
+    : estimateEngaged
+      ? langText(language, { en: 'Collecting estimate details', es: 'Recopilando datos de cotización' })
+      : langText(language, { en: 'Waiting for your question', es: 'Esperando tu pregunta' });
   const displayedSessionId = isVoiceCallActive ? voiceSessionIdRef.current : sessionId;
 
   return (
@@ -889,9 +963,18 @@ export default function EstimateBotLabPage() {
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-wide text-cyan-700">Sandbox Route</p>
-            <h1 className="text-3xl font-bold text-gray-900">Agentic Estimate Bot Lab</h1>
-            <p className="mt-1 text-sm text-gray-600">New OpenAI-powered intake flow isolated from the existing estimate page and GHL bot.</p>
+            <p className="text-sm font-semibold uppercase tracking-wide text-cyan-700">
+              {langText(language, { en: 'Sandbox Route', es: 'Ruta Sandbox' })}
+            </p>
+            <h1 className="text-3xl font-bold text-gray-900">
+              {langText(language, { en: 'Agentic Estimate Bot Lab', es: 'Laboratorio de Cotización con Agente' })}
+            </h1>
+            <p className="mt-1 text-sm text-gray-600">
+              {langText(language, {
+                en: 'New OpenAI-powered intake flow isolated from the existing estimate page and GHL bot.',
+                es: 'Nuevo flujo de cotización con OpenAI, aislado de la página de cotización actual y del bot de GHL.',
+              })}
+            </p>
           </div>
           <div className="flex gap-2">
             <button
@@ -902,7 +985,7 @@ export default function EstimateBotLabPage() {
               className="inline-flex items-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
             >
               <RotateCcw className="mr-2 h-4 w-4" />
-              Start Over
+              {langText(language, { en: 'Start Over', es: 'Empezar de Nuevo' })}
             </button>
             <button
               type="button"
@@ -912,7 +995,7 @@ export default function EstimateBotLabPage() {
               className="inline-flex items-center rounded-lg border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 hover:bg-cyan-100"
             >
               <Copy className="mr-2 h-4 w-4" />
-              Copy Quote Summary
+              {langText(language, { en: 'Copy Quote Summary', es: 'Copiar Resumen de Cotización' })}
             </button>
           </div>
         </header>
@@ -921,7 +1004,9 @@ export default function EstimateBotLabPage() {
           <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm md:p-5">
             <div className="h-[56vh] overflow-y-auto rounded-xl border border-gray-100 bg-slate-50 p-3">
               {messages.length === 0 && (
-                <p className="text-sm text-gray-500">Loading assistant...</p>
+                <p className="text-sm text-gray-500">
+                  {langText(language, { en: 'Loading assistant...', es: 'Cargando asistente...' })}
+                </p>
               )}
 
               <div className="space-y-3">
@@ -938,10 +1023,14 @@ export default function EstimateBotLabPage() {
                 ))}
               </div>
 
-              {isBusy && !isThinking && <p className="mt-3 text-xs text-gray-500">Preparing reply...</p>}
+              {isBusy && !isThinking && (
+                <p className="mt-3 text-xs text-gray-500">
+                  {langText(language, { en: 'Preparing reply...', es: 'Preparando respuesta...' })}
+                </p>
+              )}
               {isThinking && (
                 <p className="mt-2 text-xs text-gray-500" aria-live="polite" aria-atomic="true">
-                  Assistant is typing
+                  {langText(language, { en: 'Assistant is typing', es: 'El asistente está escribiendo' })}
                   {Array.from({ length: typingTick + 1 }, () => '.').join('')}
                 </p>
               )}
@@ -949,7 +1038,9 @@ export default function EstimateBotLabPage() {
             </div>
 
             {showPrompt && (
-              <p className="mt-3 text-xs text-gray-600">Current prompt: {lastQuestionText}</p>
+              <p className="mt-3 text-xs text-gray-600">
+                {langText(language, { en: 'Current prompt:', es: 'Pregunta actual:' })} {lastQuestionText}
+              </p>
             )}
 
             {quickActions.length > 0 && (
@@ -992,34 +1083,52 @@ export default function EstimateBotLabPage() {
 
             <aside className="space-y-4">
               <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-                <h2 className="text-base font-semibold text-gray-900">Session</h2>
+                <h2 className="text-base font-semibold text-gray-900">
+                  {langText(language, { en: 'Session', es: 'Sesión' })}
+                </h2>
                 <p className="mt-1 break-all text-xs text-gray-600">{displayedSessionId}</p>
               </div>
 
               <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-                <h2 className="text-base font-semibold text-gray-900">Mode</h2>
-                <p className="mt-2 text-sm text-gray-700">Text chat mode</p>
-                <p className="mt-1 text-xs text-gray-600">
-                  Voice has moved to a dedicated realtime page so it stays fully separate from this text session.
+                <h2 className="text-base font-semibold text-gray-900">
+                  {langText(language, { en: 'Mode', es: 'Modo' })}
+                </h2>
+                <p className="mt-2 text-sm text-gray-700">
+                  {langText(language, { en: 'Text chat mode', es: 'Modo chat de texto' })}
                 </p>
-                <p className="sr-only">Legacy speaking state: {isSpeaking ? 'speaking' : 'idle'}</p>
+                <p className="mt-1 text-xs text-gray-600">
+                  {langText(language, {
+                    en: 'Voice has moved to a dedicated realtime page so it stays fully separate from this text session.',
+                    es: 'La voz se movió a una página en tiempo real dedicada para mantenerse separada de esta sesión de texto.',
+                  })}
+                </p>
+                <p className="sr-only">
+                  {langText(language, { en: 'Legacy speaking state:', es: 'Estado de voz heredado:' })}{' '}
+                  {isSpeaking
+                    ? langText(language, { en: 'speaking', es: 'hablando' })
+                    : langText(language, { en: 'idle', es: 'inactivo' })}
+                </p>
                 <a
                   href="/estimate-voice-lab"
                   className="mt-3 inline-flex w-full items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
                 >
-                  Open Realtime Voice Lab
+                  {langText(language, { en: 'Open Realtime Voice Lab', es: 'Abrir Laboratorio de Voz en Tiempo Real' })}
                 </a>
               </div>
 
               <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-                <h2 className="text-base font-semibold text-gray-900">Status</h2>
+                <h2 className="text-base font-semibold text-gray-900">
+                  {langText(language, { en: 'Status', es: 'Estado' })}
+                </h2>
                 <p className="mt-2 text-sm text-gray-700">{statusLabel}</p>
                 {copyStatus && <p className="mt-2 text-xs text-cyan-700">{copyStatus}</p>}
               </div>
 
             {quote && (
               <div className="rounded-2xl border border-cyan-200 bg-white p-4 shadow-sm">
-                <h2 className="text-base font-semibold text-gray-900">Quote</h2>
+                <h2 className="text-base font-semibold text-gray-900">
+                  {langText(language, { en: 'Quote', es: 'Cotización' })}
+                </h2>
                 <p className="mt-1 text-xs text-gray-500">{quote.quote_id}</p>
                 <p className="mt-2 text-2xl font-bold text-cyan-800">{formatCurrency(quote.total)}</p>
 
@@ -1046,7 +1155,9 @@ export default function EstimateBotLabPage() {
                   disabled={isFinalizing || !done}
                   className="mt-4 inline-flex w-full items-center justify-center rounded-lg bg-cyan-600 px-3 py-2 text-sm font-semibold text-white hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {isFinalizing ? 'Sending...' : 'Finalize & Email Quote'}
+                  {isFinalizing
+                    ? langText(language, { en: 'Sending...', es: 'Enviando...' })
+                    : langText(language, { en: 'Finalize & Email Quote', es: 'Finalizar y Enviar Cotización' })}
                 </button>
                 {finalizeStatus && <p className="mt-2 text-xs text-cyan-700">{finalizeStatus}</p>}
               </div>

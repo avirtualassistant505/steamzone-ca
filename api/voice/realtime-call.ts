@@ -18,6 +18,7 @@ type RealtimeAttempt = {
   model: string;
   voice: string;
   includeTranscription: boolean;
+  language: 'en' | 'es';
 };
 
 const BASE_TOOLS = [
@@ -37,18 +38,34 @@ const BASE_TOOLS = [
   },
 ] as const;
 
-const REALTIME_INSTRUCTIONS = [
-  'You are Steam Zone AI Voice Receptionist.',
-  'Always start in English (en-CA). Only switch languages if the caller explicitly asks you to.',
-  'Never auto-switch to Spanish or any other language based on accent or locale.',
-  'Use the postagent_estimate_turn tool for customer-facing business replies so voice stays aligned with the shared estimate/chat knowledge base.',
-  'Keep responses concise, natural, and call-like.',
-  'Ask exactly one question per turn. Never ask two questions in one reply.',
-  'If you need extra time to process, first say: "One moment while I check that for you."',
-  'For estimates: collect minimum required details and proceed step-by-step.',
-  'If the user asks an informational question, answer it first using the tool result.',
-  'Do not invent pricing; only use pricing from tool outputs.',
-].join('\n');
+function normalizeLanguage(value: unknown): 'en' | 'es' {
+  return value === 'es' ? 'es' : 'en';
+}
+
+function buildRealtimeInstructions(language: 'en' | 'es'): string {
+  const languageRules =
+    language === 'es'
+      ? [
+          'Start and continue in Spanish (es-CA).',
+          'Only switch to English if the caller explicitly requests English.',
+        ]
+      : [
+          'Start and continue in English (en-CA).',
+          'Only switch to Spanish if the caller explicitly requests Spanish.',
+        ];
+
+  return [
+    'You are Steam Zone AI Voice Receptionist.',
+    ...languageRules,
+    'Use the postagent_estimate_turn tool for customer-facing business replies so voice stays aligned with the shared estimate/chat knowledge base.',
+    'Keep responses concise, natural, and call-like.',
+    'Ask exactly one question per turn. Never ask two questions in one reply.',
+    'If you need extra time to process, first say: "One moment while I check that for you."',
+    'For estimates: collect minimum required details and proceed step-by-step.',
+    'If the user asks an informational question, answer it first using the tool result.',
+    'Do not invent pricing; only use pricing from tool outputs.',
+  ].join('\n');
+}
 
 function parseJsonBody(rawBody: unknown): Record<string, unknown> | null {
   if (!rawBody || typeof rawBody !== 'object' || Array.isArray(rawBody)) {
@@ -58,14 +75,37 @@ function parseJsonBody(rawBody: unknown): Record<string, unknown> | null {
   return rawBody as Record<string, unknown>;
 }
 
-function readSdpBody(body: unknown): string {
+function readCallPayload(body: unknown): { sdp: string; language: 'en' | 'es' } {
   if (typeof body === 'string') {
-    return body;
+    const trimmed = body.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+        return {
+          sdp: typeof parsed.sdp === 'string' ? parsed.sdp : '',
+          language: normalizeLanguage(parsed.language),
+        };
+      } catch {
+        // Fall through and treat body as raw SDP.
+      }
+    }
+    return {
+      sdp: body,
+      language: 'en',
+    };
   }
   const parsed = parseJsonBody(body);
-  if (!parsed) return '';
+  if (!parsed) {
+    return {
+      sdp: '',
+      language: 'en',
+    };
+  }
   const candidate = parsed.sdp;
-  return typeof candidate === 'string' ? candidate : '';
+  return {
+    sdp: typeof candidate === 'string' ? candidate : '',
+    language: normalizeLanguage(parsed.language),
+  };
 }
 
 function parseError(rawBody: string): string {
@@ -117,10 +157,15 @@ function normalizeRealtimeModels(raw: string): string[] {
   return ['gpt-realtime', 'gpt-4o-realtime-preview'];
 }
 
-function buildSessionConfig(model: string, voice: string, includeTranscription: boolean): Record<string, unknown> {
+function buildSessionConfig(
+  model: string,
+  voice: string,
+  includeTranscription: boolean,
+  language: 'en' | 'es'
+): Record<string, unknown> {
   const sessionConfig: Record<string, unknown> = {
     model,
-    instructions: REALTIME_INSTRUCTIONS,
+    instructions: buildRealtimeInstructions(language),
     modalities: ['text', 'audio'],
     tools: BASE_TOOLS,
     tool_choice: 'auto',
@@ -138,7 +183,7 @@ function buildSessionConfig(model: string, voice: string, includeTranscription: 
 }
 
 function buildRequestBody(attempt: RealtimeAttempt): BodyInit {
-  const config = buildSessionConfig(attempt.model, attempt.voice, attempt.includeTranscription);
+  const config = buildSessionConfig(attempt.model, attempt.voice, attempt.includeTranscription, attempt.language);
   const payload = {
     sdp: attempt.sdp,
     ...config,
@@ -161,7 +206,7 @@ function buildRequestBody(attempt: RealtimeAttempt): BodyInit {
   return form;
 }
 
-function buildAttempts(sdp: string, voice: string, rawModels: string[]): RealtimeAttempt[] {
+function buildAttempts(sdp: string, voice: string, rawModels: string[], language: 'en' | 'es'): RealtimeAttempt[] {
   const transcriptionModes = [true, false];
   const attempts: RealtimeAttempt[] = [];
 
@@ -174,6 +219,7 @@ function buildAttempts(sdp: string, voice: string, rawModels: string[]): Realtim
         model,
         voice,
         includeTranscription,
+        language,
       });
     }
   }
@@ -187,6 +233,7 @@ function buildAttempts(sdp: string, voice: string, rawModels: string[]): Realtim
       model,
       voice,
       includeTranscription: true,
+      language,
     });
     attempts.push({
       id: `${model}-noTranscription-form`,
@@ -195,6 +242,7 @@ function buildAttempts(sdp: string, voice: string, rawModels: string[]): Realtim
       model,
       voice,
       includeTranscription: false,
+      language,
     });
   }
 
@@ -228,7 +276,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
-  const sdp = readSdpBody(req.body);
+  const { sdp, language } = readCallPayload(req.body);
   if (!sdp.trim()) {
     res.status(400).json({ message: 'Missing SDP body.' });
     return;
@@ -246,7 +294,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   const models = normalizeRealtimeModels(rawModel);
   const uniqueModels = Array.from(new Set(models.filter(Boolean)));
 
-  const attempts = buildAttempts(sdp, voice, uniqueModels);
+  const attempts = buildAttempts(sdp, voice, uniqueModels, language);
   let lastError = 'OpenAI realtime call failed.';
 
   try {

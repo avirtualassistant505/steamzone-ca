@@ -29,6 +29,7 @@ export interface PostagentEstimateRequest {
   input_text: string;
   bootstrap?: boolean;
   channel?: PostagentChannel;
+  language?: 'en' | 'es';
   turn_id?: string;
   state_hint?: {
     session_id?: string;
@@ -400,16 +401,16 @@ const DEFAULT_USER_START = 'Hi, how are you? What can I help you with today?';
 const DEFAULT_ASSISTANT_BOOTSTRAP_OPENER = 'Hi there, thanks for reaching out to Steam Zone. How can I help today?';
 const CORRECTION_CUES = /\b(actually|instead|change|replace|correction|corrections|update|correct|correcting)\b/i;
 const DIRECT_ESTIMATE_INTENT_CUES =
-  /\b(estimate|estimates|quote|quotes|quotation|quotations|pricing|price|cost|costs|how much)\b/i;
+  /\b(estimate|estimates|quote|quotes|quotation|quotations|pricing|price|cost|costs|how much|cotizaci[oó]n|cotizar|presupuesto|precio|cu[aá]nto|cuanto)\b/i;
 const AGGRESSIVE_BUYING_SIGNAL_CUES =
-  /\b(book|booking|booked|schedule|scheduled|appointment|appointments|service|services|cleaning|clean)\b/i;
+  /\b(book|booking|booked|schedule|scheduled|appointment|appointments|service|services|cleaning|clean|reservar|agenda|agendar|cita|servicio|servicios|limpieza)\b/i;
 const AFFIRMATIVE_INTENT_CUES =
-  /\b(yes|yeah|yep|yup|sure|okay|ok|please do|do it|that is my desire yes|confirm|confirmed|correct)\b/i;
-const NEGATIVE_INTENT_CUES = /\b(no|nope|nah|not now|later|never mind|nevermind|cancel|stop)\b/i;
+  /\b(yes|yeah|yep|yup|sure|okay|ok|please do|do it|that is my desire yes|confirm|confirmed|correct|s[ií]|claro|por favor|hazlo)\b/i;
+const NEGATIVE_INTENT_CUES = /\b(no|nope|nah|not now|later|never mind|nevermind|cancel|stop|no gracias|ahora no|det[eé]n)\b/i;
 const WANTS_SERVICES_LIST_CUES =
-  /\b(what services|which services|services do you offer|what do you offer|what can you clean)\b/i;
+  /\b(what services|which services|services do you offer|what do you offer|what can you clean|qu[eé]\s+servicios|qu[eé]\s+ofrecen|qu[eé]\s+limpian)\b/i;
 const GENERIC_CONVERSATION_PROMPT_CUES =
-  /\b(what is happening|what's happening|whats happening|what.?s up|how.?s it going|how is it going|hello|hi there|hey there)\b/i;
+  /\b(what is happening|what's happening|whats happening|what.?s up|how.?s it going|how is it going|hello|hi there|hey there|hola|buenas|qu[eé]\s+pasa|qu[eé]\s+tal)\b/i;
 const UNSUPPORTED_ESTIMATE_SERVICE_CUES =
   /\b(grout|tile|tiles|upholstery|sofa|couch|mattress|duct|chimney|pressure wash|power wash)\b/i;
 const PENDING_ESTIMATE_CONFIRMATION_KEY = '__pending_estimate_confirmation';
@@ -580,9 +581,19 @@ async function resolveModelProviderConfig(channel?: PostagentChannel): Promise<A
   };
 }
 
-const INFO_QUESTION_CUES = /\?|\b(what|where|who|when|why|how|do|does|can|could|is|are|tell me|i want to know|would you)\b/i;
+const INFO_QUESTION_CUES =
+  /\?|\b(what|where|who|when|why|how|do|does|can|could|is|are|tell me|i want to know|would you|qu[eé]|d[oó]nde|qui[eé]n|cu[aá]ndo|por qu[eé]|c[oó]mo|pueden|podr[ií]an)\b/i;
 type SessionMode = 'support' | 'estimate' | 'handoff';
 type PendingEstimateContext = 'direct_intent' | 'aggressive_signal' | null;
+type AgentLanguage = 'en' | 'es';
+
+function normalizeAgentLanguage(value: unknown): AgentLanguage {
+  return value === 'es' ? 'es' : 'en';
+}
+
+function t(language: AgentLanguage, values: { en: string; es: string }): string {
+  return language === 'es' ? values.es : values.en;
+}
 
 function stripInternalAnswerKeys(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -798,55 +809,185 @@ function findServiceTypeFromInput(inputText: string): ServiceType | null {
   const normalized = inputText.trim().toLowerCase();
   if (!normalized) return null;
 
-  if (/\b(commercial|storefront|office|business)\b/.test(normalized) && /\bwindow/.test(normalized)) {
+  if (/\b(commercial|storefront|office|business|comercial|negocio)\b/.test(normalized) && /\b(window|ventana)/.test(normalized)) {
     return 'commercialWindow';
   }
-  if (/\b(residential|home|house)\b/.test(normalized) && /\bwindow/.test(normalized)) {
+  if (/\b(residential|home|house|residencial|casa|hogar)\b/.test(normalized) && /\b(window|ventana)/.test(normalized)) {
     return 'window';
   }
-  if (/\bwindow|windows\b/.test(normalized)) {
+  if (/\b(window|windows|ventana|ventanas)\b/.test(normalized)) {
     return 'window';
   }
-  if (/\bcarpet|carpets\b/.test(normalized)) {
+  if (/\b(carpet|carpets|alfombra|alfombras)\b/.test(normalized)) {
     return 'carpet';
   }
-  if (/\b(post[\s-]*construction|construction cleanup)\b/.test(normalized)) {
+  if (/\b(post[\s-]*construction|construction cleanup|post[\s-]*construcci[oó]n|limpieza de obra)\b/.test(normalized)) {
     return 'postConstruction';
   }
 
   return null;
 }
 
-function estimateServiceOptionsText(): string {
+function defaultUserStart(language: AgentLanguage): string {
+  return t(language, {
+    en: DEFAULT_USER_START,
+    es: 'Hola, ¿cómo estás? ¿En qué te puedo ayudar hoy?',
+  });
+}
+
+function bootstrapOpener(language: AgentLanguage): string {
+  return t(language, {
+    en: DEFAULT_ASSISTANT_BOOTSTRAP_OPENER,
+    es: 'Hola, gracias por comunicarte con Steam Zone. ¿Cómo puedo ayudarte hoy?',
+  });
+}
+
+function localizedServiceLabel(label: string, language: AgentLanguage): string {
+  if (language !== 'es') {
+    return label;
+  }
+
+  const key = label.trim().toLowerCase();
+  if (key === 'residential windows') return 'Ventanas Residenciales';
+  if (key === 'commercial windows') return 'Ventanas Comerciales';
+  if (key === 'carpet cleaning') return 'Limpieza de Alfombras';
+  if (key === 'post-construction') return 'Post-Construcción';
+  return label;
+}
+
+function estimateServiceOptionsText(language: AgentLanguage): string {
   const serviceField = getSchemaField('serviceType');
   const options = serviceField ? getFieldOptions(serviceField, undefined) : [];
   if (options.length === 0) {
-    return 'Residential Windows, Commercial Windows, Carpet Cleaning, and Post-Construction';
+    return t(language, {
+      en: 'Residential Windows, Commercial Windows, Carpet Cleaning, and Post-Construction',
+      es: 'Ventanas Residenciales, Ventanas Comerciales, Limpieza de Alfombras y Post-Construcción',
+    });
   }
+  const labels = options.map((option) => localizedServiceLabel(option.label, language));
   if (options.length === 1) {
-    return options[0].label;
+    return labels[0];
   }
   if (options.length === 2) {
-    return `${options[0].label} and ${options[1].label}`;
+    return language === 'es' ? `${labels[0]} y ${labels[1]}` : `${labels[0]} and ${labels[1]}`;
   }
 
-  const head = options.slice(0, -1).map((option) => option.label).join(', ');
-  return `${head}, and ${options[options.length - 1].label}`;
+  const head = labels.slice(0, -1).join(', ');
+  return language === 'es' ? `${head} y ${labels[labels.length - 1]}` : `${head}, and ${labels[labels.length - 1]}`;
 }
 
-function buildServiceCatalogResponse(): string {
-  return `We currently provide instant estimates for ${estimateServiceOptionsText()}. Would you like a quote for one of these?`;
+function buildServiceCatalogResponse(language: AgentLanguage): string {
+  return t(language, {
+    en: `We currently provide instant estimates for ${estimateServiceOptionsText(language)}. Would you like a quote for one of these?`,
+    es: `Actualmente ofrecemos cotizaciones instantáneas para ${estimateServiceOptionsText(language)}. ¿Te gustaría una cotización de uno de estos?`,
+  });
 }
 
-function buildEstimateConfirmationQuestion(context: Exclude<PendingEstimateContext, null>): string {
+function buildEstimateConfirmationQuestion(
+  context: Exclude<PendingEstimateContext, null>,
+  language: AgentLanguage
+): string {
   if (context === 'direct_intent') {
-    return 'Perfect. Do you want to start your estimate now?';
+    return t(language, {
+      en: 'Perfect. Do you want to start your estimate now?',
+      es: 'Perfecto. ¿Quieres comenzar tu cotización ahora?',
+    });
   }
-  return 'I can help with an estimate. Do you want to start one now?';
+  return t(language, {
+    en: 'I can help with an estimate. Do you want to start one now?',
+    es: 'Puedo ayudarte con una cotización. ¿Quieres empezar una ahora?',
+  });
 }
 
-function buildUnsupportedEstimateServiceMessage(): string {
-  return `I can only provide instant estimates for ${estimateServiceOptionsText()}. Which one would you like?`;
+function buildUnsupportedEstimateServiceMessage(language: AgentLanguage): string {
+  return t(language, {
+    en: `I can only provide instant estimates for ${estimateServiceOptionsText(language)}. Which one would you like?`,
+    es: `Solo puedo ofrecer cotizaciones instantáneas para ${estimateServiceOptionsText(language)}. ¿Cuál te gustaría?`,
+  });
+}
+
+function localizedOptionLabel(value: string, label: string, language: AgentLanguage): string {
+  if (language !== 'es') {
+    return label;
+  }
+
+  const key = value.trim().toLowerCase();
+  const byValue: Record<string, string> = {
+    zonea: 'Zona A - Steinbach + 15 km',
+    zoneb: 'Zona B - de 15 km a 35 km',
+    zonec: 'Zona C - viajes a Winnipeg',
+    zoned: 'Zona D - rural extendida',
+    exterior: 'Exterior',
+    interior: 'Interior',
+    both: 'Interior y Exterior',
+    yes: 'Sí',
+    no: 'No',
+    none: 'Ninguno',
+    some: 'Algunos',
+    all: 'Todos',
+    basic: 'Básico',
+    detailed: 'Detallado',
+    slideonly: 'Solo deslizar',
+    takeapart: 'Desarmar',
+    panecount: 'Por número de paneles',
+    frontage: 'Por frente (pies)',
+    rooms: 'Por habitaciones',
+    sqft: 'Por pies cuadrados',
+    residential: 'Residencial',
+    commercial: 'Comercial',
+  };
+
+  return byValue[key] ?? localizedServiceLabel(label, language);
+}
+
+function localizedOptionsText(fieldKey: string, answers: Record<string, unknown>, language: AgentLanguage): string {
+  const field = getSchemaField(fieldKey);
+  if (!field) return '';
+  const serviceType = typeof answers.serviceType === 'string' ? (answers.serviceType as ServiceType) : undefined;
+  const options = getFieldOptions(field, serviceType);
+  if (options.length === 0) return '';
+  return options.map((option) => localizedOptionLabel(option.value, option.label, language)).join(', ');
+}
+
+function localizedEstimateQuestion(
+  fieldKey: string | undefined,
+  questionText: string | undefined,
+  answers: Record<string, unknown>,
+  language: AgentLanguage
+): string {
+  const fallback = String(questionText ?? '').trim();
+  if (language !== 'es') {
+    return fallback || 'Please share the next estimate detail.';
+  }
+
+  const key = String(fieldKey ?? '').trim();
+  const optionsText = key ? localizedOptionsText(key, answers, language) : '';
+
+  switch (key) {
+    case 'serviceType':
+      return `¿Qué servicio quieres cotizar? ${optionsText}`.trim();
+    case 'postalCode':
+      return '¿Cuál es el código postal de la propiedad? (Ejemplo: R5G 2X3)';
+    case 'zone':
+      return `¿Qué zona de viaje aplica? ${optionsText}`.trim();
+    case 'contact.fullName':
+      return '¿Me compartes tu nombre completo?';
+    case 'contact.phone':
+      return '¿Cuál es el mejor número de teléfono para contactarte?';
+    case 'contact.email':
+      return '¿Cuál es tu correo para enviarte la cotización?';
+    case 'contact.address':
+      return '¿Cuál es la dirección del servicio? (opcional)';
+    case 'contact.consentToContact':
+      return '¿Me autorizas a contactarte por esta cotización?';
+    case 'contact.marketingOptIn':
+      return '¿Deseas recibir ofertas y novedades ocasionales?';
+    default:
+      if (fallback) {
+        return fallback;
+      }
+      return 'Por favor comparte el siguiente dato de la cotización.';
+  }
 }
 
 function normalizeAssistantMessage(text: string): string {
@@ -938,7 +1079,8 @@ function buildInstructionContext(
   inputText: string,
   faqMatches: KnowledgeMatch[],
   systemPrompt: string,
-  estimateFlowActive: boolean
+  estimateFlowActive: boolean,
+  language: AgentLanguage
 ): string {
   const channelText = channel ? `Input channel: ${channel}.` : 'Input channel: web.';
   const channelGuidance =
@@ -957,6 +1099,10 @@ function buildInstructionContext(
     estimateFlowActive
       ? 'Estimate flow is active. Collect only estimate fields from schema and move through form order with one question at a time.'
       : 'Do not collect estimate fields until user explicitly asks for a quote/estimate. Answer business questions from FAQ only first.',
+    `Response language: ${language === 'es' ? 'Spanish' : 'English'}.`,
+    language === 'es'
+      ? 'Speak naturally in Spanish. Keep one-question-per-turn behavior and keep service/field values canonical for tool calls.'
+      : 'Speak naturally in English.',
     channelText,
     channelGuidance,
     'Session Context:',
@@ -979,7 +1125,8 @@ function applyResponseGuardrails(
   faqMatches: KnowledgeMatch[],
   hadPriorAssistantTurn: boolean,
   mode: SessionMode,
-  estimateContinuationQuestion?: string
+  estimateContinuationQuestion?: string,
+  language: AgentLanguage = 'en'
 ): string {
   let next = normalizeAssistantMessage(assistantMessage);
   const greetingPrefix = /^(?:hi|hello|hey|hi there|hello there)[,! ]+/i;
@@ -990,9 +1137,18 @@ function applyResponseGuardrails(
 
   if (!next) {
     if (mode === 'estimate') {
-      return estimateContinuationQuestion?.trim() || 'Please share the next estimate detail.';
+      return (
+        estimateContinuationQuestion?.trim() ||
+        t(language, {
+          en: 'Please share the next estimate detail.',
+          es: 'Por favor comparte el siguiente dato de la cotización.',
+        })
+      );
     }
-    return 'Got it. What can I help you with?';
+    return t(language, {
+      en: 'Got it. What can I help you with?',
+      es: 'Entendido. ¿En qué te puedo ayudar?',
+    });
   }
 
   const topMatch = faqMatches[0];
@@ -1015,15 +1171,20 @@ function applyResponseGuardrails(
     faqMatches.length === 0 &&
     isGenericConversationPrompt(inputText)
   ) {
-    next = "I'm here and ready to help. What can I help you with today?";
+    next = t(language, {
+      en: "I'm here and ready to help. What can I help you with today?",
+      es: 'Estoy aquí y listo para ayudarte. ¿En qué te puedo ayudar hoy?',
+    });
   } else if (
     likelyInfoQuestion &&
     !estimateIntent &&
     faqMatches.length === 0 &&
     !hasFollowUpOffer(next)
   ) {
-    next =
-      "I want to make sure I give you accurate information, and I don't have that confirmed in our Steam Zone QA yet. I can have a team member follow up by call, text, or email. What is the best contact for you?";
+    next = t(language, {
+      en: "I want to make sure I give you accurate information, and I don't have that confirmed in our Steam Zone QA yet. I can have a team member follow up by call, text, or email. What is the best contact for you?",
+      es: 'Quiero darte información precisa y eso aún no está confirmado en nuestra base de Steam Zone. Un miembro del equipo puede darte seguimiento por llamada, SMS o correo. ¿Cuál es el mejor contacto para ti?',
+    });
   }
 
   next = enforceSingleQuestion(next);
@@ -1033,9 +1194,18 @@ function applyResponseGuardrails(
     return normalized;
   }
   if (mode === 'estimate') {
-    return estimateContinuationQuestion?.trim() || 'Please share the next estimate detail.';
+    return (
+      estimateContinuationQuestion?.trim() ||
+      t(language, {
+        en: 'Please share the next estimate detail.',
+        es: 'Por favor comparte el siguiente dato de la cotización.',
+      })
+    );
   }
-  return 'Got it. What can I help you with?';
+  return t(language, {
+    en: 'Got it. What can I help you with?',
+    es: 'Entendido. ¿En qué te puedo ayudar?',
+  });
 }
 
 function readAssistantText(response: OpenAIResponse): string {
@@ -1082,7 +1252,7 @@ function hasNumericValue(raw: string): boolean {
 }
 
 function hasBooleanCue(raw: string): boolean {
-  return /\b(yes|yep|yeah|sure|no|nope|nah|affirmative|negative|confirm|correct)\b/i.test(raw);
+  return /\b(yes|yep|yeah|sure|no|nope|nah|affirmative|negative|confirm|correct|s[ií]|claro)\b/i.test(raw);
 }
 
 function hasAnyWord(raw: string, words: string[]): boolean {
@@ -1674,7 +1844,8 @@ async function instructionsForContext(
   inputText: string,
   faqMatches: KnowledgeMatch[],
   systemPrompt: string,
-  estimateFlowActive: boolean
+  estimateFlowActive: boolean,
+  language: AgentLanguage
 ): Promise<string> {
   return buildInstructionContext(
     channel,
@@ -1682,7 +1853,8 @@ async function instructionsForContext(
     inputText,
     faqMatches,
     systemPrompt,
-    estimateFlowActive
+    estimateFlowActive,
+    language
   );
 }
 
@@ -1692,7 +1864,8 @@ async function runAgentLoop(
   sessionId: string,
   inputText: string,
   channel: PostagentChannel | undefined,
-  estimateFlowActive: boolean
+  estimateFlowActive: boolean,
+  language: AgentLanguage
 ): Promise<{ assistant_message: string; assistant_reasoning: string[]; quote: unknown; next_hint: NextHint; done: boolean }> {
   let sessionContext = await runtime.toolGetState(sessionId);
   const promptConfig = await getAgentSystemPromptConfig();
@@ -1709,7 +1882,8 @@ async function runAgentLoop(
     inputText,
     faqMatches,
     systemPrompt,
-    estimateFlowActive
+    estimateFlowActive,
+    language
   );
   const useInfoOnlyTools = !estimateFlowActive;
 
@@ -1785,21 +1959,32 @@ async function runAgentLoop(
 
   if (!assistantMessage) {
     if (done && computedQuote) {
-      assistantMessage = 'Your estimate is ready. I included the quote below.';
+      assistantMessage = t(language, {
+        en: 'Your estimate is ready. I included the quote below.',
+        es: 'Tu cotización está lista. Incluí el resultado abajo.',
+      });
     } else if (estimateFlowActive) {
       const next = await runtime.toolNextQuestion(sessionId);
       const questionText = next.question_text ?? 'Please provide the next detail.';
       if (!hadPriorAssistantTurn) {
-        assistantMessage = `${DEFAULT_USER_START} ${questionText}`.trim();
+        assistantMessage = `${defaultUserStart(language)} ${questionText}`.trim();
       } else {
         assistantMessage = questionText;
       }
     } else {
-      assistantMessage = DEFAULT_USER_START;
+      assistantMessage = defaultUserStart(language);
     }
   }
 
-  assistantMessage = applyResponseGuardrails(assistantMessage, inputText, faqMatches, hadPriorAssistantTurn, 'support');
+  assistantMessage = applyResponseGuardrails(
+    assistantMessage,
+    inputText,
+    faqMatches,
+    hadPriorAssistantTurn,
+    'support',
+    undefined,
+    language
+  );
   const assistantReasoning = buildReasoningText(reasoningSteps);
 
   return {
@@ -1814,7 +1999,8 @@ async function runAgentLoop(
 async function tryDeterministicSupportFastPath(
   runtime: EstimateAgentRuntimeModule,
   sessionId: string,
-  inputText: string
+  inputText: string,
+  language: AgentLanguage
 ): Promise<{ assistant_message: string; assistant_reasoning: string[]; quote: null; next_hint: NextHint; done: false } | null> {
   const normalizedInput = inputText.replace(/\s+/g, ' ').trim();
   if (!normalizedInput) {
@@ -1835,11 +2021,13 @@ async function tryDeterministicSupportFastPath(
   if (asksForServiceCatalog(normalizedInput)) {
     return {
       assistant_message: applyResponseGuardrails(
-        buildServiceCatalogResponse(),
+        buildServiceCatalogResponse(language),
         normalizedInput,
         faqMatches,
         hadPriorAssistantTurn,
-        'support'
+        'support',
+        undefined,
+        language
       ),
       assistant_reasoning: buildReasoningText([
         `I reviewed your latest message: “${normalizedInput.slice(0, 200)}”.`,
@@ -1854,11 +2042,16 @@ async function tryDeterministicSupportFastPath(
   // Conservative threshold to keep direct FAQ answers fast without increasing hallucination risk.
   if (likelyInfoQuestion && !directEstimateIntent && topMatch && topMatch.score >= 3) {
     const message = applyResponseGuardrails(
-      `${topMatch.answer}\n\nIf you'd like, I can also help with a quick estimate.`,
+      `${topMatch.answer}\n\n${t(language, {
+        en: "If you'd like, I can also help with a quick estimate.",
+        es: 'Si quieres, también puedo ayudarte con una cotización rápida.',
+      })}`,
       normalizedInput,
       faqMatches,
       hadPriorAssistantTurn,
-      'support'
+      'support',
+      undefined,
+      language
     );
 
     return {
@@ -1875,8 +2068,14 @@ async function tryDeterministicSupportFastPath(
 
   if (likelyInfoQuestion && !directEstimateIntent && faqMatches.length === 0) {
     const deterministicFallback = isGenericConversationPrompt(normalizedInput)
-      ? "I'm here and ready to help. What can I help you with today?"
-      : "I want to make sure I give you accurate information, and I don't have that confirmed in our Steam Zone QA yet. I can have a team member follow up by call, text, or email. What is the best contact for you?";
+      ? t(language, {
+          en: "I'm here and ready to help. What can I help you with today?",
+          es: 'Estoy aquí y listo para ayudarte. ¿En qué te puedo ayudar hoy?',
+        })
+      : t(language, {
+          en: "I want to make sure I give you accurate information, and I don't have that confirmed in our Steam Zone QA yet. I can have a team member follow up by call, text, or email. What is the best contact for you?",
+          es: 'Quiero darte información precisa y eso aún no está confirmado en nuestra base de Steam Zone. Un miembro del equipo puede darte seguimiento por llamada, SMS o correo. ¿Cuál es el mejor contacto para ti?',
+        });
 
     return {
       assistant_message: applyResponseGuardrails(
@@ -1884,7 +2083,9 @@ async function tryDeterministicSupportFastPath(
         normalizedInput,
         faqMatches,
         hadPriorAssistantTurn,
-        'support'
+        'support',
+        undefined,
+        language
       ),
       assistant_reasoning: buildReasoningText([
         `I reviewed your latest message: “${normalizedInput.slice(0, 200)}”.`,
@@ -1900,13 +2101,14 @@ async function tryDeterministicSupportFastPath(
 }
 
 export async function decideNextAssistantTurn(
-  request: { session_id: string; input_text: string; channel?: PostagentChannel; turn_id?: string }
+  request: { session_id: string; input_text: string; channel?: PostagentChannel; turn_id?: string; language?: AgentLanguage }
 ): Promise<PostagentEstimateResponse> {
   return runEstimateAgentCore({
     session_id: request.session_id,
     input_text: request.input_text,
     channel: request.channel,
     turn_id: request.turn_id,
+    language: request.language,
   });
 }
 
@@ -1920,6 +2122,10 @@ export async function runEstimateAgentCore(
   const channel = request.channel;
   const turnId = readTurnId(request);
   let initialSession = await runtime.getSession(sessionId);
+  const requestHasLanguage = request.language === 'en' || request.language === 'es';
+  const requestedLanguage = normalizeAgentLanguage(request.language);
+  const sessionLanguage = normalizeAgentLanguage(initialSession.answers['__language']);
+  const language = requestHasLanguage ? requestedLanguage : sessionLanguage;
   const stateHint = request.state_hint;
   const hintedSessionId =
     typeof stateHint?.session_id === 'string' && stateHint.session_id.trim().length > 0
@@ -1967,8 +2173,17 @@ export async function runEstimateAgentCore(
   }
 
   if (isBootstrap && !inputText) {
+    if (initialSession.answers['__language'] !== language) {
+      initialSession = await runtime.saveSession({
+        ...initialSession,
+        answers: {
+          ...initialSession.answers,
+          __language: language,
+        },
+      });
+    }
     const priorAssistant = latestAssistantText(initialSession.transcript);
-    const openerText = priorAssistant || DEFAULT_ASSISTANT_BOOTSTRAP_OPENER;
+    const openerText = priorAssistant || bootstrapOpener(language);
     if (!priorAssistant) {
       await runtime.appendTranscript(sessionId, {
         role: 'assistant',
@@ -2059,13 +2274,16 @@ export async function runEstimateAgentCore(
       if (negativeIntent) {
         stagedAnswers = clearPendingEstimateConfirmation(stagedAnswers);
         modeDecisionChanged = true;
-        forcedSupportMessage = 'No problem. What would you like help with today?';
+        forcedSupportMessage = t(language, {
+          en: 'No problem. What would you like help with today?',
+          es: 'No hay problema. ¿Con qué te gustaría que te ayude hoy?',
+        });
       } else if (affirmativeIntent || directEstimateIntent || serviceMention) {
         mode = 'estimate';
         stagedAnswers = clearPendingEstimateConfirmation(stagedAnswers);
         modeDecisionChanged = true;
       } else {
-        forcedSupportMessage = buildEstimateConfirmationQuestion(pendingEstimateContext ?? 'direct_intent');
+        forcedSupportMessage = buildEstimateConfirmationQuestion(pendingEstimateContext ?? 'direct_intent', language);
       }
     } else if (directEstimateIntent) {
       if (serviceMention) {
@@ -2078,7 +2296,7 @@ export async function runEstimateAgentCore(
           ...withPendingEstimateConfirmation(initialSession, 'direct_intent').answers,
         };
         modeDecisionChanged = true;
-        forcedSupportMessage = buildEstimateConfirmationQuestion('direct_intent');
+        forcedSupportMessage = buildEstimateConfirmationQuestion('direct_intent', language);
       }
     } else if (aggressiveBuyingSignal && !likelyInfoQuestion) {
       stagedAnswers = {
@@ -2086,15 +2304,26 @@ export async function runEstimateAgentCore(
         ...withPendingEstimateConfirmation(initialSession, 'aggressive_signal').answers,
       };
       modeDecisionChanged = true;
-      forcedSupportMessage = buildEstimateConfirmationQuestion('aggressive_signal');
+      forcedSupportMessage = buildEstimateConfirmationQuestion('aggressive_signal', language);
     }
   }
 
   if (modeDecisionChanged) {
     initialSession = await runtime.saveSession({
       ...initialSession,
-      answers: stagedAnswers,
+      answers: {
+        ...stagedAnswers,
+        __language: language,
+      },
       mode,
+    });
+  } else if (initialSession.answers['__language'] !== language) {
+    initialSession = await runtime.saveSession({
+      ...initialSession,
+      answers: {
+        ...initialSession.answers,
+        __language: language,
+      },
     });
   }
 
@@ -2131,7 +2360,7 @@ export async function runEstimateAgentCore(
     if (unresolvedServiceType && !detectedServiceType && mentionsUnsupportedEstimateService(inputText)) {
       const deterministicNextHint = await runtime.peekNextQuestion(sessionId);
       loopResult = {
-        assistant_message: buildUnsupportedEstimateServiceMessage(),
+        assistant_message: buildUnsupportedEstimateServiceMessage(language),
         assistant_reasoning: buildReasoningText([
           `Estimate mode is active for session ${sessionId}.`,
           'User requested an unsupported estimate service while service type is unresolved.',
@@ -2157,17 +2386,29 @@ export async function runEstimateAgentCore(
         const contact = asRecord(afterParse.answers.contact) ?? {};
         const email = String(contact.email ?? '').trim();
         deterministicMessage = totalText
-          ? `Thanks, I have everything for your estimate. The subtotal is ${totalText}.${
-              email ? ` I can email the quote to ${email}.` : ''
-            }`
-          : 'Thanks, I have everything for your estimate. Your quote is ready.';
+          ? t(language, {
+              en: `Thanks, I have everything for your estimate. The subtotal is ${totalText}.${email ? ` I can email the quote to ${email}.` : ''}`,
+              es: `Gracias, ya tengo todo para tu cotización. El subtotal es ${totalText}.${email ? ` Puedo enviarla a ${email}.` : ''}`,
+            })
+          : t(language, {
+              en: 'Thanks, I have everything for your estimate. Your quote is ready.',
+              es: 'Gracias, ya tengo todo para tu cotización. Tu cotización está lista.',
+            });
         deterministicNextHint = { done: true };
       } else if (parseResult.ambiguity.length > 0 && parseResult.applied.length === 0) {
-        deterministicMessage = parseResult.ambiguity[0];
+        deterministicMessage =
+          language === 'es'
+            ? 'Necesito una aclaración rápida para continuar con la cotización.'
+            : parseResult.ambiguity[0];
         deterministicNextHint = await runtime.peekNextQuestion(sessionId);
       } else {
         deterministicNextHint = await runtime.toolNextQuestion(sessionId);
-        deterministicMessage = deterministicNextHint.question_text ?? 'Please share the next estimate detail.';
+        deterministicMessage = localizedEstimateQuestion(
+          deterministicNextHint.next_field_key,
+          deterministicNextHint.question_text,
+          afterParse.answers,
+          language
+        );
       }
 
       loopResult = {
@@ -2198,12 +2439,12 @@ export async function runEstimateAgentCore(
       done: false,
     };
   } else {
-    const deterministicSupportResult = await tryDeterministicSupportFastPath(runtime, sessionId, inputText);
+    const deterministicSupportResult = await tryDeterministicSupportFastPath(runtime, sessionId, inputText, language);
     if (deterministicSupportResult) {
       loopResult = deterministicSupportResult;
     } else {
       const modelConfig = await resolveModelProviderConfig(channel);
-      loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, channel, false);
+      loopResult = await runAgentLoop(runtime, modelConfig, sessionId, inputText, channel, false, language);
       loopResult.done = false;
       loopResult.quote = null;
       loopResult.next_hint = { done: true };
@@ -2374,6 +2615,12 @@ export async function handlerForEstimateAgentPost(
       input_text: inputText,
       bootstrap,
       channel: (payload?.channel as PostagentChannel | undefined) ?? 'web',
+      language:
+        payload?.language === 'es'
+          ? 'es'
+          : payload?.language === 'en'
+            ? 'en'
+            : undefined,
       turn_id: rawTurnId || undefined,
       state_hint: asRecord(payload?.state_hint) as PostagentEstimateRequest['state_hint'],
       metadata: asRecord(payload?.metadata) ?? {},

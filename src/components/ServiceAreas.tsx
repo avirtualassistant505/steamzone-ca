@@ -1,4 +1,5 @@
 import { MapPin } from 'lucide-react';
+import { langText, useSiteLanguage } from '../i18n/siteLanguage';
 
 const areas = [
   {
@@ -12,13 +13,17 @@ const areas = [
 ];
 
 export default function ServiceAreas() {
+  const { language } = useSiteLanguage();
   return (
     <section id="areas" className="py-24 bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="text-center mb-16">
-          <h2 className="text-4xl md:text-5xl font-bold text-gray-900 mb-4">Service Areas</h2>
+          <h2 className="text-4xl md:text-5xl font-bold text-gray-900 mb-4">{langText(language, { en: 'Service Areas', es: 'Zonas de Servicio' })}</h2>
           <p className="text-xl text-gray-600 max-w-3xl mx-auto">
-            Proudly serving Winnipeg, Steinbach, and surrounding communities throughout Manitoba
+            {langText(language, {
+              en: 'Proudly serving Winnipeg, Steinbach, and surrounding communities throughout Manitoba',
+              es: 'Atendemos con orgullo Winnipeg, Steinbach y comunidades cercanas en Manitoba',
+            })}
           </p>
         </div>
 
@@ -45,13 +50,16 @@ export default function ServiceAreas() {
 
         <div className="mt-12 text-center">
           <p className="text-lg text-gray-600 mb-6">
-            Don't see your area listed? Contact us to find out if we service your location!
+            {langText(language, {
+              en: "Don't see your area listed? Contact us to find out if we service your location!",
+              es: '¿No ve su zona en la lista? Contáctenos para confirmar si atendemos su ubicación.',
+            })}
           </p>
           <a
             href="#contact"
             className="inline-block px-8 py-4 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition"
           >
-            Contact Us
+            {langText(language, { en: 'Contact Us', es: 'Contáctenos' })}
           </a>
         </div>
       </div>
