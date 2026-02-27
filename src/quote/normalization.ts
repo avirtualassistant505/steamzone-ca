@@ -77,9 +77,7 @@ const numberWordValues: Record<string, number> = {
 };
 
 const numberWordAliases: Record<string, string> = {
-  to: 'two',
   too: 'two',
-  for: 'four',
   fore: 'four',
   ate: 'eight',
   touchdown: 'two',
@@ -263,10 +261,72 @@ function extractAddress(input: string): string | null {
 }
 
 function parsePostalCode(input: string): string | null {
-  const hit = input.match(/[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d/);
-  if (!hit) return null;
-  const raw = hit[0].toUpperCase().replace(/\s+/g, '');
-  return `${raw.slice(0, 3)} ${raw.slice(3)}`;
+  const direct = input.match(/[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d/);
+  if (direct) {
+    const raw = direct[0].toUpperCase().replace(/\s+/g, '');
+    return `${raw.slice(0, 3)} ${raw.slice(3)}`;
+  }
+
+  const compact = input.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (compact.length < 6) return null;
+
+  const letterFromDigit: Record<string, string> = {
+    '0': 'O',
+    '1': 'I',
+    '2': 'Z',
+    '3': 'B',
+    '4': 'A',
+    '5': 'S',
+    '6': 'G',
+    '7': 'T',
+    '8': 'B',
+    '9': 'P',
+  };
+  const digitFromLetter: Record<string, string> = {
+    O: '0',
+    Q: '0',
+    I: '1',
+    L: '1',
+    Z: '2',
+    S: '5',
+    B: '8',
+    G: '6',
+    T: '7',
+  };
+
+  for (let index = 0; index <= compact.length - 6; index += 1) {
+    const candidate = compact.slice(index, index + 6);
+    let normalized = '';
+    let valid = true;
+
+    for (let pos = 0; pos < 6; pos += 1) {
+      const char = candidate[pos];
+      const expectsLetter = pos % 2 === 0;
+      if (expectsLetter) {
+        if (/[A-Z]/.test(char)) {
+          normalized += char;
+        } else if (letterFromDigit[char]) {
+          normalized += letterFromDigit[char];
+        } else {
+          valid = false;
+          break;
+        }
+      } else if (/\d/.test(char)) {
+        normalized += char;
+      } else if (digitFromLetter[char]) {
+        normalized += digitFromLetter[char];
+      } else {
+        valid = false;
+        break;
+      }
+    }
+
+    if (valid && /^[A-Z]\d[A-Z]\d[A-Z]\d$/.test(normalized)) {
+      return `${normalized.slice(0, 3)} ${normalized.slice(3)}`;
+    }
+  }
+
+  return null;
 }
 
 function parsePhone(input: string): string | null {

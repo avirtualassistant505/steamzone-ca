@@ -413,6 +413,12 @@ const GENERIC_CONVERSATION_PROMPT_CUES =
   /\b(what is happening|what's happening|whats happening|what.?s up|how.?s it going|how is it going|hello|hi there|hey there|hola|buenas|qu[eé]\s+pasa|qu[eé]\s+tal)\b/i;
 const UNSUPPORTED_ESTIMATE_SERVICE_CUES =
   /\b(grout|tile|tiles|upholstery|sofa|couch|mattress|duct|chimney|pressure wash|power wash)\b/i;
+const MATERIALS_INCLUDED_QUESTION_CUES =
+  /\b(material|materials|supply|supplies|equipment|tools|included|bring|provide|deep clean|deep cleaning)\b/i;
+const FIRST_TIME_DISCOUNT_QUESTION_CUES =
+  /\b(discount|discounts|promotion|promotions|promo|deals?)\b.*\b(first[\s-]?time|new customer|new customers)\b|\b(first[\s-]?time|new customer|new customers)\b.*\b(discount|discounts|promotion|promotions|promo|deals?)\b/i;
+const INSTRUCTION_STYLE_ANSWER_CUES =
+  /^\s*(explain that|say|use this|follow this|script|instruction|the ai should)\b/i;
 const PENDING_ESTIMATE_CONFIRMATION_KEY = '__pending_estimate_confirmation';
 const PENDING_ESTIMATE_CONFIRMATION_AT_KEY = '__pending_estimate_confirmation_at';
 const PENDING_ESTIMATE_CONFIRMATION_CONTEXT_KEY = '__pending_estimate_context';
@@ -906,6 +912,45 @@ function buildUnsupportedEstimateServiceMessage(language: AgentLanguage): string
   });
 }
 
+function asksAboutMaterialsIncluded(inputText: string): boolean {
+  const normalized = inputText.trim().toLowerCase();
+  if (!normalized) return false;
+  if (!MATERIALS_INCLUDED_QUESTION_CUES.test(normalized)) return false;
+  return /\b(include|included|provide|bring|need|materials|supplies|deep clean|deep cleaning|estimate)\b/i.test(normalized);
+}
+
+function buildMaterialsIncludedResponse(language: AgentLanguage): string {
+  return t(language, {
+    en: 'Yes. All cleaning materials are included in our service and in our estimates.',
+    es: 'Sí. Todos los materiales de limpieza están incluidos en nuestro servicio y en nuestras cotizaciones.',
+  });
+}
+
+function asksAboutFirstTimeDiscount(inputText: string): boolean {
+  return FIRST_TIME_DISCOUNT_QUESTION_CUES.test(inputText.trim().toLowerCase());
+}
+
+function isInstructionStyleAnswer(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    INSTRUCTION_STYLE_ANSWER_CUES.test(normalized) ||
+    normalized.includes('the ai should') ||
+    normalized.includes('if you want ongoing service, we apply a discount')
+  );
+}
+
+function startsWithYesNo(text: string): boolean {
+  return /^\s*(yes|no|si|sí)\b/i.test(text.trim());
+}
+
+function buildFirstTimeDiscountResponse(language: AgentLanguage): string {
+  return t(language, {
+    en: 'No, we do not offer a first-time customer discount. One-time service is full price. We do offer recurring service discounts: Monthly 10% off, Biweekly 20% off, and Weekly 25% off.',
+    es: 'No, no ofrecemos un descuento para clientes por primera vez. El servicio de una sola vez es precio completo. Sí ofrecemos descuentos por servicio recurrente: mensual 10% menos, quincenal 20% menos y semanal 25% menos.',
+  });
+}
+
 function localizedOptionLabel(value: string, label: string, language: AgentLanguage): string {
   if (language !== 'es') {
     return label;
@@ -1130,9 +1175,15 @@ function applyResponseGuardrails(
 ): string {
   let next = normalizeAssistantMessage(assistantMessage);
   const greetingPrefix = /^(?:hi|hello|hey|hi there|hello there)[,! ]+/i;
+  const internalFallbackLeak =
+    /\b(no (?:high[- ]confidence|relevant) (?:faq )?match|no relevant answer returned|repeat(?:ed)? the previous prompt)\b/i;
 
   if (hadPriorAssistantTurn) {
     next = next.replace(greetingPrefix, '').trim();
+  }
+
+  if (internalFallbackLeak.test(next)) {
+    next = '';
   }
 
   if (!next) {
@@ -1205,6 +1256,13 @@ function applyResponseGuardrails(
   return t(language, {
     en: 'Got it. What can I help you with?',
     es: 'Entendido. ¿En qué te puedo ayudar?',
+  });
+}
+
+function buildEstimateUnknownAnswerFallback(language: AgentLanguage): string {
+  return t(language, {
+    en: "Good question. I don't have that confirmed in our current Steam Zone knowledge base, and I don't want to guess. I can have a team member confirm it by text, call, or email.",
+    es: 'Buena pregunta. Eso no lo tengo confirmado en la base de conocimiento actual de Steam Zone y no quiero adivinar. Un miembro del equipo puede confirmarlo por SMS, llamada o correo.',
   });
 }
 
@@ -2041,8 +2099,18 @@ async function tryDeterministicSupportFastPath(
 
   // Conservative threshold to keep direct FAQ answers fast without increasing hallucination risk.
   if (likelyInfoQuestion && !directEstimateIntent && topMatch && topMatch.score >= 3) {
+    let directAnswer = String(topMatch.answer ?? '').trim();
+    const firstTimeDiscountQuestion = asksAboutFirstTimeDiscount(normalizedInput);
+    const instructionStyle = isInstructionStyleAnswer(directAnswer);
+
+    if (firstTimeDiscountQuestion && (instructionStyle || !startsWithYesNo(directAnswer))) {
+      directAnswer = buildFirstTimeDiscountResponse(language);
+    } else if (instructionStyle) {
+      return null;
+    }
+
     const message = applyResponseGuardrails(
-      `${topMatch.answer}\n\n${t(language, {
+      `${directAnswer}\n\n${t(language, {
         en: "If you'd like, I can also help with a quick estimate.",
         es: 'Si quieres, también puedo ayudarte con una cotización rápida.',
       })}`,
@@ -2059,6 +2127,9 @@ async function tryDeterministicSupportFastPath(
       assistant_reasoning: buildReasoningText([
         `I reviewed your latest message: “${normalizedInput.slice(0, 200)}”.`,
         `I found a high-confidence FAQ match (score ${topMatch.score.toFixed(3)}) and answered directly without a model round-trip.`,
+        firstTimeDiscountQuestion && (instructionStyle || !startsWithYesNo(String(topMatch.answer ?? '')))
+          ? 'I converted an instruction-style FAQ snippet into a direct yes/no policy answer for customer-safe output.'
+          : '',
       ]),
       quote: null,
       next_hint: { done: true },
@@ -2377,6 +2448,21 @@ export async function runEstimateAgentCore(
       const missingRequired = runtime.validateRequiredAnswers(sanitizedAnswersForClient(afterParse.answers));
       const done = missingRequired.length === 0;
       const quote = done ? await runtime.toolComputeQuote(sessionId) : null;
+      let estimateSupportAnswer: string | null = null;
+
+      if (!done && parseResult.applied.length === 0 && likelyInfoQuestion) {
+        if (asksAboutMaterialsIncluded(inputText)) {
+          estimateSupportAnswer = buildMaterialsIncludedResponse(language);
+        } else {
+          const faqMatches = await searchSteamZoneKnowledgeAsync(inputText, 3);
+          const topMatch = faqMatches[0];
+          if (topMatch && topMatch.score >= 2) {
+            estimateSupportAnswer = topMatch.answer.trim();
+          } else {
+            estimateSupportAnswer = buildEstimateUnknownAnswerFallback(language);
+          }
+        }
+      }
 
       let deterministicMessage = '';
       let deterministicNextHint: NextHint = { done: true };
@@ -2403,12 +2489,18 @@ export async function runEstimateAgentCore(
         deterministicNextHint = await runtime.peekNextQuestion(sessionId);
       } else {
         deterministicNextHint = await runtime.toolNextQuestion(sessionId);
-        deterministicMessage = localizedEstimateQuestion(
+        const nextEstimateQuestion = localizedEstimateQuestion(
           deterministicNextHint.next_field_key,
           deterministicNextHint.question_text,
           afterParse.answers,
           language
         );
+        deterministicMessage = estimateSupportAnswer
+          ? `${estimateSupportAnswer} ${t(language, {
+              en: 'To continue your estimate:',
+              es: 'Para continuar con tu cotización:',
+            })} ${nextEstimateQuestion}`.replace(/\s+/g, ' ').trim()
+          : nextEstimateQuestion;
       }
 
       loopResult = {
@@ -2416,6 +2508,9 @@ export async function runEstimateAgentCore(
         assistant_reasoning: buildReasoningText([
           `Estimate mode is active for session ${sessionId}.`,
           `Parsed ${parseResult.applied.length} field update(s) from this turn.`,
+          estimateSupportAnswer
+            ? 'Answered an in-flow service question and then continued the estimate flow.'
+            : '',
           done
             ? 'All required estimate fields are complete; quote computed deterministically.'
             : `Missing required fields remain; next question key is ${deterministicNextHint.next_field_key ?? 'unknown'}.`,

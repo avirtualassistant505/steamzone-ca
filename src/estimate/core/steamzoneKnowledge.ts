@@ -57,6 +57,21 @@ const PINNED_ENTRIES: RawTrainingItem[] = [
     subtopic: 'Service Area',
     status: 'READY',
   },
+  {
+    question: 'Do you give discounts for first-time customers?',
+    answer:
+      'No, we do not offer a first-time customer discount. One-time service is full price. We do offer recurring service discounts: Monthly 10% off, Biweekly 20% off, and Weekly 25% off.',
+    topic: 'Pricing',
+    subtopic: 'Discounts',
+    status: 'READY',
+  },
+  {
+    question: 'Do I need to provide cleaning materials for deep cleaning service, or is everything included?',
+    answer: 'All cleaning materials are included in our service and in our estimates.',
+    topic: 'Services',
+    subtopic: 'Inclusions',
+    status: 'READY',
+  },
 ];
 
 const STOP_WORDS = new Set([
@@ -229,6 +244,7 @@ function scoreEntry(query: string, queryTokens: string[], entry: KnowledgeEntry)
   if (!query) return 0;
 
   let score = 0;
+  const entryText = `${entry.questionNorm} ${entry.answerNorm}`;
 
   if (entry.questionNorm.includes(query)) score += 6;
   if (entry.answerNorm.includes(query)) score += 2;
@@ -247,6 +263,18 @@ function scoreEntry(query: string, queryTokens: string[], entry: KnowledgeEntry)
   if (query.includes('email') && entry.questionNorm.includes('email')) score += 3;
   if (query.includes('service area') && entry.questionNorm.includes('service')) score += 2;
   if (query.includes('where') && entry.questionNorm.includes('where')) score += 1;
+  if (/(first time|first-time|new customer|new customers)/.test(query)) {
+    if (/(first time|new customer|new customers)/.test(entryText)) score += 4;
+    if (/(recurring|monthly|biweekly|weekly|frequency)/.test(entryText)) score -= 2;
+  }
+  if (/(recurring|monthly|biweekly|weekly|frequency)/.test(query)) {
+    if (/(recurring|monthly|biweekly|weekly|frequency)/.test(entryText)) score += 3;
+    if (/(first time|new customer|new customers)/.test(entryText)) score -= 1.5;
+  }
+  if (/(material|materials|supply|supplies|included|deep clean)/.test(query) &&
+      /(material|materials|supply|supplies|included|deep clean)/.test(entry.questionNorm)) {
+    score += 3;
+  }
 
   return score;
 }

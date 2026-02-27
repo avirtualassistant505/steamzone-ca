@@ -651,13 +651,14 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     }
   }
 
-  async function loadConversationData(): Promise<void> {
+  async function loadConversationData(statusOverride?: 'all' | ConversationReviewStatus): Promise<void> {
     setConversationLoading(true);
     setConversationError('');
     setConversationMessage('');
 
     try {
-      const statusQuery = conversationStatusFilter === 'all' ? '' : `&status=${conversationStatusFilter}`;
+      const activeStatus = statusOverride ?? conversationStatusFilter;
+      const statusQuery = activeStatus === 'all' ? '' : `&status=${activeStatus}`;
       const response = await parseJsonResponse<TranscriptGetPayload>(
         await fetch(`/api/transcripts-get?limit=100${statusQuery}`)
       );
@@ -1180,12 +1181,6 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       void loadConversationData();
     }
   }, [activeTab]);
-
-  useEffect(() => {
-    if (activeTab === 'logs' && conversationLoaded) {
-      void loadConversationData();
-    }
-  }, [activeTab, conversationStatusFilter]);
 
   const latestRecords = useMemo(() => records.slice(0, 15), [records]);
 
@@ -2492,9 +2487,13 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                     <span className="text-xs font-semibold">Filter</span>
                     <select
                       value={conversationStatusFilter}
-                      onChange={(event) =>
-                        setConversationStatusFilter(event.target.value as 'all' | ConversationReviewStatus)
-                      }
+                      onChange={(event) => {
+                        const nextFilter = event.target.value as 'all' | ConversationReviewStatus;
+                        setConversationStatusFilter(nextFilter);
+                        if (activeTab === 'logs') {
+                          void loadConversationData(nextFilter);
+                        }
+                      }}
                       className="rounded border border-gray-300 px-2 py-1 text-sm"
                     >
                       <option value="all">All</option>

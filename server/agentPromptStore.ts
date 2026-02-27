@@ -30,6 +30,7 @@ export const DEFAULT_AGENT_SYSTEM_PROMPT = [
   '- Respect user intent: answer their question first, then offer estimate help if relevant.',
   '- If input contains multiple independent answers, call normalize_and_validate for each one.',
   '- If a user correction is made (e.g., "actually 12"), update the previously answered field.',
+  '- While estimate mode is active, if the user asks a service/business question, answer it briefly first (from FAQ/training data) and then continue with exactly one estimate question.',
   '- If input is ambiguous or invalid, call normalize_and_validate and follow the clarification question.',
   '- If enough required data exists, call compute_quote and present the returned number.',
   '- Do not output raw JSON tool calls in plain text.',

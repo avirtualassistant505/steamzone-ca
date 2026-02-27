@@ -695,6 +695,33 @@ describe('POST /api/postagent/estimate', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('answers first-time discount question with direct yes/no and no instruction-style wording', async () => {
+    delete process.env.OPENAI_API_KEY;
+    const fetchSpy = vi.fn(async () => {
+      throw new Error('Model API should not be called for first-time discount FAQ fast path.');
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: `postagent-firsttime-discount-${Date.now()}`,
+          input_text: 'Do you give discounts for first time customers?',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as { assistant_message: string };
+    expect(payload.assistant_message).toMatch(/^no,/i);
+    expect(payload.assistant_message).toMatch(/monthly 10% off|biweekly 20% off|weekly 25% off/i);
+    expect(payload.assistant_message).not.toMatch(/explain that|the ai should|no relevant answer returned/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('offers team follow-up instead of guessing when answer is not in FAQ data', async () => {
     process.env.OPENAI_API_KEY = 'test-key';
     mockOpenAIMessage("I don't have reliable public info on that.");
@@ -885,6 +912,114 @@ describe('POST /api/postagent/estimate', () => {
     expect(result.applied.some((entry) => entry.field_key === 'sqftBracket')).toBe(true);
     expect(updated.answers['contact.phone']).toBeUndefined();
     expect((updated.answers.contact as { phone?: string } | undefined)?.phone).toBeUndefined();
+  });
+
+  it('answers materials-included question during estimate mode and continues current step', async () => {
+    const sessionId = `postagent-estimate-materials-${Date.now()}`;
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'serviceType', 'carpet');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'postalCode', 'R5G 2X3');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'zone', 'zoneA');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'estimateMode', 'rooms');
+    await estimateAgentRuntime.toolNextQuestion(sessionId);
+    const seeded = await estimateAgentRuntime.getSession(sessionId);
+    await estimateAgentRuntime.saveSession({
+      ...seeded,
+      answers: {
+        ...seeded.answers,
+        __session_mode: 'estimate',
+      },
+      mode: 'estimate',
+    });
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'Do I need to provide cleaning materials for deep cleaning service, or is it included?',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as {
+      assistant_message: string;
+      state: { mode: string; answers: Record<string, unknown> };
+      next_question?: { key: string };
+    };
+    expect(payload.state.mode).toBe('estimate');
+    expect(payload.assistant_message).toMatch(/materials are included|included in our service/i);
+    expect(payload.assistant_message).toMatch(/how many bedrooms\/rooms|rooms are you estimating/i);
+    expect(payload.state.answers.rooms).toBeUndefined();
+    expect(payload.next_question?.key).toBe('rooms');
+  });
+
+  it('handles unknown policy questions in estimate mode with human fallback and then continues flow', async () => {
+    const sessionId = `postagent-estimate-unknown-policy-${Date.now()}`;
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'serviceType', 'carpet');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'postalCode', 'R5G 2X3');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'zone', 'zoneA');
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'estimateMode', 'rooms');
+    await estimateAgentRuntime.toolNextQuestion(sessionId);
+    const seeded = await estimateAgentRuntime.getSession(sessionId);
+    await estimateAgentRuntime.saveSession({
+      ...seeded,
+      answers: {
+        ...seeded.answers,
+        __session_mode: 'estimate',
+      },
+      mode: 'estimate',
+    });
+
+    const res = makeRes();
+    await postagentHandler(
+      {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+          input_text: 'Are your cleaners employed staff or independent contractors?',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as {
+      assistant_message: string;
+      state: { mode: string };
+      next_question?: { key: string };
+    };
+    expect(payload.state.mode).toBe('estimate');
+    expect(payload.assistant_message).toMatch(/good question|i don't have that confirmed|team member/i);
+    expect(payload.assistant_message).toMatch(/continue your estimate|how many bedrooms\/rooms|rooms are you estimating/i);
+    expect(payload.assistant_message).not.toMatch(/no relevant answer returned|repeated the previous prompt/i);
+    expect(payload.next_question?.key).toBe('rooms');
+  });
+
+  it('normalizes postal-code typos like rsg 2x3 to valid format', async () => {
+    const sessionId = `postagent-postal-typo-${Date.now()}`;
+    await estimateAgentRuntime.toolSetAnswer(sessionId, 'serviceType', 'carpet');
+    const schema = await loadSchema();
+    const state = await estimateAgentRuntime.toolGetState(sessionId);
+
+    const result = await normalizeAndSetAnswersFromInput(
+      estimateAgentRuntime,
+      sessionId,
+      'rsg 2x3',
+      schema,
+      state,
+      {
+        done: false,
+        next_field_key: 'postalCode',
+        question_text: 'What is the postal code for the property?',
+      }
+    );
+
+    expect(result.applied.some((entry) => entry.field_key === 'postalCode')).toBe(true);
+    const updated = await estimateAgentRuntime.toolGetState(sessionId);
+    expect(updated.answers.postalCode).toBe('R5G 2X3');
   });
 
   it('limits simple yes/no replies to current question instead of boolean fan-out', async () => {
