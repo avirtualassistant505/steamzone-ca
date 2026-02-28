@@ -186,14 +186,6 @@ function normalizeOpenAIModelForDirect(model: string): string {
 async function resolveModel(): Promise<string> {
   const override = process.env.TRAINING_ASSISTANT_MODEL?.trim();
   if (override) return override;
-  try {
-    const mod = await import('../server/agentModelStore.js');
-    const config = await mod.getAgentModelConfig();
-    const fromStore = String(config.model ?? '').trim();
-    if (fromStore) return fromStore;
-  } catch {
-    // Ignore and use default.
-  }
   return TRAINING_ASSISTANT_DEFAULT_MODEL;
 }
 
@@ -229,6 +221,63 @@ function fallbackPayload(query: string, matches: TrainingSearchMatch[], model: s
     },
     model,
     source: 'fallback',
+  };
+}
+
+function isEditIntent(query: string): boolean {
+  return /\b(change|edit|update|replace|fix|set|correct|modify)\b/i.test(query);
+}
+
+function findReferencedEntryIndex(
+  history: Array<{ role: 'assistant' | 'user'; content: string }>,
+  max: number
+): number | null {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const content = history[index]?.content ?? '';
+    const match = content.match(/(?:entry|#)\s*#?\s*(\d{1,4})/i) ?? content.match(/#\s*(\d{1,4})/);
+    if (!match?.[1]) continue;
+    const parsed = Number(match[1]);
+    if (!Number.isInteger(parsed) || parsed < 1) continue;
+    const asIndex = parsed - 1;
+    if (asIndex >= 0 && asIndex < max) return asIndex;
+  }
+  return null;
+}
+
+function extractPhoneNumber(query: string): string | null {
+  const direct = query.match(/(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})/);
+  if (!direct?.[0]) return null;
+  const digits = direct[0].replace(/\D/g, '');
+  const normalizedDigits = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+  if (normalizedDigits.length !== 10) return null;
+  return `(${normalizedDigits.slice(0, 3)}) ${normalizedDigits.slice(3, 6)}-${normalizedDigits.slice(6)}`;
+}
+
+function buildDeterministicPhoneUpdateProposal(
+  query: string,
+  items: TrainingItemInput[],
+  referencedIndex: number | null
+): AssistantResponsePayload['proposed_action'] | null {
+  if (!isEditIntent(query) || referencedIndex === null || referencedIndex < 0 || referencedIndex >= items.length) {
+    return null;
+  }
+  const nextPhone = extractPhoneNumber(query);
+  if (!nextPhone) return null;
+  const target = items[referencedIndex];
+  const answer = target.answer;
+  const replaced = /(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})/.test(answer)
+    ? answer.replace(/(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})/, nextPhone)
+    : `${answer} Updated phone: ${nextPhone}.`;
+
+  return {
+    type: 'update',
+    target_index: referencedIndex,
+    reason: `Detected phone-number edit request for entry #${referencedIndex + 1}.`,
+    entry: {
+      ...target,
+      answer: replaced,
+      status: target.status || 'READY',
+    },
   };
 }
 
@@ -327,13 +376,43 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
   const openAiKey = process.env.OPENAI_API_KEY?.trim();
 
+  const referencedIndex = findReferencedEntryIndex(history, items.length);
+  const deterministicPhoneProposal = buildDeterministicPhoneUpdateProposal(query, items, referencedIndex);
+
   if (!openRouterKey && !openAiKey) {
-    res.status(200).json(fallbackPayload(query, matches, model));
+    const payloadOut = fallbackPayload(query, matches, model);
+    if (deterministicPhoneProposal) {
+      payloadOut.proposed_action = deterministicPhoneProposal;
+      payloadOut.assistant_message = `I prepared an update for entry #${deterministicPhoneProposal.target_index! + 1} to use ${extractPhoneNumber(query)}. Reply "yes" to apply it.`;
+      payloadOut.result_indexes = [deterministicPhoneProposal.target_index ?? 0];
+      payloadOut.suggested_jump_index = deterministicPhoneProposal.target_index;
+    }
+    res.status(200).json(payloadOut);
     return;
   }
 
-  const candidates = (matches.length > 0 ? matches : items.map((_, index) => ({ index, score: 0 }))).slice(0, 12);
-  const candidateRows = candidates.map(({ index, score }) => {
+  const candidates: TrainingSearchMatch[] = [];
+  const seenCandidateIndexes = new Set<number>();
+
+  const pushCandidate = (candidate: TrainingSearchMatch): void => {
+    if (candidate.index < 0 || candidate.index >= items.length) return;
+    if (seenCandidateIndexes.has(candidate.index)) return;
+    seenCandidateIndexes.add(candidate.index);
+    candidates.push(candidate);
+  };
+
+  matches.forEach((candidate) => pushCandidate(candidate));
+  if (referencedIndex !== null) {
+    pushCandidate({ index: referencedIndex, score: 6 });
+  }
+  if (candidates.length === 0) {
+    for (let index = 0; index < items.length && candidates.length < 12; index += 1) {
+      pushCandidate({ index, score: 0 });
+    }
+  }
+
+  const trimmedCandidates = candidates.slice(0, 12);
+  const candidateRows = trimmedCandidates.map(({ index, score }) => {
     const item = items[index];
     return {
       index,
@@ -413,7 +492,14 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
 
     const raw = await response.text();
     if (!response.ok) {
-      res.status(200).json(fallbackPayload(query, matches, requestedModel));
+      const payloadOut = fallbackPayload(query, matches, requestedModel);
+      if (deterministicPhoneProposal) {
+        payloadOut.proposed_action = deterministicPhoneProposal;
+        payloadOut.assistant_message = `I prepared an update for entry #${deterministicPhoneProposal.target_index! + 1} to use ${extractPhoneNumber(query)}. Reply "yes" to apply it.`;
+        payloadOut.result_indexes = [deterministicPhoneProposal.target_index ?? 0];
+        payloadOut.suggested_jump_index = deterministicPhoneProposal.target_index;
+      }
+      res.status(200).json(payloadOut);
       return;
     }
 
@@ -441,7 +527,14 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
 
     const parsedAssistant = parseAssistantJson(modelText);
     if (!parsedAssistant) {
-      res.status(200).json(fallbackPayload(query, matches, requestedModel));
+      const payloadOut = fallbackPayload(query, matches, requestedModel);
+      if (deterministicPhoneProposal) {
+        payloadOut.proposed_action = deterministicPhoneProposal;
+        payloadOut.assistant_message = `I prepared an update for entry #${deterministicPhoneProposal.target_index! + 1} to use ${extractPhoneNumber(query)}. Reply "yes" to apply it.`;
+        payloadOut.result_indexes = [deterministicPhoneProposal.target_index ?? 0];
+        payloadOut.suggested_jump_index = deterministicPhoneProposal.target_index;
+      }
+      res.status(200).json(payloadOut);
       return;
     }
 
@@ -481,8 +574,22 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       source: 'llm',
     };
 
+    if (deterministicPhoneProposal && out.proposed_action.type === 'none') {
+      out.proposed_action = deterministicPhoneProposal;
+      out.assistant_message = `I prepared an update for entry #${deterministicPhoneProposal.target_index! + 1} to use ${extractPhoneNumber(query)}. Reply "yes" to apply it.`;
+      out.result_indexes = [deterministicPhoneProposal.target_index ?? 0];
+      out.suggested_jump_index = deterministicPhoneProposal.target_index;
+    }
+
     res.status(200).json(out);
   } catch {
-    res.status(200).json(fallbackPayload(query, matches, model));
+    const payloadOut = fallbackPayload(query, matches, model);
+    if (deterministicPhoneProposal) {
+      payloadOut.proposed_action = deterministicPhoneProposal;
+      payloadOut.assistant_message = `I prepared an update for entry #${deterministicPhoneProposal.target_index! + 1} to use ${extractPhoneNumber(query)}. Reply "yes" to apply it.`;
+      payloadOut.result_indexes = [deterministicPhoneProposal.target_index ?? 0];
+      payloadOut.suggested_jump_index = deterministicPhoneProposal.target_index;
+    }
+    res.status(200).json(payloadOut);
   }
 }

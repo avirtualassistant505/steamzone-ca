@@ -484,6 +484,15 @@ function parseEntryNumber(value: string): number | null {
   return parsed;
 }
 
+function isStandaloneAffirmative(value: string): boolean {
+  const normalized = value.trim().toLowerCase().replace(/[.!?,]/g, '');
+  return ['yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'si', 'sí'].includes(normalized);
+}
+
+function isTrainingEditIntent(value: string): boolean {
+  return /\b(change|edit|update|replace|set|fix|correct|modify)\b/i.test(value.trim().toLowerCase());
+}
+
 function formatFlowLabel(key: string): string {
   return FIELD_LABELS[key] ?? key.replace(/([A-Z])/g, ' $1').replace(/^./, (character) => character.toUpperCase());
 }
@@ -1196,9 +1205,9 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       }
     }
 
-    if (trainingAssistantPendingJumpIndex !== null) {
+    if (trainingAssistantPendingJumpIndex !== null && !isTrainingEditIntent(query)) {
       const requestedEntryNumber = parseEntryNumber(query);
-      if (isAffirmativeInput(query)) {
+      if (isStandaloneAffirmative(query) || /\b(jump|open|go to|show it)\b/i.test(query)) {
         jumpToTrainingEntry(trainingAssistantPendingJumpIndex);
         return;
       }
