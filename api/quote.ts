@@ -18,7 +18,7 @@ let quoteRuntimePromise: Promise<QuoteRuntimeModule> | null = null;
 
 async function getQuoteRuntime(): Promise<QuoteRuntimeModule> {
   if (!quoteRuntimePromise) {
-    quoteRuntimePromise = import('../server/quoteRuntime.mjs').then((mod) => mod as unknown as QuoteRuntimeModule);
+    quoteRuntimePromise = import('../server/quoteRuntimeEntry.js').then((mod) => mod as unknown as QuoteRuntimeModule);
   }
   return quoteRuntimePromise;
 }
