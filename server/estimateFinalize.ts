@@ -198,6 +198,7 @@ export async function finalizeEstimateSession(
         serviceType,
         answers: cleanedAnswers,
         strict: true,
+        source: 'chat',
         idempotency_key: idempotencyKey,
         idempotencyKey,
         send_email: sendEmail,

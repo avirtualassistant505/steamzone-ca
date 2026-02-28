@@ -8,6 +8,7 @@ import {
   formatServiceLabel,
   type EstimateRecord,
   type PricingConfig,
+  type ServiceType,
   type WindowZone,
 } from '../lib/estimateEngine';
 import {
@@ -71,6 +72,7 @@ type PricingSavePayload = {
 };
 
 type ConversationReviewStatus = 'unprocessed' | 'ready' | 'processed';
+type EstimateSource = 'form' | 'chat' | 'voice' | 'api' | 'website';
 
 type ConversationSummary = {
   session_id: string;
@@ -152,12 +154,29 @@ function parsePayloadError<T>(result: SafeJsonResult<T>): string {
 }
 
 const STORAGE_KEY = 'steamzone_training_admin_tab';
-type AdminTab = 'pricing' | 'training' | 'prompt' | 'logs' | 'download';
+type AdminTab = 'pricing' | 'training' | 'prompt' | 'logs' | 'estimates' | 'download';
+
+type EstimateRecordWithSource = EstimateRecord & {
+  source?: EstimateSource;
+};
+
+type EstimateRecordsPayload = {
+  records?: EstimateRecordWithSource[];
+  count?: number;
+  message?: string;
+};
 
 const cardClass = 'rounded-2xl border border-gray-200 bg-white p-6 shadow-sm';
 const PROMPT_FALLBACK =
   'You can add your shared system prompt instructions here to control tone, style, and behavior for both web and voice estimate agents.';
 const ADMIN_CONVERSATION_VALUE_UNKNOWN = 'Not captured';
+const ESTIMATE_SOURCE_LABELS: Record<EstimateSource, string> = {
+  form: 'Website Form',
+  chat: 'Web Chat',
+  voice: 'Voice',
+  api: 'API/Webhook',
+  website: 'Website',
+};
 
 const FIELD_LABELS: Record<string, string> = {
   serviceType: 'Service Type',
@@ -647,7 +666,14 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [agentPromptLoading, setAgentPromptLoading] = useState(false);
   const [agentPromptSaving, setAgentPromptSaving] = useState(false);
   const [agentPromptMessage, setAgentPromptMessage] = useState('');
-  const [records] = useState<EstimateRecord[]>([]);
+  const [estimateRecords, setEstimateRecords] = useState<EstimateRecordWithSource[]>([]);
+  const [estimateRecordsLoading, setEstimateRecordsLoading] = useState(false);
+  const [estimateRecordsError, setEstimateRecordsError] = useState('');
+  const [estimateRecordsMessage, setEstimateRecordsMessage] = useState('');
+  const [estimateRecordsLoaded, setEstimateRecordsLoaded] = useState(false);
+  const [estimateSourceFilter, setEstimateSourceFilter] = useState<'all' | EstimateSource>('all');
+  const [estimateServiceFilter, setEstimateServiceFilter] = useState<'all' | ServiceType>('all');
+  const [selectedEstimateId, setSelectedEstimateId] = useState('');
   const [trainingItems, setTrainingItems] = useState<TrainingItem[]>([]);
   const [trainingSource, setTrainingSource] = useState('fallback');
   const [trainingUpdatedAt, setTrainingUpdatedAt] = useState('');
@@ -705,7 +731,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
   useEffect(() => {
     const tab = localStorage.getItem(STORAGE_KEY);
-    if (tab === 'training' || tab === 'pricing' || tab === 'prompt' || tab === 'logs' || tab === 'download') {
+    if (tab === 'training' || tab === 'pricing' || tab === 'prompt' || tab === 'logs' || tab === 'estimates' || tab === 'download') {
       setActiveTab(tab);
     }
   }, []);
@@ -952,6 +978,49 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     }
   }
 
+  async function loadEstimateRecords(
+    sourceOverride?: 'all' | EstimateSource,
+    serviceOverride?: 'all' | ServiceType
+  ): Promise<void> {
+    setEstimateRecordsLoading(true);
+    setEstimateRecordsError('');
+    setEstimateRecordsMessage('');
+
+    try {
+      const activeSource = sourceOverride ?? estimateSourceFilter;
+      const activeService = serviceOverride ?? estimateServiceFilter;
+      const params = new URLSearchParams({ limit: '500' });
+      if (activeSource !== 'all') {
+        params.set('source', activeSource);
+      }
+      if (activeService !== 'all') {
+        params.set('service_type', activeService);
+      }
+
+      const response = await parseJsonResponse<EstimateRecordsPayload>(
+        await fetch(`/api/estimate-records?${params.toString()}`)
+      );
+      const payload = response.payload;
+      if (!response.ok || !payload) {
+        setEstimateRecordsError(payload?.message ?? parsePayloadError(response));
+        return;
+      }
+
+      const records = Array.isArray(payload.records) ? payload.records : [];
+      setEstimateRecords(records);
+      setEstimateRecordsLoaded(true);
+      setEstimateRecordsMessage(`Loaded ${records.length} estimate records.`);
+
+      if (!selectedEstimateId || !records.some((record) => record.id === selectedEstimateId)) {
+        setSelectedEstimateId(records[0]?.id ?? '');
+      }
+    } catch {
+      setEstimateRecordsError('Unable to load estimate records. Ensure /api/estimate-records is deployed.');
+    } finally {
+      setEstimateRecordsLoading(false);
+    }
+  }
+
   async function loadConversationDetail(sessionId: string): Promise<void> {
     const normalized = sessionId.trim();
     if (!normalized) return;
@@ -1158,6 +1227,9 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     }
     if (nextTab === 'logs' && !conversationLoaded && !conversationLoading) {
       void loadConversationData();
+    }
+    if (nextTab === 'estimates' && !estimateRecordsLoaded && !estimateRecordsLoading) {
+      void loadEstimateRecords();
     }
   }
 
@@ -1456,7 +1528,9 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
           },
         };
         setTrainingAssistantPendingAction(normalizedAction);
-        if (normalizedAction.type === 'update' && normalizedAction.target_index !== null) {
+        if (!normalizedAction.entry) {
+          setTrainingAssistantPendingAction(null);
+        } else if (normalizedAction.type === 'update' && normalizedAction.target_index !== null) {
           appendTrainingAssistantMessage(
             'assistant',
             `I prepared an update for entry #${normalizedAction.target_index + 1}.\nQuestion: ${normalizedAction.entry.question}\nAnswer: ${normalizedAction.entry.answer}\n${normalizedAction.reason}\nReply "yes" to apply or "no" to cancel.`
@@ -1742,9 +1816,12 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     if (activeTab === 'logs' && !conversationLoaded && !conversationLoading) {
       void loadConversationData();
     }
+    if (activeTab === 'estimates' && !estimateRecordsLoaded && !estimateRecordsLoading) {
+      void loadEstimateRecords();
+    }
   }, [activeTab]);
 
-  const latestRecords = useMemo(() => records.slice(0, 15), [records]);
+  const latestRecords = useMemo(() => estimateRecords.slice(0, 15), [estimateRecords]);
 
   async function handleSave(): Promise<void> {
     setIsSaving(true);
@@ -1798,6 +1875,10 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     () => (selectedConversation ? buildConversationFlowEntries(selectedConversation) : []),
     [selectedConversation]
   );
+  const selectedEstimate = useMemo(
+    () => estimateRecords.find((record) => record.id === selectedEstimateId) ?? null,
+    [estimateRecords, selectedEstimateId]
+  );
 
   return (
     <main className="bg-slate-50 pb-20 pt-28">
@@ -1814,6 +1895,8 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                   ? 'Update shared training questions/answers used by both web and voice agents.'
                   : activeTab === 'logs'
                     ? 'Browse saved conversation sessions and full voice/text transcripts.'
+                    : activeTab === 'estimates'
+                      ? 'Inspect every estimate calculation from form and chat, including raw line items and math factors.'
                     : 'Create and download a full site backup zip including local code and database snapshot data.'}
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
@@ -1842,6 +1925,13 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                 className="inline-flex rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
               >
                 Go to Download Site
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab('estimates')}
+                className="inline-flex rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
+              >
+                Go to Estimate Calculations
               </button>
               <button
                 type="button"
@@ -1991,6 +2081,15 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
             }`}
           >
             Conversation Logs
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('estimates')}
+            className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
+              activeTab === 'estimates' ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            Estimate Calculations
           </button>
           <button
             type="button"
@@ -2791,8 +2890,8 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
           {latestRecords.length === 0 ? (
             <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 px-4 py-6 text-gray-600">
-              Quote history is now stored server-side in Supabase. Add an admin endpoint to list records if you want this
-              table populated again.
+              No estimate records loaded in this preview. Open the <span className="font-semibold">Estimate Calculations</span>{' '}
+              tab and click Reload to fetch records from Supabase.
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -2846,6 +2945,210 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
             </p>
           </div>
         </section>
+          </>
+        )}
+
+        {activeTab === 'estimates' && (
+          <>
+            {estimateRecordsMessage && (
+              <p className="mt-6 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                {estimateRecordsMessage}
+              </p>
+            )}
+            {estimateRecordsError && (
+              <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+                {estimateRecordsError}
+              </p>
+            )}
+
+            <section className={`${cardClass} mt-6`}>
+              <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-bold text-gray-900">Estimate Calculations</h2>
+                  <p className="mt-2 text-sm text-gray-600">
+                    Every stored estimate from form/chat with line-item math, subtotal/range multipliers, and captured factors.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  <label className="text-sm text-gray-700">
+                    Source
+                    <select
+                      value={estimateSourceFilter}
+                      onChange={(event) => {
+                        const next = event.target.value as 'all' | EstimateSource;
+                        setEstimateSourceFilter(next);
+                        void loadEstimateRecords(next, estimateServiceFilter);
+                      }}
+                      className="ml-2 rounded border border-gray-300 px-2 py-1"
+                    >
+                      <option value="all">All</option>
+                      <option value="form">Website Form</option>
+                      <option value="chat">Web Chat</option>
+                      <option value="voice">Voice</option>
+                      <option value="api">API/Webhook</option>
+                      <option value="website">Website</option>
+                    </select>
+                  </label>
+                  <label className="text-sm text-gray-700">
+                    Service
+                    <select
+                      value={estimateServiceFilter}
+                      onChange={(event) => {
+                        const next = event.target.value as 'all' | ServiceType;
+                        setEstimateServiceFilter(next);
+                        void loadEstimateRecords(estimateSourceFilter, next);
+                      }}
+                      className="ml-2 rounded border border-gray-300 px-2 py-1"
+                    >
+                      <option value="all">All</option>
+                      <option value="window">Residential Windows</option>
+                      <option value="commercialWindow">Commercial Windows</option>
+                      <option value="carpet">Carpet Cleaning</option>
+                      <option value="postConstruction">Post-Construction</option>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => void loadEstimateRecords()}
+                    disabled={estimateRecordsLoading}
+                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {estimateRecordsLoading ? 'Loading...' : 'Reload'}
+                  </button>
+                </div>
+              </div>
+
+              {estimateRecordsLoading && estimateRecords.length === 0 ? (
+                <p className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">Loading estimate records...</p>
+              ) : estimateRecords.length === 0 ? (
+                <p className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+                  No estimate records found for the current filters.
+                </p>
+              ) : (
+                <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
+                  <div className="max-h-[70vh] overflow-y-auto rounded-lg border border-gray-200 bg-gray-50">
+                    {estimateRecords.map((record) => {
+                      const active = record.id === selectedEstimateId;
+                      return (
+                        <button
+                          key={record.id}
+                          type="button"
+                          onClick={() => setSelectedEstimateId(record.id)}
+                          className={`block w-full border-b border-gray-200 px-4 py-3 text-left text-sm last:border-b-0 ${
+                            active ? 'bg-blue-50' : 'bg-transparent hover:bg-white'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-semibold text-gray-900">{record.quoteNumber}</span>
+                            <span className="text-xs text-gray-500">{new Date(record.createdAt).toLocaleString()}</span>
+                          </div>
+                          <div className="mt-1 text-gray-700">{formatServiceLabel(record.serviceType)}</div>
+                          <div className="mt-1 text-xs text-gray-500">
+                            {ESTIMATE_SOURCE_LABELS[(record.source ?? 'website') as EstimateSource]} • {record.postalCode} • {record.zone}
+                          </div>
+                          <div className="mt-1 font-medium text-blue-700">
+                            {formatCurrency(record.result.estimateLow)} - {formatCurrency(record.result.estimateHigh)}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="rounded-lg border border-gray-200 bg-white p-4">
+                    {!selectedEstimate ? (
+                      <p className="text-sm text-gray-600">Select an estimate record to inspect its full calculations.</p>
+                    ) : (
+                      <div className="space-y-5">
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <div className="rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+                            <p><span className="font-semibold">Quote:</span> {selectedEstimate.quoteNumber}</p>
+                            <p><span className="font-semibold">Created:</span> {new Date(selectedEstimate.createdAt).toLocaleString()}</p>
+                            <p><span className="font-semibold">Source:</span> {ESTIMATE_SOURCE_LABELS[(selectedEstimate.source ?? 'website') as EstimateSource]}</p>
+                            <p><span className="font-semibold">Service:</span> {formatServiceLabel(selectedEstimate.serviceType)}</p>
+                            <p><span className="font-semibold">Postal / Zone:</span> {selectedEstimate.postalCode} / {selectedEstimate.zone}</p>
+                          </div>
+                          <div className="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+                            <p><span className="font-semibold">Subtotal:</span> {formatCurrency(selectedEstimate.result.subtotal)}</p>
+                            <p><span className="font-semibold">Low Estimate:</span> {formatCurrency(selectedEstimate.result.estimateLow)}</p>
+                            <p><span className="font-semibold">High Estimate:</span> {formatCurrency(selectedEstimate.result.estimateHigh)}</p>
+                            <p><span className="font-semibold">Duration:</span> {selectedEstimate.result.durationLowHours}h - {selectedEstimate.result.durationHighHours}h</p>
+                            <p><span className="font-semibold">Confidence:</span> {formatConfidence(selectedEstimate.result.confidence)}</p>
+                          </div>
+                        </div>
+
+                        {selectedEstimate.result.calculation ? (
+                          <>
+                            <div>
+                              <h3 className="text-lg font-semibold text-gray-900">Calculation Line Items</h3>
+                              <div className="mt-2 overflow-x-auto">
+                                <table className="min-w-full divide-y divide-gray-200 text-left text-sm">
+                                  <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+                                    <tr>
+                                      <th className="px-3 py-2">Item</th>
+                                      <th className="px-3 py-2">Amount</th>
+                                      <th className="px-3 py-2">Formula</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-gray-100">
+                                    {selectedEstimate.result.calculation.lineItems.map((item) => (
+                                      <tr key={item.key}>
+                                        <td className="px-3 py-2 text-gray-800">{item.label}</td>
+                                        <td className="px-3 py-2 text-gray-800">{formatCurrency(item.amount)}</td>
+                                        <td className="px-3 py-2 text-gray-500">{item.formula ?? '—'}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            <div className="grid gap-3 md:grid-cols-2">
+                              <div className="rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+                                <p><span className="font-semibold">Raw Subtotal:</span> {formatCurrency(selectedEstimate.result.calculation.subtotalRaw)}</p>
+                                <p><span className="font-semibold">Minimum Charge:</span> {formatCurrency(selectedEstimate.result.calculation.minimumCharge)}</p>
+                                <p><span className="font-semibold">Minimum Applied:</span> {selectedEstimate.result.calculation.minimumApplied ? 'Yes' : 'No'}</p>
+                                <p>
+                                  <span className="font-semibold">Range Multipliers:</span>{' '}
+                                  {selectedEstimate.result.calculation.estimateRange.lowMultiplier} / {selectedEstimate.result.calculation.estimateRange.highMultiplier}
+                                </p>
+                              </div>
+                              <div className="rounded border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+                                <p><span className="font-semibold">Duration Raw:</span> {selectedEstimate.result.calculation.duration.rawHours}h</p>
+                                <p><span className="font-semibold">Duration Low:</span> {selectedEstimate.result.calculation.duration.lowHours}h</p>
+                                <p><span className="font-semibold">Duration High:</span> {selectedEstimate.result.calculation.duration.highHours}h</p>
+                                <p><span className="font-semibold">Pricing Version:</span> {selectedEstimate.result.calculation.pricingVersion}</p>
+                              </div>
+                            </div>
+
+                            <div>
+                              <h3 className="text-lg font-semibold text-gray-900">Calculation Factors</h3>
+                              <div className="mt-2 grid gap-2 md:grid-cols-2">
+                                {Object.entries(selectedEstimate.result.calculation.factors).map(([key, value]) => (
+                                  <div key={key} className="rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                                    <span className="font-semibold">{key}:</span> {String(value)}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </>
+                        ) : (
+                          <p className="rounded border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                            This record does not include calculation trace data (likely generated before this feature was added).
+                          </p>
+                        )}
+
+                        <div>
+                          <h3 className="text-lg font-semibold text-gray-900">Captured Answers</h3>
+                          <pre className="mt-2 max-h-60 overflow-auto rounded border border-gray-200 bg-gray-900 p-3 text-xs text-gray-100">
+                            {JSON.stringify(selectedEstimate.answers, null, 2)}
+                          </pre>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </section>
           </>
         )}
 

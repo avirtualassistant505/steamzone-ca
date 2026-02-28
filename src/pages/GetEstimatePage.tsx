@@ -432,7 +432,7 @@ export default function GetEstimatePage() {
           'content-type': 'application/json',
           'x-idempotency-key': idempotencyKey,
         },
-        body: JSON.stringify({ serviceType, answers, strict: true }),
+        body: JSON.stringify({ serviceType, answers, strict: true, source: 'form' }),
       });
 
       const parsed = await parseJsonResponse<EstimateCreatePayload>(response);
@@ -499,7 +499,7 @@ export default function GetEstimatePage() {
           'x-idempotency-key': lastIdempotencyKey,
           'x-idempotency-resend': '1',
         },
-        body: JSON.stringify({ serviceType, answers, strict: true }),
+        body: JSON.stringify({ serviceType, answers, strict: true, source: 'form' }),
       });
 
       const parsed = await parseJsonResponse<EstimateCreatePayload>(response);

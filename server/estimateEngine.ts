@@ -316,6 +316,38 @@ export interface EstimateResult {
   redFlags: string[];
   includedItems: string[];
   notes: string[];
+  calculation?: EstimateCalculationTrace;
+}
+
+export interface EstimateCalculationLineItem {
+  key: string;
+  label: string;
+  amount: number;
+  formula?: string;
+}
+
+export interface EstimateCalculationTrace {
+  version: 'v1';
+  serviceType: ServiceType;
+  zone: WindowZone;
+  pricingVersion: number;
+  estimateRange: {
+    lowMultiplier: number;
+    highMultiplier: number;
+  };
+  lineItems: EstimateCalculationLineItem[];
+  subtotalRaw: number;
+  minimumCharge: number;
+  minimumApplied: boolean;
+  subtotalFinal: number;
+  estimateLow: number;
+  estimateHigh: number;
+  duration: {
+    rawHours: number;
+    lowHours: number;
+    highHours: number;
+  };
+  factors: Record<string, number | string | boolean>;
 }
 
 export interface EstimateRecord {

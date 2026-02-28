@@ -1,5 +1,16 @@
 import { Resend } from 'resend';
-import type { EstimateRecord, LeadContact, PricingConfig, ServiceType, WindowZone } from '../src/lib/estimateEngine.js';
+import type {
+  CarpetEstimateInput,
+  CommercialWindowEstimateInput,
+  EstimateRecord,
+  LeadContact,
+  PostConstructionEstimateInput,
+  PricingConfig,
+  ServiceType,
+  WindowEstimateInput,
+  WindowZone,
+} from '../src/lib/estimateEngine.js';
+import { buildEstimateCalculationTrace } from '../server/estimateCalculationTrace.js';
 import { getSupabaseAdminClient } from '../server/supabaseAdmin.js';
 
 type ApiRequest = { method?: string; body?: unknown; headers?: Record<string, string | string[] | undefined> };
@@ -10,6 +21,7 @@ const idempotencyKeyRegex = /^[A-Za-z0-9._:-]{8,200}$/;
 const ghlBaseUrlDefault = 'https://services.leadconnectorhq.com';
 const ghlApiVersionDefault = '2021-07-28';
 const ghlConversationsApiVersion = '2021-04-15';
+type EstimateSource = 'form' | 'chat' | 'voice' | 'api' | 'website';
 
 function asBool(value: unknown, fallback = false): boolean {
   if (typeof value === 'boolean') return value;
@@ -31,6 +43,14 @@ function clampInt(value: unknown, fallback = 0, min = 0, max = 1000000): number 
 function pickEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
   const v = typeof value === 'string' ? value : '';
   return (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
+}
+
+function coerceEstimateSource(value: unknown, fallback: EstimateSource = 'website'): EstimateSource {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'form' || normalized === 'chat' || normalized === 'voice' || normalized === 'api' || normalized === 'website') {
+    return normalized;
+  }
+  return fallback;
 }
 
 type EngineModule = {
@@ -120,6 +140,17 @@ function assertEstimateResultSafe(result: EstimateRecord['result']): void {
     if (normalized.includes('undefined')) {
       throw new Error('Estimate includes invalid undefined line-item text.');
     }
+  }
+
+  const calculation = (result as EstimateRecord['result'] & { calculation?: { lineItems?: Array<{ amount?: unknown }>; subtotalRaw?: unknown; subtotalFinal?: unknown } }).calculation;
+  if (!calculation) {
+    return;
+  }
+
+  assertFiniteNumber(calculation.subtotalRaw, 'result.calculation.subtotalRaw');
+  assertFiniteNumber(calculation.subtotalFinal, 'result.calculation.subtotalFinal');
+  for (const line of calculation.lineItems ?? []) {
+    assertFiniteNumber(line.amount ?? 0, 'result.calculation.lineItems.amount');
   }
 }
 
@@ -577,7 +608,10 @@ async function loadPricingConfigForEstimate(): Promise<{ config: PricingConfig; 
   }
 }
 
-async function storeEstimateRecord(record: EstimateRecord): Promise<{ stored: boolean; recordId?: string; error?: string }> {
+async function storeEstimateRecord(
+  record: EstimateRecord,
+  source: EstimateSource
+): Promise<{ stored: boolean; recordId?: string; error?: string }> {
   const supabase = await getSupabaseClient();
   if (!supabase) {
     return { stored: false, error: 'supabase_env_missing' };
@@ -588,7 +622,7 @@ async function storeEstimateRecord(record: EstimateRecord): Promise<{ stored: bo
       .from('estimate_records')
       .insert({
         quote_number: record.quoteNumber,
-        source: 'website',
+        source,
         service_type: record.serviceType,
         postal_code: record.postalCode,
         zone: record.zone,
@@ -666,10 +700,11 @@ async function fetchEstimateRecordByIdempotencyKey(idempotencyKey: string): Prom
 
 async function storeEstimateRecordWithIdempotency(
   record: EstimateRecord,
-  idempotencyKey: string | null
+  idempotencyKey: string | null,
+  source: EstimateSource
 ): Promise<{ stored: boolean; recordId?: string; existing?: EstimateRecord; error?: string }> {
   if (!idempotencyKey) {
-    const stored = await storeEstimateRecord(record);
+    const stored = await storeEstimateRecord(record, source);
     return { stored: stored.stored, recordId: stored.recordId, error: stored.error };
   }
 
@@ -688,7 +723,7 @@ async function storeEstimateRecordWithIdempotency(
     // Try inserting with idempotency_key. If the column isn't migrated yet, fall back to legacy insert.
     const insertPayload: Record<string, unknown> = {
       quote_number: record.quoteNumber,
-      source: 'website',
+      source,
       service_type: record.serviceType,
       postal_code: record.postalCode,
       zone: record.zone,
@@ -712,7 +747,7 @@ async function storeEstimateRecordWithIdempotency(
       lowerMessage.includes('idempotency_key') &&
       (lowerMessage.includes('does not exist') || lowerMessage.includes('schema cache') || lowerMessage.includes('could not find'));
     if (idempotencyKeyMissing) {
-      const legacy = await storeEstimateRecord(record);
+      const legacy = await storeEstimateRecord(record, source);
       return { stored: legacy.stored, recordId: legacy.recordId, error: legacy.error };
     }
 
@@ -1275,6 +1310,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const bodyRec = asRecord(body) ?? {};
     const sendEmailRequested = asBool((asRecord(body)?.send_email ?? true) as unknown, true);
 
     // Idempotency: prefer header (best practice), but allow body for tools that can't set headers.
@@ -1293,6 +1329,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
     const extracted = maybeExtractGhlWebhookPayload(body);
     const isGhlWebhook = Boolean(extracted?.ghl?.isGhlWebhook);
+    const estimateSource = coerceEstimateSource(bodyRec.source, isGhlWebhook ? 'api' : 'website');
     const ghlContactId = extracted?.ghl?.contactId ?? null;
 
     let serviceType = coerceServiceType(extracted?.serviceType ?? body?.serviceType);
@@ -1433,7 +1470,17 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
     const { config: pricingConfig, source: pricingSource } = await loadPricingConfigForEstimate();
     const estimate = engine.calculateEstimate(serviceType, normalizedAnswers, pricingConfig);
-    assertEstimateResultSafe(estimate);
+    const calculation = buildEstimateCalculationTrace(
+      serviceType,
+      normalizedAnswers as WindowEstimateInput | CommercialWindowEstimateInput | CarpetEstimateInput | PostConstructionEstimateInput,
+      pricingConfig,
+      estimate
+    );
+    const estimateWithCalculation: EstimateRecord['result'] = {
+      ...estimate,
+      calculation,
+    };
+    assertEstimateResultSafe(estimateWithCalculation);
 
     const createdAt = nowIso();
     const quoteNumber = generateQuoteNumber();
@@ -1447,13 +1494,13 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       zone,
       contact,
       answers: normalizedAnswers,
-      result: estimate,
+      result: estimateWithCalculation,
       pricingVersion: pricingConfig.version,
       utm: (body?.utm ?? {}) as EstimateRecord['utm'],
     };
 
     try {
-      const stored = await storeEstimateRecordWithIdempotency(record, idempotencyKey);
+      const stored = await storeEstimateRecordWithIdempotency(record, idempotencyKey, estimateSource);
       if (stored.existing) {
         // Another request already inserted this idempotency key (race). Return the existing record.
         res.status(200).json({
