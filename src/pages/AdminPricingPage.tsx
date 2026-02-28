@@ -655,6 +655,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [trainingLoading, setTrainingLoading] = useState(false);
   const [trainingError, setTrainingError] = useState('');
   const [trainingLoaded, setTrainingLoaded] = useState(false);
+  const [trainingDirty, setTrainingDirty] = useState(false);
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
   const [conversationLoading, setConversationLoading] = useState(false);
   const [conversationError, setConversationError] = useState('');
@@ -694,6 +695,9 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   ]);
   const trainingAssistantMessageCounter = useRef(0);
   const trainingEntryRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  const trainingSavedSnapshotRef = useRef('');
+  const trainingSkipDirtyCheckRef = useRef(false);
+  const trainingAutoSaveTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     setDraftConfig(pricingConfig);
@@ -798,6 +802,54 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     }
   }, [trainingItems, trainingAssistantPendingJumpIndex, trainingAssistantHighlightIndex, trainingAssistantPendingAction]);
 
+  useEffect(() => {
+    if (!trainingLoaded) {
+      return;
+    }
+    if (trainingSkipDirtyCheckRef.current) {
+      trainingSkipDirtyCheckRef.current = false;
+      return;
+    }
+
+    const snapshot = JSON.stringify(
+      trainingItems
+        .map((item) => ({
+          question: item.question.trim(),
+          answer: item.answer.trim(),
+          topic: item.topic?.trim() || undefined,
+          subtopic: item.subtopic?.trim() || undefined,
+          status: item.status?.trim() || 'READY',
+        }))
+        .filter((item) => item.question && item.answer)
+    );
+    setTrainingDirty(snapshot !== trainingSavedSnapshotRef.current);
+  }, [trainingItems, trainingLoaded]);
+
+  useEffect(() => {
+    if (activeTab !== 'training' || !trainingLoaded || !trainingDirty || trainingLoading) {
+      return;
+    }
+
+    if (trainingAutoSaveTimerRef.current !== null) {
+      window.clearTimeout(trainingAutoSaveTimerRef.current);
+    }
+
+    trainingAutoSaveTimerRef.current = window.setTimeout(() => {
+      void persistTrainingItems(
+        trainingItems,
+        'Auto-saving training data...',
+        'Training data auto-saved.'
+      );
+    }, 1200);
+
+    return () => {
+      if (trainingAutoSaveTimerRef.current !== null) {
+        window.clearTimeout(trainingAutoSaveTimerRef.current);
+        trainingAutoSaveTimerRef.current = null;
+      }
+    };
+  }, [activeTab, trainingDirty, trainingItems, trainingLoaded, trainingLoading]);
+
   async function loadTrainingData(): Promise<void> {
     setTrainingLoading(true);
     setTrainingError('');
@@ -837,7 +889,20 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
         })
         .filter((item): item is TrainingItem => item !== null);
 
+      trainingSkipDirtyCheckRef.current = true;
       setTrainingItems(nextItems);
+      trainingSavedSnapshotRef.current = JSON.stringify(
+        nextItems
+          .map((item) => ({
+            question: item.question.trim(),
+            answer: item.answer.trim(),
+            topic: item.topic?.trim() || undefined,
+            subtopic: item.subtopic?.trim() || undefined,
+            status: item.status?.trim() || 'READY',
+          }))
+          .filter((item) => item.question && item.answer)
+      );
+      setTrainingDirty(false);
       setTrainingSource(payload.source ?? 'fallback');
       setTrainingUpdatedAt(payload.updatedAt ?? '');
       setTrainingLoaded(true);
@@ -1144,7 +1209,6 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     successMessage: string
   ): Promise<boolean> {
     const sanitized = sanitizeTrainingItems(itemsToPersist);
-    setTrainingItems(sanitized);
     setTrainingLoading(true);
     setTrainingError('');
     setTrainingMessage(loadingMessage);
@@ -1172,15 +1236,20 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       }
 
       if (Array.isArray(payload.items)) {
+        trainingSkipDirtyCheckRef.current = true;
         setTrainingItems(payload.items);
+        trainingSavedSnapshotRef.current = JSON.stringify(sanitizeTrainingItems(payload.items));
       } else {
+        trainingSkipDirtyCheckRef.current = true;
         setTrainingItems(sanitized);
+        trainingSavedSnapshotRef.current = JSON.stringify(sanitized);
       }
 
       setTrainingSource(payload.source ?? 'db');
       setTrainingUpdatedAt(payload.updatedAt ?? '');
       setTrainingMessage(payload.message ?? successMessage);
       setTrainingLoaded(true);
+      setTrainingDirty(false);
       return true;
     } catch {
       setTrainingError('Unable to reach training-save endpoint. Deploy serverless routes and set env variables in Vercel.');
@@ -1574,7 +1643,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     ]);
 
     resetNewTrainingForm();
-    setTrainingMessage('Training question added. Click Save Training Data to persist.');
+    setTrainingMessage('Training question added. Auto-save will persist this change shortly.');
   }
 
   async function saveTrainingData(): Promise<void> {
@@ -2793,6 +2862,9 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                   <h2 className="text-xl font-bold text-gray-900">Training Data</h2>
                   <p className="mt-2 text-sm text-gray-600">
                     Source: {trainingSource}. Updated: {trainingUpdatedAt || 'never'} · Loaded: {trainingItems.length} entries.
+                  </p>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Auto-save is on. {trainingLoading ? 'Saving changes...' : trainingDirty ? 'Unsaved edits detected, saving shortly...' : 'All changes saved.'}
                   </p>
                 </div>
 
