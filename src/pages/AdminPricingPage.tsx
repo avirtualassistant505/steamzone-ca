@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Clock3, Database, Download, Plus, Save, Trash2 } from 'lucide-react';
 import {
   createDefaultPricingConfig,
@@ -325,6 +325,165 @@ type ConversationFlowEntry = {
   answered: boolean;
 };
 
+type TrainingAssistantMessage = {
+  id: string;
+  role: 'assistant' | 'user';
+  content: string;
+  resultIndexes?: number[];
+};
+
+type TrainingAssistantProposedAction = {
+  type: 'none' | 'add' | 'update';
+  target_index: number | null;
+  reason: string;
+  entry: TrainingItem | null;
+};
+
+type TrainingAssistantApiPayload = {
+  assistant_message?: string;
+  result_indexes?: number[];
+  suggested_jump_index?: number | null;
+  proposed_action?: TrainingAssistantProposedAction;
+  model?: string;
+  source?: 'llm' | 'fallback';
+  message?: string;
+};
+
+type TrainingSearchMatch = {
+  index: number;
+  score: number;
+};
+
+const TRAINING_SEARCH_STOP_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'are',
+  'at',
+  'be',
+  'can',
+  'do',
+  'for',
+  'from',
+  'how',
+  'i',
+  'in',
+  'is',
+  'it',
+  'me',
+  'my',
+  'of',
+  'on',
+  'or',
+  'our',
+  'please',
+  'the',
+  'this',
+  'to',
+  'we',
+  'what',
+  'where',
+  'which',
+  'with',
+  'you',
+  'your',
+]);
+
+function normalizeTrainingSearchText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeTrainingSearch(value: string): string[] {
+  const normalized = normalizeTrainingSearchText(value);
+  if (!normalized) return [];
+  return normalized
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length > 1 && !TRAINING_SEARCH_STOP_WORDS.has(token));
+}
+
+function scoreTrainingItemMatch(
+  queryNormalized: string,
+  queryTokens: string[],
+  item: TrainingItem
+): number {
+  const question = normalizeTrainingSearchText(item.question);
+  const answer = normalizeTrainingSearchText(item.answer);
+  const topic = normalizeTrainingSearchText(item.topic ?? '');
+  const subtopic = normalizeTrainingSearchText(item.subtopic ?? '');
+  const corpus = `${question} ${answer} ${topic} ${subtopic}`.trim();
+  if (!corpus) return 0;
+
+  let score = 0;
+  if (question.includes(queryNormalized)) score += 8;
+  if (answer.includes(queryNormalized)) score += 4;
+  if (topic.includes(queryNormalized)) score += 2;
+  if (subtopic.includes(queryNormalized)) score += 1.5;
+
+  if (queryTokens.length > 0) {
+    let overlap = 0;
+    for (const token of queryTokens) {
+      if (question.includes(token)) {
+        overlap += 2;
+      } else if (answer.includes(token)) {
+        overlap += 1;
+      } else if (topic.includes(token) || subtopic.includes(token)) {
+        overlap += 1.5;
+      }
+    }
+    score += overlap;
+  }
+
+  if (
+    /discount|discounts|promotion|promotions/.test(queryNormalized) &&
+    /first time|first-time|new customer/.test(queryNormalized) &&
+    /first time|first-time|new customer/.test(corpus)
+  ) {
+    score += 3;
+  }
+
+  return score;
+}
+
+function findTrainingMatches(trainingItems: TrainingItem[], query: string, limit = 5): TrainingSearchMatch[] {
+  const queryNormalized = normalizeTrainingSearchText(query);
+  if (!queryNormalized) return [];
+  const queryTokens = tokenizeTrainingSearch(query);
+
+  const scored: TrainingSearchMatch[] = [];
+  for (let index = 0; index < trainingItems.length; index += 1) {
+    const item = trainingItems[index];
+    const score = scoreTrainingItemMatch(queryNormalized, queryTokens, item);
+    if (score >= 2) {
+      scored.push({ index, score });
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, Math.max(1, Math.min(limit, 10)));
+}
+
+function isAffirmativeInput(value: string): boolean {
+  return /\b(yes|yeah|yep|sure|ok|okay|do it|go ahead|jump|open|si|sí)\b/i.test(value.trim().toLowerCase());
+}
+
+function isNegativeInput(value: string): boolean {
+  return /\b(no|nope|nah|not now|cancel|stop)\b/i.test(value.trim().toLowerCase());
+}
+
+function parseEntryNumber(value: string): number | null {
+  const match = value.match(/#?\s*(\d{1,4})/);
+  if (!match?.[1]) return null;
+  const parsed = Number(match[1]);
+  if (!Number.isInteger(parsed) || parsed < 1) return null;
+  return parsed;
+}
+
 function formatFlowLabel(key: string): string {
   return FIELD_LABELS[key] ?? key.replace(/([A-Z])/g, ' $1').replace(/^./, (character) => character.toUpperCase());
 }
@@ -511,6 +670,21 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [downloadLoading, setDownloadLoading] = useState(false);
   const [downloadMessage, setDownloadMessage] = useState('');
   const [downloadError, setDownloadError] = useState('');
+  const [trainingAssistantInput, setTrainingAssistantInput] = useState('');
+  const [trainingAssistantPendingJumpIndex, setTrainingAssistantPendingJumpIndex] = useState<number | null>(null);
+  const [trainingAssistantHighlightIndex, setTrainingAssistantHighlightIndex] = useState<number | null>(null);
+  const [trainingAssistantPendingAction, setTrainingAssistantPendingAction] = useState<TrainingAssistantProposedAction | null>(null);
+  const [trainingAssistantBusy, setTrainingAssistantBusy] = useState(false);
+  const [trainingAssistantMessages, setTrainingAssistantMessages] = useState<TrainingAssistantMessage[]>([
+    {
+      id: 'training-assistant-welcome',
+      role: 'assistant',
+      content:
+        'I can search, propose edits, and help add missing training entries. Ask naturally and I will suggest matches or a draft change for your confirmation.',
+    },
+  ]);
+  const trainingAssistantMessageCounter = useRef(0);
+  const trainingEntryRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   useEffect(() => {
     setDraftConfig(pricingConfig);
@@ -599,6 +773,21 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       }
     }
   }, [agentVoiceModel, agentVoiceModelOptions]);
+
+  useEffect(() => {
+    if (trainingAssistantPendingJumpIndex !== null && trainingAssistantPendingJumpIndex >= trainingItems.length) {
+      setTrainingAssistantPendingJumpIndex(null);
+    }
+    if (trainingAssistantHighlightIndex !== null && trainingAssistantHighlightIndex >= trainingItems.length) {
+      setTrainingAssistantHighlightIndex(null);
+    }
+    if (
+      trainingAssistantPendingAction?.type === 'update' &&
+      (trainingAssistantPendingAction.target_index === null || trainingAssistantPendingAction.target_index >= trainingItems.length)
+    ) {
+      setTrainingAssistantPendingAction(null);
+    }
+  }, [trainingItems, trainingAssistantPendingJumpIndex, trainingAssistantHighlightIndex, trainingAssistantPendingAction]);
 
   async function loadTrainingData(): Promise<void> {
     setTrainingLoading(true);
@@ -896,6 +1085,269 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     if (nextTab === 'logs' && !conversationLoaded && !conversationLoading) {
       void loadConversationData();
     }
+  }
+
+  function appendTrainingAssistantMessage(
+    role: 'assistant' | 'user',
+    content: string,
+    resultIndexes?: number[]
+  ): void {
+    trainingAssistantMessageCounter.current += 1;
+    setTrainingAssistantMessages((previous) => [
+      ...previous,
+      {
+        id: `training-assistant-${trainingAssistantMessageCounter.current}`,
+        role,
+        content,
+        resultIndexes,
+      },
+    ]);
+  }
+
+  function jumpToTrainingEntry(index: number): void {
+    const target = trainingEntryRefs.current[index];
+    if (!target) {
+      appendTrainingAssistantMessage('assistant', `I could not find entry #${index + 1} on screen. Reload training data and try again.`);
+      return;
+    }
+
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTrainingAssistantHighlightIndex(index);
+    setTrainingAssistantPendingJumpIndex(null);
+    appendTrainingAssistantMessage('assistant', `Jumped to training entry #${index + 1}.`);
+  }
+
+  function applyTrainingAssistantAction(action: TrainingAssistantProposedAction): void {
+    if (!action.entry || action.type === 'none') {
+      appendTrainingAssistantMessage('assistant', 'I do not have a complete edit payload to apply yet.');
+      return;
+    }
+
+    if (action.type === 'add') {
+      setTrainingItems((previous) => [
+        ...previous,
+        {
+          question: action.entry?.question?.trim() || '',
+          answer: action.entry?.answer?.trim() || '',
+          topic: action.entry?.topic?.trim() || undefined,
+          subtopic: action.entry?.subtopic?.trim() || undefined,
+          status: action.entry?.status?.trim() || 'READY',
+        },
+      ]);
+      setTrainingMessage('Assistant added a drafted training entry. Click Save Training Data to persist.');
+      appendTrainingAssistantMessage('assistant', 'Done. I added the new training entry draft. Click Save Training Data to persist it.');
+      setTrainingAssistantPendingAction(null);
+      return;
+    }
+
+    if (action.type === 'update') {
+      if (action.target_index === null || action.target_index < 0 || action.target_index >= trainingItems.length) {
+        appendTrainingAssistantMessage('assistant', 'I could not apply the update because the target entry index is out of range.');
+        setTrainingAssistantPendingAction(null);
+        return;
+      }
+
+      setTrainingItems((previous) =>
+        previous.map((item, index) =>
+          index === action.target_index
+            ? {
+                ...item,
+                question: action.entry?.question?.trim() || item.question,
+                answer: action.entry?.answer?.trim() || item.answer,
+                topic: action.entry?.topic?.trim() || undefined,
+                subtopic: action.entry?.subtopic?.trim() || undefined,
+                status: action.entry?.status?.trim() || 'READY',
+              }
+            : item
+        )
+      );
+      setTrainingMessage('Assistant updated a training entry draft. Click Save Training Data to persist.');
+      appendTrainingAssistantMessage(
+        'assistant',
+        `Done. I updated training entry #${action.target_index + 1}. Click Save Training Data to persist it.`
+      );
+      setTrainingAssistantPendingAction(null);
+    }
+  }
+
+  async function handleTrainingAssistantSend(): Promise<void> {
+    const query = trainingAssistantInput.trim();
+    if (!query) {
+      return;
+    }
+
+    appendTrainingAssistantMessage('user', query);
+    setTrainingAssistantInput('');
+
+    if (trainingItems.length === 0) {
+      appendTrainingAssistantMessage('assistant', 'Training data is empty right now. Load training data first, then ask again.');
+      return;
+    }
+
+    if (trainingAssistantPendingAction) {
+      if (isAffirmativeInput(query)) {
+        applyTrainingAssistantAction(trainingAssistantPendingAction);
+        return;
+      }
+      if (isNegativeInput(query)) {
+        appendTrainingAssistantMessage('assistant', 'No problem. I cancelled that proposed edit.');
+        setTrainingAssistantPendingAction(null);
+        return;
+      }
+    }
+
+    if (trainingAssistantPendingJumpIndex !== null) {
+      const requestedEntryNumber = parseEntryNumber(query);
+      if (isAffirmativeInput(query)) {
+        jumpToTrainingEntry(trainingAssistantPendingJumpIndex);
+        return;
+      }
+      if (isNegativeInput(query)) {
+        setTrainingAssistantPendingJumpIndex(null);
+        appendTrainingAssistantMessage('assistant', 'No problem. Ask another question and I will find better matches.');
+        return;
+      }
+      if (requestedEntryNumber !== null) {
+        const targetIndex = requestedEntryNumber - 1;
+        if (targetIndex >= 0 && targetIndex < trainingItems.length) {
+          jumpToTrainingEntry(targetIndex);
+        } else {
+          appendTrainingAssistantMessage(
+            'assistant',
+            `Entry #${requestedEntryNumber} is out of range. Loaded entries: 1 to ${trainingItems.length}.`
+          );
+        }
+        return;
+      }
+    }
+
+    const jumpRequestNumber = parseEntryNumber(query);
+    if (jumpRequestNumber !== null && /\b(jump|go|open|show|take me)\b/i.test(query)) {
+      const targetIndex = jumpRequestNumber - 1;
+      if (targetIndex >= 0 && targetIndex < trainingItems.length) {
+        jumpToTrainingEntry(targetIndex);
+      } else {
+        appendTrainingAssistantMessage(
+          'assistant',
+          `Entry #${jumpRequestNumber} is out of range. Loaded entries: 1 to ${trainingItems.length}.`
+        );
+      }
+      return;
+    }
+
+    setTrainingAssistantBusy(true);
+    try {
+      const response = await parseJsonResponse<TrainingAssistantApiPayload>(
+        await fetch('/api/training-assistant', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            query,
+            items: trainingItems,
+            messages: trainingAssistantMessages.map((message) => ({
+              role: message.role,
+              content: message.content,
+            })),
+          }),
+        })
+      );
+      const payload = response.payload;
+      if (!response.ok || !payload) {
+        throw new Error(payload?.message ?? parsePayloadError(response));
+      }
+
+      const resultIndexes = Array.isArray(payload.result_indexes)
+        ? payload.result_indexes
+            .map((entry) => Number(entry))
+            .filter((entry, index, list) => Number.isInteger(entry) && entry >= 0 && entry < trainingItems.length && list.indexOf(entry) === index)
+        : [];
+      const suggested = Number(payload.suggested_jump_index);
+      const suggestedJumpIndex =
+        Number.isInteger(suggested) && suggested >= 0 && suggested < trainingItems.length
+          ? suggested
+          : resultIndexes.length > 0
+            ? resultIndexes[0]
+            : null;
+
+      const assistantMessage = String(payload.assistant_message ?? '').trim();
+      appendTrainingAssistantMessage(
+        'assistant',
+        assistantMessage || 'I reviewed the training data and prepared suggestions.',
+        resultIndexes.length > 0 ? resultIndexes : undefined
+      );
+
+      if (suggestedJumpIndex !== null) {
+        setTrainingAssistantPendingJumpIndex(suggestedJumpIndex);
+      }
+
+      const proposedRaw = payload.proposed_action;
+      const proposedType = proposedRaw?.type === 'add' || proposedRaw?.type === 'update' ? proposedRaw.type : 'none';
+      if (proposedType !== 'none' && proposedRaw?.entry?.question && proposedRaw?.entry?.answer) {
+        const normalizedAction: TrainingAssistantProposedAction = {
+          type: proposedType,
+          target_index:
+            proposedType === 'update' && Number.isInteger(proposedRaw.target_index) && (proposedRaw.target_index ?? -1) >= 0
+              ? proposedRaw.target_index
+              : null,
+          reason: String(proposedRaw.reason ?? '').trim() || 'Assistant suggested a training update.',
+          entry: {
+            question: String(proposedRaw.entry.question ?? '').trim(),
+            answer: String(proposedRaw.entry.answer ?? '').trim(),
+            topic: typeof proposedRaw.entry.topic === 'string' ? proposedRaw.entry.topic.trim() : undefined,
+            subtopic: typeof proposedRaw.entry.subtopic === 'string' ? proposedRaw.entry.subtopic.trim() : undefined,
+            status: typeof proposedRaw.entry.status === 'string' ? proposedRaw.entry.status.trim() : 'READY',
+          },
+        };
+        setTrainingAssistantPendingAction(normalizedAction);
+        if (normalizedAction.type === 'update' && normalizedAction.target_index !== null) {
+          appendTrainingAssistantMessage(
+            'assistant',
+            `I prepared an update for entry #${normalizedAction.target_index + 1}.\nQuestion: ${normalizedAction.entry.question}\nAnswer: ${normalizedAction.entry.answer}\n${normalizedAction.reason}\nReply "yes" to apply or "no" to cancel.`
+          );
+        } else {
+          appendTrainingAssistantMessage(
+            'assistant',
+            `I prepared a new training entry draft.\nQuestion: ${normalizedAction.entry.question}\nAnswer: ${normalizedAction.entry.answer}\n${normalizedAction.reason}\nReply "yes" to add it or "no" to cancel.`
+          );
+        }
+      } else {
+        setTrainingAssistantPendingAction(null);
+      }
+      return;
+    } catch {
+      // Fall back to deterministic local search when API/model is unavailable.
+    } finally {
+      setTrainingAssistantBusy(false);
+    }
+
+    const matches = findTrainingMatches(trainingItems, query, 5);
+    if (matches.length === 0) {
+      appendTrainingAssistantMessage(
+        'assistant',
+        'I could not find a confident match. Try adding more specific terms like service type, topic, or key phrase from the answer.'
+      );
+      return;
+    }
+
+    const topIndexes = matches.map((match) => match.index);
+    const previewLines = matches
+      .slice(0, 3)
+      .map((match) => {
+        const item = trainingItems[match.index];
+        const preview = item?.question?.trim() || '(no question)';
+        return `#${match.index + 1}: ${preview}`;
+      })
+      .join('\n');
+    const primaryIndex = topIndexes[0];
+
+    setTrainingAssistantPendingJumpIndex(primaryIndex);
+    appendTrainingAssistantMessage(
+      'assistant',
+      `I found ${matches.length} likely match${matches.length === 1 ? '' : 'es'}:\n${previewLines}\n\nWould you like me to jump to #${primaryIndex + 1}?`,
+      topIndexes
+    );
   }
 
   function parseDownloadFilename(contentDisposition: string | null): string | null {
@@ -2324,6 +2776,134 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                 </div>
               </div>
 
+              <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50/60 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-semibold text-gray-900">Training Search Assistant</h3>
+                    <p className="mt-1 text-sm text-gray-700">
+                      Ask naturally. I will find likely FAQ matches, then ask if you want to jump to the exact entry.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTrainingAssistantMessages([
+                        {
+                          id: `training-assistant-reset-${Date.now()}`,
+                          role: 'assistant',
+                          content:
+                            'Reset complete. Ask a new question and I will search the training data and offer jump options.',
+                        },
+                      ]);
+                      setTrainingAssistantPendingJumpIndex(null);
+                      setTrainingAssistantHighlightIndex(null);
+                      setTrainingAssistantPendingAction(null);
+                      setTrainingAssistantInput('');
+                    }}
+                    className="inline-flex items-center rounded border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition hover:bg-gray-100"
+                  >
+                    Reset
+                  </button>
+                </div>
+
+                <div className="max-h-72 space-y-2 overflow-y-auto rounded-lg border border-blue-100 bg-white p-3">
+                  {trainingAssistantMessages.map((message) => (
+                    <div key={message.id} className={message.role === 'user' ? 'text-right' : 'text-left'}>
+                      <div
+                        className={`inline-block max-w-[95%] rounded-lg px-3 py-2 text-sm leading-relaxed ${
+                          message.role === 'user'
+                            ? 'bg-blue-600 text-white'
+                            : 'border border-gray-200 bg-gray-50 text-gray-800'
+                        }`}
+                      >
+                        <p className="whitespace-pre-line">{message.content}</p>
+                      </div>
+                      {message.role === 'assistant' && message.resultIndexes && message.resultIndexes.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {message.resultIndexes.slice(0, 3).map((entryIndex) => (
+                            <button
+                              key={`${message.id}-jump-${entryIndex}`}
+                              type="button"
+                              onClick={() => jumpToTrainingEntry(entryIndex)}
+                              className="inline-flex items-center rounded border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 transition hover:bg-blue-100"
+                            >
+                              Jump to #{entryIndex + 1}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    value={trainingAssistantInput}
+                    onChange={(event) => setTrainingAssistantInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void handleTrainingAssistantSend();
+                      }
+                    }}
+                    placeholder='Example: "first-time discounts" or "cleaning materials included"'
+                    disabled={trainingAssistantBusy}
+                    className="min-w-[280px] flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleTrainingAssistantSend()}
+                    disabled={trainingAssistantBusy}
+                    className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"
+                  >
+                    {trainingAssistantBusy ? 'Thinking...' : 'Ask'}
+                  </button>
+                  {trainingAssistantPendingJumpIndex !== null && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => jumpToTrainingEntry(trainingAssistantPendingJumpIndex)}
+                        className="inline-flex items-center rounded border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                      >
+                        Yes, jump to #{trainingAssistantPendingJumpIndex + 1}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTrainingAssistantPendingJumpIndex(null);
+                          appendTrainingAssistantMessage('assistant', 'Okay, no jump for now. Ask another question when ready.');
+                        }}
+                        className="inline-flex items-center rounded border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 transition hover:bg-gray-100"
+                      >
+                        No, keep browsing
+                      </button>
+                    </div>
+                  )}
+                  {trainingAssistantPendingAction && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => applyTrainingAssistantAction(trainingAssistantPendingAction)}
+                        className="inline-flex items-center rounded border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                      >
+                        Yes, apply edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTrainingAssistantPendingAction(null);
+                          appendTrainingAssistantMessage('assistant', 'Edit cancelled. I can propose another change if you want.');
+                        }}
+                        className="inline-flex items-center rounded border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 transition hover:bg-gray-100"
+                      >
+                        No, cancel edit
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               <div className="rounded-lg border border-gray-200 p-3">
                 <h3 className="font-semibold text-gray-900">Add new FAQ entry</h3>
                 <div className="mt-3 grid gap-3">
@@ -2402,7 +2982,18 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                     )}
 
                     {trainingItems.map((item, index) => (
-                      <div key={`${item.question}-${index}`} className="rounded-lg border border-gray-200 p-4">
+                      <div
+                        key={`${item.question}-${index}`}
+                        id={`training-entry-${index + 1}`}
+                        ref={(node) => {
+                          trainingEntryRefs.current[index] = node;
+                        }}
+                        className={`rounded-lg border p-4 transition ${
+                          trainingAssistantHighlightIndex === index
+                            ? 'border-blue-400 ring-2 ring-blue-200'
+                            : 'border-gray-200'
+                        }`}
+                      >
                         <div className="mb-3 flex items-center justify-between gap-3">
                           <p className="text-sm font-semibold text-gray-800">#{index + 1}</p>
                           <button
