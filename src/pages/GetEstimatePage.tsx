@@ -983,7 +983,6 @@ function WindowForm({ step, input, onInputChange, onPostalChange, errors }: Wind
           postalCode={input.postalCode}
           zone={input.zone}
           onPostalChange={onPostalChange}
-          onZoneChange={(zone) => onInputChange((previous) => ({ ...previous, zone }))}
           errors={errors}
         />
 
@@ -1314,7 +1313,6 @@ function CommercialWindowForm({ step, input, onInputChange, onPostalChange, erro
           postalCode={input.postalCode}
           zone={input.zone}
           onPostalChange={onPostalChange}
-          onZoneChange={(zone) => onInputChange((previous) => ({ ...previous, zone }))}
           errors={errors}
         />
 
@@ -1543,7 +1541,6 @@ function CarpetForm({ step, input, onInputChange, onPostalChange, errors }: Carp
           postalCode={input.postalCode}
           zone={input.zone}
           onPostalChange={onPostalChange}
-          onZoneChange={(zone) => onInputChange((previous) => ({ ...previous, zone }))}
           errors={errors}
         />
 
@@ -1754,7 +1751,6 @@ function PostConstructionForm({ step, input, onInputChange, onPostalChange, erro
           postalCode={input.postalCode}
           zone={input.zone}
           onPostalChange={onPostalChange}
-          onZoneChange={(zone) => onInputChange((previous) => ({ ...previous, zone }))}
           errors={errors}
         />
 
@@ -2006,7 +2002,6 @@ function InputPostalZone({
   postalCode,
   zone,
   onPostalChange,
-  onZoneChange,
   errors,
 }: {
   section: 'window' | 'commercial' | 'carpet' | 'post';
@@ -2014,10 +2009,13 @@ function InputPostalZone({
   postalCode: string;
   zone: WindowZone;
   onPostalChange: (value: string) => void;
-  onZoneChange: (zone: WindowZone) => void;
   errors: FieldErrors;
 }) {
   const postalError = errors.postalCode;
+  const hasPostalPrefix = postalCode.trim().replace(/\s+/g, '').length >= 3;
+  const zoneLabel = hasPostalPrefix
+    ? zoneOptions.find((option) => option.value === zone)?.label ?? 'Zone unavailable'
+    : 'Enter postal code to detect zone';
 
   return (
     <>
@@ -2047,18 +2045,16 @@ function InputPostalZone({
         <label htmlFor={`${section}-travel-zone`} className="mb-1 block text-sm font-medium text-gray-700">
           Travel zone
         </label>
-        <select
+        <input
           id={`${section}-travel-zone`}
           name="travelZone"
           data-testid={tid(serviceKey, 'step_1', 'travel_zone')}
-          value={zone}
-          onChange={(event) => onZoneChange(event.target.value as WindowZone)}
-          className={fieldClass}
-        >
-          {zoneOptions.map((option) => (
-            <option key={option.value} value={option.value}>{option.label}</option>
-          ))}
-        </select>
+          value={zoneLabel}
+          readOnly
+          aria-readonly="true"
+          className={`${fieldClass} bg-gray-50 text-gray-700`}
+        />
+        <p className="mt-1 text-xs text-gray-500">Auto-calculated from postal code for consistent pricing.</p>
       </div>
     </>
   );
