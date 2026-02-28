@@ -184,8 +184,6 @@ function normalizeOpenAIModelForDirect(model: string): string {
 }
 
 async function resolveModel(): Promise<string> {
-  const override = process.env.TRAINING_ASSISTANT_MODEL?.trim();
-  if (override) return override;
   return TRAINING_ASSISTANT_DEFAULT_MODEL;
 }
 
