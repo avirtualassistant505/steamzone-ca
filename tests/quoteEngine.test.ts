@@ -100,9 +100,37 @@ describe('quoteEngine', () => {
     };
 
     const quote = await computeDeterministicQuote(answers);
-    const expectedInput = { ...createDefaultCarpetInput(), ...answers, contact };
+    const expectedInput = { ...createDefaultCarpetInput(), ...answers, zone: 'zoneA', contact };
     const expected = calculateEstimate('carpet', expectedInput, createDefaultPricingConfig());
     expect(quote.total).toBe(expected.subtotal);
+  });
+
+  it('uses postal-code-derived zone for pricing when provided zone conflicts', async () => {
+    const answers = {
+      serviceType: 'carpet',
+      postalCode: 'R5G 0H4',
+      zone: 'zoneC',
+      estimateMode: 'rooms',
+      rooms: 6,
+      sqftBracket: '1000to1500',
+      condition: 'light',
+      stairsSteps: 2,
+      hallways: 2,
+      advancedStainRemoval: true,
+      odorElimination: false,
+      petTreatment: true,
+      stainProtector: true,
+      furnitureMoving: 'heavy',
+      unusualCondition: false,
+      schedule: 'flexible',
+      contact,
+    };
+
+    const quote = await computeDeterministicQuote(answers);
+    const expectedInput = { ...createDefaultCarpetInput(), ...answers, zone: 'zoneA', contact };
+    const expected = calculateEstimate('carpet', expectedInput, createDefaultPricingConfig());
+    expect(quote.total).toBe(expected.subtotal);
+    expect(quote.total).toBe(610);
   });
 
   it('matches carpet subtotal for sqft estimate', async () => {
@@ -127,7 +155,7 @@ describe('quoteEngine', () => {
     };
 
     const quote = await computeDeterministicQuote(answers);
-    const expectedInput = { ...createDefaultCarpetInput(), ...answers, contact };
+    const expectedInput = { ...createDefaultCarpetInput(), ...answers, zone: 'zoneA', contact };
     const expected = calculateEstimate('carpet', expectedInput, createDefaultPricingConfig());
     expect(quote.total).toBe(expected.subtotal);
   });

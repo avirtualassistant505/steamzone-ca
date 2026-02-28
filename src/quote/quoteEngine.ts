@@ -4,6 +4,7 @@ import {
   createDefaultCommercialWindowInput,
   createDefaultPostConstructionInput,
   createDefaultWindowInput,
+  detectZoneFromPostalCode,
   formatBookingMode,
   formatConfidence,
   type CarpetEstimateInput,
@@ -11,6 +12,7 @@ import {
   type PostConstructionEstimateInput,
   type ServiceType,
   type WindowEstimateInput,
+  type WindowZone,
 } from '../lib/estimateEngine.js';
 import { loadActivePricingConfig } from '../../server/pricingStore.js';
 import { getAnswerValue } from './schema.js';
@@ -70,6 +72,20 @@ function readAnswer<T>(answers: Record<string, unknown>, key: string, fallback: 
   return (value === undefined ? fallback : (value as T));
 }
 
+function resolveZoneFromPostal(answers: Record<string, unknown>, fallback: WindowZone): WindowZone {
+  const postalCode = String(readAnswer(answers, 'postalCode', '')).trim();
+  if (postalCode.length >= 3) {
+    return detectZoneFromPostalCode(postalCode);
+  }
+
+  const rawZone = String(readAnswer(answers, 'zone', fallback)).trim();
+  if (rawZone === 'zoneA' || rawZone === 'zoneB' || rawZone === 'zoneC' || rawZone === 'zoneD') {
+    return rawZone;
+  }
+
+  return fallback;
+}
+
 function readContact(answers: Record<string, unknown>) {
   return {
     fullName: String(readAnswer(answers, 'contact.fullName', '')).trim(),
@@ -92,7 +108,7 @@ function buildInputFromAnswers(answers: Record<string, unknown>): {
     const input: WindowEstimateInput = {
       ...defaults,
       postalCode: String(readAnswer(answers, 'postalCode', defaults.postalCode)).trim(),
-      zone: readAnswer(answers, 'zone', defaults.zone),
+      zone: resolveZoneFromPostal(answers, defaults.zone),
       storey: readAnswer(answers, 'storey', defaults.storey),
       sizeBracket: readAnswer(answers, 'sizeBracket', defaults.sizeBracket),
       scope: readAnswer(answers, 'scope', defaults.scope),
@@ -122,7 +138,7 @@ function buildInputFromAnswers(answers: Record<string, unknown>): {
     const input: CommercialWindowEstimateInput = {
       ...defaults,
       postalCode: String(readAnswer(answers, 'postalCode', defaults.postalCode)).trim(),
-      zone: readAnswer(answers, 'zone', defaults.zone),
+      zone: resolveZoneFromPostal(answers, defaults.zone),
       buildingType: readAnswer(answers, 'buildingType', defaults.buildingType),
       storeys: readAnswer(answers, 'storeys', defaults.storeys),
       sizeMode: readAnswer(answers, 'sizeMode', defaults.sizeMode),
@@ -146,7 +162,7 @@ function buildInputFromAnswers(answers: Record<string, unknown>): {
     const input: CarpetEstimateInput = {
       ...defaults,
       postalCode: String(readAnswer(answers, 'postalCode', defaults.postalCode)).trim(),
-      zone: readAnswer(answers, 'zone', defaults.zone),
+      zone: resolveZoneFromPostal(answers, defaults.zone),
       estimateMode: readAnswer(answers, 'estimateMode', defaults.estimateMode),
       rooms: Number(readAnswer(answers, 'rooms', defaults.rooms)),
       sqftBracket: readAnswer(answers, 'sqftBracket', defaults.sqftBracket),
@@ -171,7 +187,7 @@ function buildInputFromAnswers(answers: Record<string, unknown>): {
     const input: PostConstructionEstimateInput = {
       ...defaults,
       postalCode: String(readAnswer(answers, 'postalCode', defaults.postalCode)).trim(),
-      zone: readAnswer(answers, 'zone', defaults.zone),
+      zone: resolveZoneFromPostal(answers, defaults.zone),
       projectType: readAnswer(answers, 'projectType', defaults.projectType),
       buildType: readAnswer(answers, 'buildType', defaults.buildType),
       sqftBracket: readAnswer(answers, 'sqftBracket', defaults.sqftBracket),
