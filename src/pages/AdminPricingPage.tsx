@@ -1126,15 +1126,79 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
     appendTrainingAssistantMessage('assistant', `Jumped to training entry #${index + 1}.`);
   }
 
-  function applyTrainingAssistantAction(action: TrainingAssistantProposedAction): void {
+  function sanitizeTrainingItems(items: TrainingItem[]): TrainingItem[] {
+    return items
+      .map((item) => ({
+        question: item.question.trim(),
+        answer: item.answer.trim(),
+        topic: item.topic?.trim() || undefined,
+        subtopic: item.subtopic?.trim() || undefined,
+        status: item.status?.trim() || 'READY',
+      }))
+      .filter((item) => item.question && item.answer);
+  }
+
+  async function persistTrainingItems(
+    itemsToPersist: TrainingItem[],
+    loadingMessage: string,
+    successMessage: string
+  ): Promise<boolean> {
+    const sanitized = sanitizeTrainingItems(itemsToPersist);
+    setTrainingItems(sanitized);
+    setTrainingLoading(true);
+    setTrainingError('');
+    setTrainingMessage(loadingMessage);
+
+    try {
+      const response = await parseJsonResponse<TrainingSavePayload>(
+        await fetch('/api/training-save', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ items: sanitized }),
+        })
+      );
+      const payload = response.payload;
+
+      if (!payload) {
+        setTrainingError('Unable to save training data. Response was not valid JSON.');
+        return false;
+      }
+
+      if (!response.ok) {
+        setTrainingError(payload.message ?? parsePayloadError(response));
+        return false;
+      }
+
+      if (Array.isArray(payload.items)) {
+        setTrainingItems(payload.items);
+      } else {
+        setTrainingItems(sanitized);
+      }
+
+      setTrainingSource(payload.source ?? 'db');
+      setTrainingUpdatedAt(payload.updatedAt ?? '');
+      setTrainingMessage(payload.message ?? successMessage);
+      setTrainingLoaded(true);
+      return true;
+    } catch {
+      setTrainingError('Unable to reach training-save endpoint. Deploy serverless routes and set env variables in Vercel.');
+      return false;
+    } finally {
+      setTrainingLoading(false);
+    }
+  }
+
+  async function applyTrainingAssistantAction(action: TrainingAssistantProposedAction): Promise<void> {
     if (!action.entry || action.type === 'none') {
       appendTrainingAssistantMessage('assistant', 'I do not have a complete edit payload to apply yet.');
       return;
     }
 
     if (action.type === 'add') {
-      setTrainingItems((previous) => [
-        ...previous,
+      const nextItems: TrainingItem[] = [
+        ...trainingItems,
         {
           question: action.entry?.question?.trim() || '',
           answer: action.entry?.answer?.trim() || '',
@@ -1142,9 +1206,18 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
           subtopic: action.entry?.subtopic?.trim() || undefined,
           status: action.entry?.status?.trim() || 'READY',
         },
-      ]);
-      setTrainingMessage('Assistant added a drafted training entry. Click Save Training Data to persist.');
-      appendTrainingAssistantMessage('assistant', 'Done. I added the new training entry draft. Click Save Training Data to persist it.');
+      ];
+      const saved = await persistTrainingItems(
+        nextItems,
+        'Applying assistant add and saving training data...',
+        'Assistant added and saved a new training entry.'
+      );
+      appendTrainingAssistantMessage(
+        'assistant',
+        saved
+          ? 'Done. I added and saved the new training entry.'
+          : 'I prepared the new entry, but save failed. Please check the training error banner and try again.'
+      );
       setTrainingAssistantPendingAction(null);
       return;
     }
@@ -1156,24 +1229,28 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
         return;
       }
 
-      setTrainingItems((previous) =>
-        previous.map((item, index) =>
-          index === action.target_index
-            ? {
-                ...item,
-                question: action.entry?.question?.trim() || item.question,
-                answer: action.entry?.answer?.trim() || item.answer,
-                topic: action.entry?.topic?.trim() || undefined,
-                subtopic: action.entry?.subtopic?.trim() || undefined,
-                status: action.entry?.status?.trim() || 'READY',
-              }
-            : item
-        )
+      const nextItems = trainingItems.map((item, index) =>
+        index === action.target_index
+          ? {
+              ...item,
+              question: action.entry?.question?.trim() || item.question,
+              answer: action.entry?.answer?.trim() || item.answer,
+              topic: action.entry?.topic?.trim() || undefined,
+              subtopic: action.entry?.subtopic?.trim() || undefined,
+              status: action.entry?.status?.trim() || 'READY',
+            }
+          : item
       );
-      setTrainingMessage('Assistant updated a training entry draft. Click Save Training Data to persist.');
+      const saved = await persistTrainingItems(
+        nextItems,
+        `Applying assistant update to entry #${action.target_index + 1} and saving training data...`,
+        `Assistant updated and saved entry #${action.target_index + 1}.`
+      );
       appendTrainingAssistantMessage(
         'assistant',
-        `Done. I updated training entry #${action.target_index + 1}. Click Save Training Data to persist it.`
+        saved
+          ? `Done. I updated and saved training entry #${action.target_index + 1}.`
+          : `I updated entry #${action.target_index + 1} locally, but save failed. Please check the training error banner and try again.`
       );
       setTrainingAssistantPendingAction(null);
     }
@@ -1195,7 +1272,7 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
     if (trainingAssistantPendingAction) {
       if (isAffirmativeInput(query)) {
-        applyTrainingAssistantAction(trainingAssistantPendingAction);
+        await applyTrainingAssistantAction(trainingAssistantPendingAction);
         return;
       }
       if (isNegativeInput(query)) {
@@ -1501,56 +1578,11 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   }
 
   async function saveTrainingData(): Promise<void> {
-    const sanitized = trainingItems
-      .map((item) => ({
-        question: item.question.trim(),
-        answer: item.answer.trim(),
-        topic: item.topic?.trim() || undefined,
-        subtopic: item.subtopic?.trim() || undefined,
-        status: item.status?.trim() || 'READY',
-      }))
-      .filter((item) => item.question && item.answer);
-
-    setTrainingItems(sanitized);
-    setTrainingLoading(true);
-    setTrainingError('');
-    setTrainingMessage('Saving training data...');
-
-      try {
-      const response = await parseJsonResponse<TrainingSavePayload>(
-        await fetch('/api/training-save', {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({ items: sanitized }),
-        })
-      );
-      const payload = response.payload;
-
-      if (!payload) {
-        setTrainingError('Unable to save training data. Response was not valid JSON.');
-        return;
-      }
-
-      if (!response.ok) {
-        setTrainingError(payload.message ?? parsePayloadError(response));
-        return;
-      }
-
-      if (Array.isArray(payload.items)) {
-        setTrainingItems(payload.items);
-      }
-
-      setTrainingSource(payload.source ?? 'db');
-      setTrainingUpdatedAt(payload.updatedAt ?? '');
-      setTrainingMessage(payload.message ?? 'Training data saved. Both web and voice agents now use this content.');
-      setTrainingLoaded(true);
-    } catch {
-      setTrainingError('Unable to reach training-save endpoint. Deploy serverless routes and set env variables in Vercel.');
-    } finally {
-      setTrainingLoading(false);
-    }
+    await persistTrainingItems(
+      trainingItems,
+      'Saving training data...',
+      'Training data saved. Both web and voice agents now use this content.'
+    );
   }
 
   async function saveAgentModel(): Promise<void> {
