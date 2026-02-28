@@ -115,7 +115,7 @@ function baseTrace(
     lineItems,
     subtotalRaw: roundTrace(normalizedRaw),
     minimumCharge: roundTrace(normalizedMin),
-    minimumApplied: normalizedSubtotal > normalizedRaw,
+    minimumApplied: normalizedRaw < normalizedMin,
     subtotalFinal: roundTrace(normalizedSubtotal),
     estimateLow: roundTrace(ensureFinite(result.estimateLow, 'result.estimateLow')),
     estimateHigh: roundTrace(ensureFinite(result.estimateHigh, 'result.estimateHigh')),
