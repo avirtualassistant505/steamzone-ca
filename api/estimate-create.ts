@@ -1725,7 +1725,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     }
 
     const engine = await getEngine();
-    const strictMode = sendEmailRequested ? true : asBool((asRecord(body)?.strict ?? true) as unknown, true);
+    // Respect explicit strict=false from workflow/webhook callers. Website form submits strict=true.
+    const strictMode = asBool((asRecord(body)?.strict ?? true) as unknown, true);
     const detectedZone = engine.detectZoneFromPostalCode(postalCode);
     const zone = detectedZone;
 
