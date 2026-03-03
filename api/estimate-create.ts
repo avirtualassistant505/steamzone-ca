@@ -345,6 +345,48 @@ function findEmailValueCandidate(input: unknown, depth = 0): string | null {
   return null;
 }
 
+function findConsentValueCandidate(input: unknown, depth = 0): boolean | null {
+  if (depth > 5 || input === null || input === undefined) return null;
+  if (typeof input === 'boolean') return input;
+  if (typeof input === 'number') return input !== 0;
+  if (typeof input === 'string') {
+    const s = unwrapQuotedString(input).trim();
+    if (!s) return null;
+    const lowered = s.toLowerCase();
+    if (['1', 'true', 'yes', 'y', 'on', 'agree', 'agreed', 'accepted'].includes(lowered)) return true;
+    if (['0', 'false', 'no', 'n', 'off', 'decline', 'declined', 'disagree'].includes(lowered)) return false;
+    return null;
+  }
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      const hit = findConsentValueCandidate(item, depth + 1);
+      if (hit !== null) return hit;
+    }
+    return null;
+  }
+  const rec = asRecord(input);
+  if (!rec) return null;
+  for (const [key, value] of Object.entries(rec)) {
+    const keyNorm = normalizeKey(String(key));
+    if (
+      keyNorm.includes('consent') ||
+      keyNorm.includes('terms') ||
+      keyNorm.includes('permission') ||
+      keyNorm.includes('opt in') ||
+      keyNorm.includes('opt_in') ||
+      keyNorm.includes('optin')
+    ) {
+      const hit = findConsentValueCandidate(value, depth + 1);
+      if (hit !== null) return hit;
+    }
+  }
+  for (const value of Object.values(rec)) {
+    const hit = findConsentValueCandidate(value, depth + 1);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+
 function maybeExtractGhlWebhookPayload(body: unknown): { serviceType?: unknown; answers?: unknown; ghl?: GhlWebhookContext } | null {
   const root = asRecord(body);
   if (!root) return null;
@@ -1658,6 +1700,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
             }),
             email: discoveredEmail,
           };
+        }
+      }
+
+      if (contact && !contact.consentToContact) {
+        const discoveredConsent = findConsentValueCandidate(answers) ?? findConsentValueCandidate(body);
+        if (discoveredConsent !== null) {
+          contact = { ...contact, consentToContact: discoveredConsent };
+        } else if (estimateSource === 'form') {
+          // This workflow is triggered from a submitted form where terms are required.
+          contact = { ...contact, consentToContact: true };
         }
       }
     }
