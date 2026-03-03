@@ -121,6 +121,21 @@ function confidenceClasses(confidence: EstimateResult['confidence']): string {
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ghlEstimateFormEmbedUrl = String(import.meta.env.VITE_GHL_ESTIMATE_FORM_EMBED_URL ?? '').trim();
+const ghlEstimateFormEmbedUrlWindow = String(import.meta.env.VITE_GHL_ESTIMATE_FORM_EMBED_URL_WINDOW ?? '').trim();
+const ghlEstimateFormEmbedUrlCommercial = String(import.meta.env.VITE_GHL_ESTIMATE_FORM_EMBED_URL_COMMERCIAL_WINDOW ?? '').trim();
+const ghlEstimateFormEmbedUrlCarpet = String(import.meta.env.VITE_GHL_ESTIMATE_FORM_EMBED_URL_CARPET ?? '').trim();
+const ghlEstimateFormEmbedUrlPostConstruction = String(import.meta.env.VITE_GHL_ESTIMATE_FORM_EMBED_URL_POST_CONSTRUCTION ?? '').trim();
+
+function sanitizeEmbedUrl(rawUrl: string): string {
+  if (!rawUrl) return '';
+  try {
+    const parsed = new URL(rawUrl);
+    if (!/^https?:$/.test(parsed.protocol)) return '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
 
 function validatePostalCode(postalCode: string): string | undefined {
   const value = postalCode.trim();
@@ -274,17 +289,18 @@ export default function GetEstimatePage() {
     if (typeof window === 'undefined') return false;
     return new URLSearchParams(window.location.search).get('mode') === 'legacy';
   }, []);
-  const sanitizedGhlEmbedUrl = useMemo(() => {
-    if (!ghlEstimateFormEmbedUrl) return '';
-    try {
-      const parsed = new URL(ghlEstimateFormEmbedUrl);
-      if (!/^https?:$/.test(parsed.protocol)) return '';
-      return parsed.toString();
-    } catch {
-      return '';
-    }
+  const sanitizedGhlEmbedUrls = useMemo(() => {
+    const fallback = sanitizeEmbedUrl(ghlEstimateFormEmbedUrl);
+    return {
+      window: sanitizeEmbedUrl(ghlEstimateFormEmbedUrlWindow) || fallback,
+      commercialWindow: sanitizeEmbedUrl(ghlEstimateFormEmbedUrlCommercial) || fallback,
+      carpet: sanitizeEmbedUrl(ghlEstimateFormEmbedUrlCarpet) || fallback,
+      postConstruction: sanitizeEmbedUrl(ghlEstimateFormEmbedUrlPostConstruction) || fallback,
+    } as const;
   }, []);
-  const showGhlEmbed = Boolean(sanitizedGhlEmbedUrl) && !legacyWizardMode;
+  const activeGhlEmbedUrl = sanitizedGhlEmbedUrls[serviceType];
+  const hasAnyGhlEmbed = useMemo(() => Object.values(sanitizedGhlEmbedUrls).some(Boolean), [sanitizedGhlEmbedUrls]);
+  const showGhlEmbed = hasAnyGhlEmbed && !legacyWizardMode;
 
   const labels = useMemo(() => stepLabels[serviceType], [serviceType]);
   const totalSteps = labels.length;
@@ -548,7 +564,7 @@ export default function GetEstimatePage() {
   if (showGhlEmbed) {
     return (
       <main className="bg-gradient-to-br from-slate-50 via-blue-50 to-white pb-20 pt-28">
-        <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="mb-8 text-center">
             <h1 className="text-4xl font-bold text-gray-900 md:text-5xl">Steinbach Instant Estimate</h1>
             <p className="mx-auto mt-4 max-w-3xl text-lg text-gray-600">
@@ -562,14 +578,70 @@ export default function GetEstimatePage() {
               .
             </p>
           </div>
+          <fieldset className="mb-8" data-testid={tid('service_selector')}>
+            <legend className="sr-only">Choose a service</legend>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <ServiceRadioTile
+                disabled={isSubmitting || !sanitizedGhlEmbedUrls.window}
+                active={serviceType === 'window'}
+                title="Residential Windows"
+                description="Pane-based residential pricing with home-size shortcuts and complexity add-ons."
+                icon={<Home className="h-6 w-6" />}
+                value="window"
+                onChange={switchService}
+                testId={tid('service', 'window')}
+              />
+              <ServiceRadioTile
+                disabled={isSubmitting || !sanitizedGhlEmbedUrls.commercialWindow}
+                active={serviceType === 'commercialWindow'}
+                title="Commercial Windows"
+                description="Storefront and low-rise instant ranges with recurring-frequency pricing."
+                icon={<Building2 className="h-6 w-6" />}
+                value="commercialWindow"
+                onChange={switchService}
+                testId={tid('service', 'commercialWindow')}
+              />
+              <ServiceRadioTile
+                disabled={isSubmitting || !sanitizedGhlEmbedUrls.carpet}
+                active={serviceType === 'carpet'}
+                title="Carpet Cleaning"
+                description="Room or square-foot flow with stairs, hallways, and treatment options."
+                icon={<ClipboardCheck className="h-6 w-6" />}
+                value="carpet"
+                onChange={switchService}
+                testId={tid('service', 'carpet')}
+              />
+              <ServiceRadioTile
+                disabled={isSubmitting || !sanitizedGhlEmbedUrls.postConstruction}
+                active={serviceType === 'postConstruction'}
+                title="Post-Construction"
+                description="Stage + dust-load based estimate with add-ons for detail-level finishing."
+                icon={<Hammer className="h-6 w-6" />}
+                value="postConstruction"
+                onChange={switchService}
+                testId={tid('service', 'postConstruction')}
+              />
+            </div>
+          </fieldset>
+          {!activeGhlEmbedUrl && (
+            <div className="mb-6 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+              Embedded form not configured for {formatServiceLabel(serviceType)} yet. Please choose another service or open the legacy wizard.
+            </div>
+          )}
           <div className="overflow-hidden rounded-2xl border border-blue-100 bg-white shadow-sm">
-            <iframe
-              title="Steam Zone Estimate Form"
-              src={sanitizedGhlEmbedUrl}
-              className="h-[1750px] w-full"
-              loading="lazy"
-              referrerPolicy="no-referrer-when-downgrade"
-            />
+            {activeGhlEmbedUrl ? (
+              <iframe
+                title={`${formatServiceLabel(serviceType)} Estimate Form`}
+                src={activeGhlEmbedUrl}
+                className="h-[2200px] w-full"
+                loading="lazy"
+                referrerPolicy="no-referrer-when-downgrade"
+              />
+            ) : (
+              <div className="flex min-h-[280px] items-center justify-center px-6 py-12 text-center text-gray-500">
+                No form is available for this service.
+              </div>
+            )}
           </div>
         </div>
       </main>

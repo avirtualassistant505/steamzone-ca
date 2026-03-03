@@ -81,6 +81,11 @@ type MailerModule = {
 
 type QuoteRuntimeModule = {
   validateRequiredAnswers: (answers: Record<string, unknown>) => string[];
+  normalizeAndValidateField: (
+    fieldKey: string,
+    userText: string,
+    answersSoFar: Record<string, unknown>
+  ) => { ok: boolean; normalized_value: unknown };
 };
 
 let enginePromise: Promise<EngineModule> | null = null;
@@ -734,6 +739,228 @@ function coerceServiceType(value: unknown): ServiceType | null {
   }
 
   return null;
+}
+
+function coerceWindowZone(value: unknown): WindowZone | null {
+  if (value === 'zoneA' || value === 'zoneB' || value === 'zoneC' || value === 'zoneD') {
+    return value;
+  }
+
+  const raw = typeof value === 'string' ? unwrapQuotedString(value) : '';
+  const normalized = raw.trim().toLowerCase();
+  if (!normalized) return null;
+
+  const compact = normalized.replace(/[^a-z0-9]/g, '');
+  if (compact === 'zonea' || compact === 'a') return 'zoneA';
+  if (compact === 'zoneb' || compact === 'b') return 'zoneB';
+  if (compact === 'zonec' || compact === 'c') return 'zoneC';
+  if (compact === 'zoned' || compact === 'd') return 'zoneD';
+
+  if (normalized.includes('zone a') || normalized.includes('steinbach')) return 'zoneA';
+  if (
+    normalized.includes('zone b') ||
+    normalized.includes('15km to 35km') ||
+    normalized.includes('15 km to 35 km')
+  ) {
+    return 'zoneB';
+  }
+  if (normalized.includes('zone c') || normalized.includes('winnipeg')) return 'zoneC';
+  if (normalized.includes('zone d') || normalized.includes('extended rural') || normalized.includes('rural')) return 'zoneD';
+
+  return null;
+}
+
+const strictFieldOrderByService: Record<ServiceType, string[]> = {
+  window: [
+    'postalCode',
+    'zone',
+    'storey',
+    'sizeBracket',
+    'scope',
+    'screens',
+    'tracks',
+    'hardToReach',
+    'hardWaterRemoval',
+    'constructionDebris',
+    'slidingRemoval',
+    'slidingQuantity',
+    'patioDoors',
+    'patioQuantity',
+    'skylights',
+    'skylightQuantity',
+    'railingGlass',
+    'frenchPanes',
+    'sunroom',
+    'walkoutBasement',
+    'contact.fullName',
+    'contact.phone',
+    'contact.email',
+    'contact.address',
+    'contact.consentToContact',
+    'contact.marketingOptIn',
+  ],
+  commercialWindow: [
+    'postalCode',
+    'zone',
+    'buildingType',
+    'storeys',
+    'sizeMode',
+    'paneCount',
+    'frontageFeet',
+    'glassDoors',
+    'scope',
+    'frequency',
+    'liftRequired',
+    'afterHours',
+    'overspray',
+    'hardWater',
+    'contact.fullName',
+    'contact.phone',
+    'contact.email',
+    'contact.address',
+    'contact.consentToContact',
+    'contact.marketingOptIn',
+  ],
+  carpet: [
+    'postalCode',
+    'zone',
+    'estimateMode',
+    'rooms',
+    'sqftBracket',
+    'condition',
+    'stairsSteps',
+    'hallways',
+    'furnitureMoving',
+    'advancedStainRemoval',
+    'odorElimination',
+    'petTreatment',
+    'stainProtector',
+    'unusualCondition',
+    'schedule',
+    'contact.fullName',
+    'contact.phone',
+    'contact.email',
+    'contact.address',
+    'contact.consentToContact',
+    'contact.marketingOptIn',
+  ],
+  postConstruction: [
+    'postalCode',
+    'zone',
+    'projectType',
+    'buildType',
+    'sqftBracket',
+    'floors',
+    'stage',
+    'dustLoad',
+    'interiorWindows',
+    'scraping',
+    'floorDetailing',
+    'insideCabinets',
+    'appliances',
+    'specialDetailing',
+    'multiTenantAccess',
+    'schedule',
+    'contact.fullName',
+    'contact.phone',
+    'contact.email',
+    'contact.address',
+    'contact.consentToContact',
+    'contact.marketingOptIn',
+  ],
+};
+
+function getNestedValue(source: Record<string, unknown>, key: string): unknown {
+  if (Object.prototype.hasOwnProperty.call(source, key)) {
+    return source[key];
+  }
+
+  const chunks = key.split('.');
+  let current: unknown = source;
+  for (const chunk of chunks) {
+    if (!current || typeof current !== 'object') return undefined;
+    current = (current as Record<string, unknown>)[chunk];
+  }
+  return current;
+}
+
+function setNestedValue(target: Record<string, unknown>, key: string, value: unknown): void {
+  const chunks = key.split('.');
+  if (chunks.length === 1) {
+    target[key] = value;
+    return;
+  }
+
+  let cursor: Record<string, unknown> = target;
+  for (let i = 0; i < chunks.length - 1; i += 1) {
+    const part = chunks[i];
+    const existing = cursor[part];
+    if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
+      cursor[part] = {};
+    }
+    cursor = cursor[part] as Record<string, unknown>;
+  }
+  cursor[chunks[chunks.length - 1]] = value;
+}
+
+function coerceAnswersForStrictValidation(
+  quoteRuntime: QuoteRuntimeModule,
+  serviceType: ServiceType,
+  answersRec: Record<string, unknown>,
+  postalCode: string,
+  zone: WindowZone,
+  contact: LeadContact
+): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    ...answersRec,
+    serviceType,
+    postalCode,
+    zone,
+    contact: {
+      ...(asRecord(answersRec.contact) ?? {}),
+      ...contact,
+    },
+  };
+
+  // Accept common flattened variants from workflows.
+  const flattenedName =
+    safeString(base.fullName, '').trim() ||
+    safeString(base.full_name, '').trim() ||
+    [safeString(base.firstName, '').trim(), safeString(base.lastName, '').trim()].filter(Boolean).join(' ').trim() ||
+    [safeString(base.first_name, '').trim(), safeString(base.last_name, '').trim()].filter(Boolean).join(' ').trim();
+  if (flattenedName && !safeString(getNestedValue(base, 'contact.fullName'), '').trim()) {
+    setNestedValue(base, 'contact.fullName', flattenedName);
+  }
+  if (!safeString(getNestedValue(base, 'contact.phone'), '').trim() && safeString(base.phone, '').trim()) {
+    setNestedValue(base, 'contact.phone', safeString(base.phone, '').trim());
+  }
+  if (!safeString(getNestedValue(base, 'contact.email'), '').trim() && safeString(base.email, '').trim()) {
+    setNestedValue(base, 'contact.email', safeString(base.email, '').trim());
+  }
+  if (!safeString(getNestedValue(base, 'contact.address'), '').trim() && safeString(base.address, '').trim()) {
+    setNestedValue(base, 'contact.address', safeString(base.address, '').trim());
+  }
+  if (getNestedValue(base, 'contact.consentToContact') === undefined && base.consentToContact !== undefined) {
+    setNestedValue(base, 'contact.consentToContact', base.consentToContact);
+  }
+  if (getNestedValue(base, 'contact.marketingOptIn') === undefined && base.marketingOptIn !== undefined) {
+    setNestedValue(base, 'contact.marketingOptIn', base.marketingOptIn);
+  }
+
+  const normalized = structuredClone(base) as Record<string, unknown>;
+  for (const key of strictFieldOrderByService[serviceType]) {
+    const raw = getNestedValue(base, key);
+    if (raw === undefined || raw === null || raw === '') continue;
+    const textValue = typeof raw === 'string' ? raw : String(raw);
+    if (!textValue.trim()) continue;
+
+    const parsed = quoteRuntime.normalizeAndValidateField(key, textValue, normalized);
+    if (parsed.ok) {
+      setNestedValue(normalized, key, parsed.normalized_value);
+    }
+  }
+
+  return normalized;
 }
 
 function formatHoursRange(low: number, high: number): string {
@@ -1738,21 +1965,20 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       asRecord(bodyRec.custom_data)?.strict ??
       true;
     const strictMode = asBool(strictRaw, true);
+    const explicitZone =
+      coerceWindowZone(answersRec.zone) ??
+      coerceWindowZone(answersRec.travelZone) ??
+      coerceWindowZone(answersRec.travel_zone) ??
+      coerceWindowZone(bodyRec.zone) ??
+      coerceWindowZone(bodyRec.travelZone) ??
+      coerceWindowZone(bodyRec.travel_zone);
     const detectedZone = engine.detectZoneFromPostalCode(postalCode);
-    const zone = detectedZone;
+    const zone = explicitZone ?? detectedZone;
 
+    let answersForQuote = answersRec;
     if (strictMode) {
       const quoteRuntime = await getQuoteRuntime();
-      const strictAnswers: Record<string, unknown> = {
-        ...answersRec,
-        serviceType,
-        postalCode,
-        zone,
-        contact: {
-          ...(asRecord(answersRec.contact) ?? {}),
-          ...contact,
-        },
-      };
+      const strictAnswers = coerceAnswersForStrictValidation(quoteRuntime, serviceType, answersRec, postalCode, zone, contact);
       const errors = quoteRuntime.validateRequiredAnswers(strictAnswers);
       if (errors.length > 0) {
         res.status(400).json({
@@ -1761,6 +1987,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         });
         return;
       }
+      answersForQuote = strictAnswers;
     }
 
     // If we already created a record for this idempotency key, return it (and skip duplicate emails),
@@ -1805,7 +2032,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       }
     }
 
-    const normalizedAnswers = normalizeEstimateAnswers(serviceType, answers, postalCode, zone, contact);
+    const normalizedAnswers = normalizeEstimateAnswers(serviceType, answersForQuote, postalCode, zone, contact);
 
     const { config: pricingConfig, source: pricingSource } = await loadPricingConfigForEstimate();
     const estimate = engine.calculateEstimate(serviceType, normalizedAnswers, pricingConfig);

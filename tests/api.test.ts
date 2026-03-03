@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import quoteHandler from '../api/quote';
+import estimateCreateHandler from '../api/estimate-create';
 import estimateAgentChatHandler from '../api/estimate-agent/chat';
 import transcriptsCleanupHandler from '../api/transcripts-cleanup';
 import transcriptsGetHandler from '../api/transcripts-get';
 import { appendConversationTurn } from '../server/conversationLogStore';
+import { calculateEstimate, createDefaultCarpetInput, createDefaultPricingConfig } from '../src/lib/estimateEngine';
 
 interface MockRes {
   code: number;
@@ -104,6 +106,107 @@ describe('API routes', () => {
     expect(payload.quote.total).toBeGreaterThan(0);
     expect(payload.quote.currency).toBe('CAD');
     expect(payload.quote.line_items.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('POST /api/quote respects explicitly provided zone when postal-derived zone differs', async () => {
+    const answers = {
+      serviceType: 'carpet',
+      postalCode: 'R5G 0H4',
+      zone: 'zoneC',
+      estimateMode: 'rooms',
+      rooms: 6,
+      sqftBracket: '1000to1500',
+      condition: 'light',
+      stairsSteps: 2,
+      hallways: 2,
+      advancedStainRemoval: true,
+      odorElimination: false,
+      petTreatment: true,
+      stainProtector: true,
+      furnitureMoving: 'heavy',
+      unusualCondition: false,
+      schedule: 'flexible',
+      contact: {
+        fullName: 'Jane Zone Test',
+        address: '',
+        phone: '(236) 506-6570',
+        email: 'jane.zone@example.com',
+        consentToContact: true,
+        marketingOptIn: false,
+      },
+    };
+
+    const res = makeRes();
+    await quoteHandler({ method: 'POST', body: { answers } }, res);
+    expect(res.code).toBe(200);
+
+    const payload = res.payload as { quote: { total: number } };
+    const expectedInput = { ...createDefaultCarpetInput(), ...answers };
+    const expected = calculateEstimate('carpet', expectedInput, createDefaultPricingConfig());
+    expect(payload.quote.total).toBe(expected.subtotal);
+    expect(payload.quote.total).toBe(680);
+  });
+
+  it('POST /api/estimate-create accepts strict string-typed workflow payload for conditional integer fields', async () => {
+    const prevGhlToken = process.env.GHL_PRIVATE_INTEGRATION_TOKEN;
+    const prevGhlAccess = process.env.GHL_ACCESS_TOKEN;
+    const prevGhlLocation = process.env.GHL_LOCATION_ID;
+    process.env.GHL_PRIVATE_INTEGRATION_TOKEN = '';
+    process.env.GHL_ACCESS_TOKEN = '';
+    process.env.GHL_LOCATION_ID = '';
+
+    const res = makeRes();
+    try {
+      await estimateCreateHandler(
+        {
+          method: 'POST',
+          body: {
+            send_email: false,
+            strict: true,
+            source: 'form',
+            serviceType: 'window',
+            postalCode: 'R5G 2X3',
+            zone: 'zoneA',
+            storey: 'two',
+            sizeBracket: '1500to2000',
+            scope: 'both',
+            screens: 'some',
+            tracks: 'detailed',
+            hardToReach: 'true',
+            hardWaterRemoval: 'false',
+            constructionDebris: 'false',
+            slidingRemoval: 'threePanel',
+            slidingQuantity: '2',
+            patioDoors: 'slideOnly',
+            patioQuantity: '1',
+            skylights: 'both',
+            skylightQuantity: '1',
+            railingGlass: 'none',
+            frenchPanes: 'some',
+            sunroom: 'false',
+            walkoutBasement: 'false',
+            fullName: 'Jane Strict',
+            phone: '+12045550123',
+            email: 'jane.strict@example.com',
+            address: '120 Parkside Crescent',
+            consentToContact: 'true',
+            marketingOptIn: 'false',
+          },
+        },
+        res
+      );
+
+      expect(res.code).toBe(200);
+      const payload = res.payload as { record: { serviceType: string; answers: { slidingQuantity: number; patioQuantity: number; skylightQuantity: number } } };
+      expect(payload.record.serviceType).toBe('window');
+      expect(payload.record.answers.slidingQuantity).toBe(2);
+      expect(payload.record.answers.patioQuantity).toBe(1);
+      expect(payload.record.answers.skylightQuantity).toBe(1);
+    } finally {
+      process.env.GHL_PRIVATE_INTEGRATION_TOKEN = prevGhlToken;
+      process.env.GHL_ACCESS_TOKEN = prevGhlAccess;
+      process.env.GHL_LOCATION_ID = prevGhlLocation;
+    }
   });
 
   it('POST /api/estimate-agent/chat returns assistant message on basic happy path', async () => {

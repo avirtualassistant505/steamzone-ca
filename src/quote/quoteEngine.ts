@@ -72,15 +72,25 @@ function readAnswer<T>(answers: Record<string, unknown>, key: string, fallback: 
   return (value === undefined ? fallback : (value as T));
 }
 
+function parseWindowZone(value: unknown): WindowZone | null {
+  const raw = String(value ?? '').trim();
+  if (raw === 'zoneA' || raw === 'zoneB' || raw === 'zoneC' || raw === 'zoneD') {
+    return raw;
+  }
+  return null;
+}
+
 function resolveZoneFromPostal(answers: Record<string, unknown>, fallback: WindowZone): WindowZone {
+  // Respect an explicit zone answer first. The website flow auto-detects from postal code,
+  // then allows a manual adjustment when a customer is near a boundary.
+  const explicit = parseWindowZone(readAnswer(answers, 'zone', ''));
+  if (explicit) {
+    return explicit;
+  }
+
   const postalCode = String(readAnswer(answers, 'postalCode', '')).trim();
   if (postalCode.length >= 3) {
     return detectZoneFromPostalCode(postalCode);
-  }
-
-  const rawZone = String(readAnswer(answers, 'zone', fallback)).trim();
-  if (rawZone === 'zoneA' || rawZone === 'zoneB' || rawZone === 'zoneC' || rawZone === 'zoneD') {
-    return rawZone;
   }
 
   return fallback;
