@@ -588,6 +588,212 @@ function extractEmailFromText(text: string): string | null {
   return hit ? hit[0].trim() : null;
 }
 
+function extractPhoneFromText(text: string): string | null {
+  const hit = text.match(/(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
+  return hit ? hit[0].trim() : null;
+}
+
+function parseOptionalBool(value: unknown): boolean | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value !== 'string') return null;
+  const s = normalizeKey(unwrapQuotedString(value));
+  if (!s) return null;
+  if (['1', 'true', 'yes', 'y', 'on', 'agree', 'agreed', 'accepted'].includes(s)) return true;
+  if (['0', 'false', 'no', 'n', 'off', 'disagree', 'decline', 'declined'].includes(s)) return false;
+  return null;
+}
+
+function extractIntegerFromText(value: string): number | null {
+  const hit = value.match(/-?\d+/);
+  if (!hit) return null;
+  const parsed = Number.parseInt(hit[0], 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function splitChatSegments(text: string): string[] {
+  return text
+    .split(/\r?\n|(?:\.\s+)/g)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function mapChatLabelToFieldKey(label: string): string | null {
+  const l = normalizeKey(label.replace(/[*-]+$/g, '').trim());
+  if (!l) return null;
+
+  if (l === 'service' || l === 'service type' || l === 'service category' || l.includes('service type')) return 'serviceType';
+  if (l.includes('postal')) return 'postalCode';
+  if (l === 'zone' || l.includes('travel zone')) return 'zone';
+  if (l.includes('estimate mode') || l.includes('estimate method')) return 'estimateMode';
+  if (l === 'rooms' || l.includes('room count')) return 'rooms';
+  if (l.includes('square footage') || l.includes('sqft bracket')) return 'sqftBracket';
+
+  if (l.includes('house type') || l === 'storey' || l === 'storeys') return 'storey';
+  if (l.includes('size bracket')) return 'sizeBracket';
+  if (l.includes('cleaning scope') || l === 'scope') return 'scope';
+  if (l === 'screens') return 'screens';
+  if (l.includes('tracks')) return 'tracks';
+  if (l.includes('hard-to-reach') || l.includes('hard to reach')) return 'hardToReach';
+  if (l.includes('hard water removal')) return 'hardWaterRemoval';
+  if (l.includes('construction debris') || l.includes('paint on glass')) return 'constructionDebris';
+  if (l.includes('sliding') && l.includes('removal')) return 'slidingRemoval';
+  if (l.includes('sliding') && l.includes('quantity')) return 'slidingQuantity';
+  if (l.includes('patio') && l.includes('doors')) return 'patioDoors';
+  if (l.includes('patio') && l.includes('quantity')) return 'patioQuantity';
+  if (l.includes('skylight') && !l.includes('quantity')) return 'skylights';
+  if (l.includes('skylight') && l.includes('quantity')) return 'skylightQuantity';
+  if (l.includes('railing glass')) return 'railingGlass';
+  if (l.includes('french panes')) return 'frenchPanes';
+  if (l.includes('sunroom')) return 'sunroom';
+  if (l.includes('walkout basement')) return 'walkoutBasement';
+
+  if (l.includes('building type')) return 'buildingType';
+  if (l.includes('glass size method')) return 'sizeMode';
+  if (l.includes('pane count')) return 'paneCount';
+  if (l.includes('frontage')) return 'frontageFeet';
+  if (l.includes('glass door')) return 'glassDoors';
+  if (l.includes('service frequency') || l === 'frequency') return 'frequency';
+  if (l.includes('lift') || l.includes('boom')) return 'liftRequired';
+  if (l.includes('after-hours') || l.includes('after hours')) return 'afterHours';
+  if (l.includes('overspray') || l.includes('sticker/paint')) return 'overspray';
+  if (l === 'hard water' || l.includes('hard water stain')) return 'hardWater';
+
+  if (l === 'condition') return 'condition';
+  if (l.startsWith('stairs')) return 'stairsSteps';
+  if (l.startsWith('hallways')) return 'hallways';
+  if (l.includes('furniture moving')) return 'furnitureMoving';
+  if (l.includes('advanced stain removal')) return 'advancedStainRemoval';
+  if (l.includes('odor elimination')) return 'odorElimination';
+  if (l.includes('pet treatment')) return 'petTreatment';
+  if (l.includes('stain protector')) return 'stainProtector';
+  if (l.includes('unusual condition') || l.includes('flooding') || l.includes('mould')) return 'unusualCondition';
+  if (l === 'schedule' || l.includes('preferred timeline')) return 'schedule';
+
+  if (l.includes('project type')) return 'projectType';
+  if (l.includes('build type')) return 'buildType';
+  if (l.includes('floors')) return 'floors';
+  if (l.includes('cleaning stage') || l === 'stage') return 'stage';
+  if (l.includes('dust load')) return 'dustLoad';
+  if (l.includes('interior windows')) return 'interiorWindows';
+  if (l.includes('scraping')) return 'scraping';
+  if (l.includes('floor detailing')) return 'floorDetailing';
+  if (l.includes('inside cabinets')) return 'insideCabinets';
+  if (l.includes('appliance')) return 'appliances';
+  if (l.includes('special detailing')) return 'specialDetailing';
+  if (l.includes('multi-tenant access')) return 'multiTenantAccess';
+
+  if (l === 'full name' || l === 'name') return 'contact.fullName';
+  if (l.startsWith('phone')) return 'contact.phone';
+  if (l === 'email' || l.includes('email address')) return 'contact.email';
+  if (l.includes('address')) return 'contact.address';
+  if (l.includes('consent to contact') || l === 'consent') return 'contact.consentToContact';
+  if (l.includes('marketing opt-in') || l.includes('marketing opt in') || l === 'marketing') return 'contact.marketingOptIn';
+
+  return null;
+}
+
+async function inferAnswersFromInboundTranscript(
+  inboundText: string,
+  serviceHint: ServiceType | null
+): Promise<{
+  serviceType: ServiceType | null;
+  answers: Record<string, unknown>;
+  contact: Partial<LeadContact>;
+}> {
+  const pairs = splitChatSegments(inboundText)
+    .map((segment) => {
+      const idx = segment.indexOf(':');
+      if (idx <= 0) return null;
+      const label = segment.slice(0, idx).trim();
+      const value = segment.slice(idx + 1).trim();
+      if (!label || !value) return null;
+      return { label, value };
+    })
+    .filter((item): item is { label: string; value: string } => Boolean(item));
+
+  const mapped = pairs
+    .map((pair) => ({ key: mapChatLabelToFieldKey(pair.label), value: pair.value }))
+    .filter((item): item is { key: string; value: string } => Boolean(item.key));
+
+  const explicitService = mapped.find((item) => item.key === 'serviceType')?.value ?? null;
+  const serviceType = coerceServiceType(explicitService) ?? serviceHint ?? inferServiceTypeFromText(inboundText) ?? null;
+  const answers: Record<string, unknown> = {};
+  const contact: Partial<LeadContact> = {};
+  const quoteRuntime = serviceType ? await getQuoteRuntime().catch(() => null) : null;
+
+  for (const { key, value } of mapped) {
+    if (key === 'serviceType') continue;
+    if (key === 'postalCode') {
+      const parsedPostal = extractCanadianPostalCodeFromText(value);
+      if (parsedPostal) answers.postalCode = parsedPostal;
+      continue;
+    }
+    if (key === 'zone') {
+      const parsedZone = coerceWindowZone(value);
+      if (parsedZone) answers.zone = parsedZone;
+      continue;
+    }
+    if (key === 'contact.fullName') {
+      contact.fullName = value;
+      continue;
+    }
+    if (key === 'contact.phone') {
+      contact.phone = extractPhoneFromText(value) ?? value.trim();
+      continue;
+    }
+    if (key === 'contact.email') {
+      const parsedEmail = extractEmailFromText(value);
+      if (parsedEmail) contact.email = parsedEmail;
+      continue;
+    }
+    if (key === 'contact.address') {
+      contact.address = value.trim();
+      continue;
+    }
+    if (key === 'contact.consentToContact') {
+      const parsed = parseOptionalBool(value);
+      if (parsed !== null) contact.consentToContact = parsed;
+      continue;
+    }
+    if (key === 'contact.marketingOptIn') {
+      const parsed = parseOptionalBool(value);
+      if (parsed !== null) contact.marketingOptIn = parsed;
+      continue;
+    }
+
+    let normalizedValue: unknown = undefined;
+    if (quoteRuntime && serviceType) {
+      const parsed = quoteRuntime.normalizeAndValidateField(key, value, {
+        serviceType,
+        ...answers,
+        contact: {
+          ...(answers.contact && typeof answers.contact === 'object' ? (answers.contact as Record<string, unknown>) : {}),
+          ...contact,
+        },
+      });
+      if (parsed.ok) {
+        normalizedValue = parsed.normalized_value;
+      }
+    }
+
+    if (normalizedValue === undefined) {
+      const boolParsed = parseOptionalBool(value);
+      if (boolParsed !== null) {
+        normalizedValue = boolParsed;
+      } else {
+        const intParsed = extractIntegerFromText(value);
+        normalizedValue = intParsed ?? value.trim();
+      }
+    }
+
+    answers[key] = normalizedValue;
+  }
+
+  return { serviceType, answers, contact };
+}
+
 function inferServiceTypeFromText(text: string): ServiceType | null {
   const s = normalizeKey(text);
   if (!s) return null;
@@ -614,9 +820,14 @@ function extractMessagesArray(payload: unknown): GhlConversationMessage[] {
 async function inferIntakeFromGhlConversation(contactId: string): Promise<{
   serviceType?: ServiceType | null;
   postalCode?: string | null;
+  zone?: WindowZone | null;
   consentToContact?: boolean | null;
   marketingOptIn?: boolean | null;
   email?: string | null;
+  fullName?: string | null;
+  phone?: string | null;
+  address?: string | null;
+  answers?: Record<string, unknown>;
 }> {
   const token = env('GHL_PRIVATE_INTEGRATION_TOKEN') ?? env('GHL_ACCESS_TOKEN');
   const locationId = env('GHL_LOCATION_ID');
@@ -668,13 +879,27 @@ async function inferIntakeFromGhlConversation(contactId: string): Promise<{
 
   const transcript = messages.map((m) => m.body).join('\n');
   const inbound = messages.filter((m) => m.direction === 'inbound').map((m) => m.body).join('\n');
+  const hintedServiceType = inferServiceTypeFromText(transcript);
+  const inferredFromInbound = await inferAnswersFromInboundTranscript(inbound, hintedServiceType);
 
-  const serviceType = inferServiceTypeFromText(transcript);
-  const postalCode = extractCanadianPostalCodeFromText(transcript);
-  const email = extractEmailFromText(transcript);
+  const serviceType = inferredFromInbound.serviceType ?? hintedServiceType;
+  const postalCode =
+    safeString(inferredFromInbound.answers.postalCode, '').trim() || extractCanadianPostalCodeFromText(transcript) || null;
+  const zone = coerceWindowZone(inferredFromInbound.answers.zone) ?? null;
+  const email = inferredFromInbound.contact.email ?? extractEmailFromText(transcript);
+  const phone = inferredFromInbound.contact.phone ?? extractPhoneFromText(inbound);
+  const fullName = safeString(inferredFromInbound.contact.fullName, '').trim() || null;
+  const address = safeString(inferredFromInbound.contact.address, '').trim() || null;
 
   let consentToContact: boolean | null = null;
   let marketingOptIn: boolean | null = null;
+  if (typeof inferredFromInbound.contact.consentToContact === 'boolean') {
+    consentToContact = inferredFromInbound.contact.consentToContact;
+  }
+  if (typeof inferredFromInbound.contact.marketingOptIn === 'boolean') {
+    marketingOptIn = inferredFromInbound.contact.marketingOptIn;
+  }
+
   for (let i = 0; i < messages.length - 1; i += 1) {
     const cur = messages[i];
     const next = messages[i + 1];
@@ -696,7 +921,81 @@ async function inferIntakeFromGhlConversation(contactId: string): Promise<{
     }
   }
 
-  return { serviceType, postalCode, consentToContact, marketingOptIn, email };
+  return {
+    serviceType,
+    postalCode,
+    zone,
+    consentToContact,
+    marketingOptIn,
+    email,
+    fullName,
+    phone,
+    address,
+    answers: inferredFromInbound.answers,
+  };
+}
+
+function isMissingScalar(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (typeof value === 'string') return !value.trim();
+  return false;
+}
+
+function shouldOverlayAnswerValue(current: unknown, inferred: unknown): boolean {
+  if (inferred === undefined || inferred === null || inferred === '') return false;
+  if (isMissingScalar(current)) return true;
+
+  if (typeof inferred === 'boolean' && typeof current === 'boolean') {
+    return current === false && inferred === true;
+  }
+
+  if (typeof inferred === 'number' && typeof current === 'number') {
+    return current <= 0 && inferred > 0;
+  }
+
+  return false;
+}
+
+async function inferContactFromGhlContactRecord(contactId: string): Promise<Partial<LeadContact>> {
+  const token = env('GHL_PRIVATE_INTEGRATION_TOKEN') ?? env('GHL_ACCESS_TOKEN');
+  if (!token || !contactId) return {};
+
+  const baseUrl = (env('GHL_BASE_URL') ?? ghlBaseUrlDefault).replace(/\/+$/, '');
+  const url = new URL(baseUrl + `/contacts/${encodeURIComponent(contactId)}`);
+
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+        Version: ghlApiVersionDefault,
+      },
+    });
+    if (!res.ok) return {};
+
+    const payload = await res.json().catch(() => null);
+    const root = asRecord(payload);
+    const contact = asRecord(root?.contact) ?? root;
+    if (!contact) return {};
+
+    const first = safeString(contact.firstName, '').trim();
+    const last = safeString(contact.lastName, '').trim();
+    const merged = [first, last].filter(Boolean).join(' ').trim();
+    const name = safeString(contact.name, merged).trim();
+    const phone = safeString(contact.phone, '').trim();
+    const email = safeString(contact.email, '').trim();
+    const address = safeString(contact.address1, safeString(contact.address, '')).trim();
+
+    return {
+      fullName: name || undefined,
+      phone: phone || undefined,
+      email: email || undefined,
+      address: address || undefined,
+    };
+  } catch {
+    return {};
+  }
 }
 
 function coerceServiceType(value: unknown): ServiceType | null {
@@ -1874,22 +2173,45 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       }
 
       const answersRec = asRecord(answers) ?? {};
-      const postalFromAnswers = safeString(answersRec.postalCode, '').trim();
-      if (!postalFromAnswers && inferred.postalCode) {
+      if (inferred.postalCode && shouldOverlayAnswerValue(answersRec.postalCode, inferred.postalCode)) {
         answersRec.postalCode = inferred.postalCode;
+      }
+      if (inferred.zone && shouldOverlayAnswerValue(answersRec.zone, inferred.zone)) {
+        answersRec.zone = inferred.zone;
+      }
+
+      const inferredAnswers = asRecord(inferred.answers) ?? {};
+      for (const [key, value] of Object.entries(inferredAnswers)) {
+        if (key === 'contact') continue;
+        if (shouldOverlayAnswerValue(answersRec[key], value)) {
+          answersRec[key] = value;
+        }
       }
 
       const contactRec = asRecord(answersRec.contact) ?? {};
-      if (!safeString(contactRec.email, '').trim() && inferred.email) {
+      if (inferred.email && shouldOverlayAnswerValue(contactRec.email, inferred.email)) {
         contactRec.email = inferred.email;
       }
-      // When the workflow doesn't pass custom fields, our extracted payload defaults these to false.
-      // If we can infer a real answer from the chat transcript, prefer the inferred value.
+      if (inferred.fullName && shouldOverlayAnswerValue(contactRec.fullName, inferred.fullName)) {
+        contactRec.fullName = inferred.fullName;
+      }
+      if (inferred.phone && shouldOverlayAnswerValue(contactRec.phone, inferred.phone)) {
+        contactRec.phone = inferred.phone;
+      }
+      if (inferred.address && shouldOverlayAnswerValue(contactRec.address, inferred.address)) {
+        contactRec.address = inferred.address;
+      }
+      // When the workflow doesn't pass custom fields, our extracted payload can default these to false.
+      // If we infer explicit consent from chat, prefer it.
       if (inferred.consentToContact !== undefined && inferred.consentToContact !== null) {
-        contactRec.consentToContact = inferred.consentToContact;
+        if (contactRec.consentToContact !== true || inferred.consentToContact === true) {
+          contactRec.consentToContact = inferred.consentToContact;
+        }
       }
       if (inferred.marketingOptIn !== undefined && inferred.marketingOptIn !== null) {
-        contactRec.marketingOptIn = inferred.marketingOptIn;
+        if (contactRec.marketingOptIn !== true || inferred.marketingOptIn === true) {
+          contactRec.marketingOptIn = inferred.marketingOptIn;
+        }
       }
       answersRec.contact = contactRec;
       answers = answersRec;
@@ -1911,6 +2233,27 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     // Prefer answers.contact, but accept flattened contact fields too.
     let contact = coerceContact(answersRec.contact) ?? coerceContact(answersRec);
     if (isGhlWebhook) {
+      if (ghlContactId) {
+        const fallbackContact = await inferContactFromGhlContactRecord(String(ghlContactId));
+        if (fallbackContact && Object.keys(fallbackContact).length > 0) {
+          const merged: LeadContact = {
+            ...(contact ?? {
+              fullName: '',
+              address: '',
+              phone: '',
+              email: '',
+              consentToContact: false,
+              marketingOptIn: false,
+            }),
+          };
+          if (!merged.fullName.trim() && fallbackContact.fullName) merged.fullName = fallbackContact.fullName;
+          if (!merged.phone.trim() && fallbackContact.phone) merged.phone = fallbackContact.phone;
+          if (!merged.email.trim() && fallbackContact.email) merged.email = fallbackContact.email;
+          if (!merged.address.trim() && fallbackContact.address) merged.address = fallbackContact.address;
+          contact = merged;
+        }
+      }
+
       const email = contact?.email?.trim() ?? '';
       const hasValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
       if (!hasValidEmail) {
