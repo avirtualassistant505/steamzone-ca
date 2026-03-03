@@ -26,6 +26,20 @@ Recreate Steam Zone estimate flows in GoHighLevel with full field parity, wire t
 - `c527481a-1bfc-494d-aef0-d9c6e633afb7` (`Steam Zone - Generate Estimate (Website)`) `published`
 - `99dcd666-9646-48a2-8d45-1222084a590e` (`... PRE-FIX BACKUP`) `draft`
 
+### Workflow Config Deep Check (Backend API)
+- Trigger `mWMmu20FoHbCYXTnjxNO` for workflow `946b55b5-5ac8-4736-9efe-294fafd32339` is `form_submission` and condition `form.id is-any-of` includes all four new form IDs:
+  - `NdaccmBU8EAZiNgvGLld`
+  - `ncAHWlSdycnTE4UqlTHo`
+  - `Vhw1yGTzvEJOqyjPzzNK`
+  - `ymWd01vSPDLK3Hx7LS8Y`
+- Webhook node in workflow `946b55b5-5ac8-4736-9efe-294fafd32339` points to `https://steamzoneca.vercel.app/api/estimate-create` and includes customData:
+  - `strict=true`
+  - `source=form`
+- Webhook node in workflow `c527481a-1bfc-494d-aef0-d9c6e633afb7` points to `https://steamzoneca.vercel.app/api/estimate-create` and includes customData:
+  - `strict=false`
+  - `source=chat`
+  - `contactId={{contact.id}}`
+
 ### Chat + Voice Agents
 - Conversation AI agent: `pzGuMYdZeEpJjKcZ8K1P` (`Steam Zone Website Chat`)
   - `FORM-FIRST ESTIMATE ROUTING` block present.
