@@ -314,6 +314,37 @@ function findServiceValueCandidate(input: unknown, depth = 0): string | null {
   return null;
 }
 
+function findEmailValueCandidate(input: unknown, depth = 0): string | null {
+  if (depth > 5 || input === null || input === undefined) return null;
+  if (typeof input === 'string') {
+    const s = unwrapQuotedString(input).trim();
+    if (!s) return null;
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s) ? s : null;
+  }
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      const hit = findEmailValueCandidate(item, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  const rec = asRecord(input);
+  if (!rec) return null;
+  for (const [key, value] of Object.entries(rec)) {
+    const keyNorm = normalizeKey(String(key));
+    // Prefer fields likely to contain contact email before generic deep scan.
+    if (keyNorm.includes('email')) {
+      const hit = findEmailValueCandidate(value, depth + 1);
+      if (hit) return hit;
+    }
+  }
+  for (const value of Object.values(rec)) {
+    const hit = findEmailValueCandidate(value, depth + 1);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 function maybeExtractGhlWebhookPayload(body: unknown): { serviceType?: unknown; answers?: unknown; ghl?: GhlWebhookContext } | null {
   const root = asRecord(body);
   if (!root) return null;
@@ -1609,7 +1640,27 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     }
 
     // Prefer answers.contact, but accept flattened contact fields too.
-    const contact = coerceContact(answersRec.contact) ?? coerceContact(answersRec);
+    let contact = coerceContact(answersRec.contact) ?? coerceContact(answersRec);
+    if (isGhlWebhook) {
+      const email = contact?.email?.trim() ?? '';
+      const hasValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+      if (!hasValidEmail) {
+        const discoveredEmail = findEmailValueCandidate(answers) ?? findEmailValueCandidate(body);
+        if (discoveredEmail) {
+          contact = {
+            ...(contact ?? {
+              fullName: '',
+              address: '',
+              phone: '',
+              email: '',
+              consentToContact: false,
+              marketingOptIn: false,
+            }),
+            email: discoveredEmail,
+          };
+        }
+      }
+    }
     if (!contact) {
       res.status(400).json({ message: 'Missing contact details.' });
       return;
