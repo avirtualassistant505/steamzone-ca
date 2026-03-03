@@ -397,28 +397,43 @@ function maybeExtractGhlWebhookPayload(body: unknown): { serviceType?: unknown; 
   if (!root) return null;
 
   const nested = asRecord(root.data) ?? asRecord(root.payload) ?? asRecord(root.eventData) ?? null;
+  const attributes = asRecord(root.attributes) ?? asRecord(nested?.attributes) ?? null;
   const formDataRecord =
     parseJsonRecord(root.formData) ??
     parseJsonRecord(root.form_data) ??
     parseJsonRecord(nested?.formData) ??
     parseJsonRecord(nested?.form_data) ??
+    parseJsonRecord(attributes?.formData) ??
+    parseJsonRecord(attributes?.form_data) ??
     null;
   const customDataBlock =
     asRecord(root.customData) ??
     asRecord(root.custom_data) ??
     asRecord(nested?.customData) ??
     asRecord(nested?.custom_data) ??
+    asRecord(attributes?.customData) ??
+    asRecord(attributes?.custom_data) ??
     null;
 
   const fieldsFromArrays = {
     ...coerceKeyValuePairs(root.fields),
     ...coerceKeyValuePairs(root.formData),
+    ...coerceKeyValuePairs(root.customData),
+    ...coerceKeyValuePairs(root.custom_data),
     ...coerceKeyValuePairs(root.customFields),
     ...coerceKeyValuePairs(root.custom_fields),
     ...coerceKeyValuePairs(nested?.fields),
     ...coerceKeyValuePairs(nested?.formData),
+    ...coerceKeyValuePairs(nested?.customData),
+    ...coerceKeyValuePairs(nested?.custom_data),
     ...coerceKeyValuePairs(nested?.customFields),
     ...coerceKeyValuePairs(nested?.custom_fields),
+    ...coerceKeyValuePairs(attributes?.fields),
+    ...coerceKeyValuePairs(attributes?.formData),
+    ...coerceKeyValuePairs(attributes?.customData),
+    ...coerceKeyValuePairs(attributes?.custom_data),
+    ...coerceKeyValuePairs(attributes?.customFields),
+    ...coerceKeyValuePairs(attributes?.custom_fields),
   };
 
   const customData: Record<string, unknown> = {
@@ -946,14 +961,97 @@ function shouldOverlayAnswerValue(current: unknown, inferred: unknown): boolean 
   if (isMissingScalar(current)) return true;
 
   if (typeof inferred === 'boolean' && typeof current === 'boolean') {
-    return current === false && inferred === true;
+    return current !== inferred;
   }
 
   if (typeof inferred === 'number' && typeof current === 'number') {
-    return current <= 0 && inferred > 0;
+    return current !== inferred;
+  }
+
+  if (typeof inferred === 'string' && typeof current === 'string') {
+    return normalizeKey(current) !== normalizeKey(inferred);
   }
 
   return false;
+}
+
+function looksLikeTemplateToken(value: string): boolean {
+  return value.includes('{{') || value.includes('}}');
+}
+
+function sanitizeContactIdCandidate(value: unknown): string | null {
+  const raw = safeString(value, '').trim();
+  if (!raw || looksLikeTemplateToken(raw)) return null;
+  return raw;
+}
+
+function normalizePhoneDigits(value: string): string {
+  return value.replace(/\D/g, '');
+}
+
+async function resolveGhlContactIdFromHints(hints: {
+  contactId?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  locationId?: string | null;
+}): Promise<string | null> {
+  const direct = sanitizeContactIdCandidate(hints.contactId);
+  if (direct) return direct;
+
+  const token = env('GHL_PRIVATE_INTEGRATION_TOKEN') ?? env('GHL_ACCESS_TOKEN');
+  const locationId = (hints.locationId ?? env('GHL_LOCATION_ID'))?.trim() || null;
+  if (!token || !locationId) return null;
+
+  const baseUrl = (env('GHL_BASE_URL') ?? ghlBaseUrlDefault).replace(/\/+$/, '');
+  const candidates = [
+    hints.phone ? normalizePhoneDigits(hints.phone) : '',
+    hints.email?.trim() ?? '',
+  ]
+    .filter(Boolean)
+    .filter((value, index, arr) => arr.indexOf(value) === index);
+
+  for (const query of candidates) {
+    try {
+      const res = await fetch(baseUrl + '/contacts/search', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+          Version: ghlApiVersionDefault,
+        },
+        body: JSON.stringify({ locationId, query, pageLimit: 20 }),
+      });
+      if (!res.ok) continue;
+      const payload = await res.json().catch(() => null);
+      const root = asRecord(payload);
+      const contacts = Array.isArray(root?.contacts) ? (root?.contacts as unknown[]) : [];
+      if (contacts.length === 0) continue;
+
+      const wantedPhone = hints.phone ? normalizePhoneDigits(hints.phone) : '';
+      const wantedEmail = (hints.email ?? '').trim().toLowerCase();
+      let fallbackId: string | null = null;
+
+      for (const item of contacts) {
+        const rec = asRecord(item);
+        if (!rec) continue;
+        const candidateId = sanitizeContactIdCandidate(rec.id);
+        if (!candidateId) continue;
+        if (!fallbackId) fallbackId = candidateId;
+
+        const candidatePhone = normalizePhoneDigits(safeString(rec.phone, ''));
+        const candidateEmail = safeString(rec.email, '').trim().toLowerCase();
+        if (wantedPhone && candidatePhone && candidatePhone === wantedPhone) return candidateId;
+        if (wantedEmail && candidateEmail && candidateEmail === wantedEmail) return candidateId;
+      }
+
+      if (fallbackId) return fallbackId;
+    } catch {
+      // noop
+    }
+  }
+
+  return null;
 }
 
 async function inferContactFromGhlContactRecord(contactId: string): Promise<Partial<LeadContact>> {
@@ -2147,7 +2245,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const extracted = maybeExtractGhlWebhookPayload(body);
     const isGhlWebhook = Boolean(extracted?.ghl?.isGhlWebhook);
     const estimateSource = coerceEstimateSource(bodyRec.source, isGhlWebhook ? 'api' : 'website');
-    const ghlContactId = extracted?.ghl?.contactId ?? null;
+    const ghlLocationId = env('GHL_LOCATION_ID');
+    let ghlContactId = sanitizeContactIdCandidate(extracted?.ghl?.contactId ?? null);
 
     let serviceType = coerceServiceType(extracted?.serviceType ?? body?.serviceType);
     // Allow both:
@@ -2166,13 +2265,23 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
     // If the call came from a GHL workflow, we may not receive structured answers/custom fields.
     // Try to infer missing pieces from the conversation transcript (contactId -> conversation -> messages).
-    if (isGhlWebhook && ghlContactId) {
-      const inferred = await inferIntakeFromGhlConversation(String(ghlContactId));
+    if (isGhlWebhook) {
+      const answersRec = asRecord(answers) ?? {};
+      const existingContact = coerceContact(answersRec.contact) ?? coerceContact(answersRec) ?? null;
+      if (!ghlContactId) {
+        ghlContactId = await resolveGhlContactIdFromHints({
+          contactId: extracted?.ghl?.contactId ?? null,
+          email: existingContact?.email ?? null,
+          phone: existingContact?.phone ?? null,
+          locationId: ghlLocationId,
+        });
+      }
+
+      const inferred = ghlContactId ? await inferIntakeFromGhlConversation(String(ghlContactId)) : {};
       if (!serviceType && inferred.serviceType) {
         serviceType = inferred.serviceType;
       }
 
-      const answersRec = asRecord(answers) ?? {};
       if (inferred.postalCode && shouldOverlayAnswerValue(answersRec.postalCode, inferred.postalCode)) {
         answersRec.postalCode = inferred.postalCode;
       }
