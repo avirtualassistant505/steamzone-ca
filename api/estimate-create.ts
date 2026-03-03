@@ -23,11 +23,23 @@ const ghlApiVersionDefault = '2021-07-28';
 const ghlConversationsApiVersion = '2021-04-15';
 type EstimateSource = 'form' | 'chat' | 'voice' | 'api' | 'website';
 
+function unwrapQuotedString(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return trimmed.slice(1, -1).trim();
+    }
+  }
+  return trimmed;
+}
+
 function asBool(value: unknown, fallback = false): boolean {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') return value !== 0;
   if (typeof value !== 'string') return fallback;
-  const s = value.trim().toLowerCase();
+  const s = unwrapQuotedString(value).toLowerCase();
   if (!s) return fallback;
   if (['1', 'true', 'yes', 'y', 'on', 'agree', 'agreed'].includes(s)) return true;
   if (['0', 'false', 'no', 'n', 'off', 'disagree', 'decline', 'declined'].includes(s)) return false;
@@ -97,7 +109,7 @@ async function getQuoteRuntime(): Promise<QuoteRuntimeModule> {
 }
 
 function safeString(value: unknown, fallback = ''): string {
-  return typeof value === 'string' ? value : fallback;
+  return typeof value === 'string' ? unwrapQuotedString(value) : fallback;
 }
 
 function env(name: string): string | null {
@@ -615,7 +627,7 @@ function coerceServiceType(value: unknown): ServiceType | null {
   }
 
   // Accept common label/synonym values so external systems (ex: GHL workflows) can submit without strict keys.
-  const raw = typeof value === 'string' ? value : '';
+  const raw = typeof value === 'string' ? unwrapQuotedString(value) : '';
   const normalized = raw.trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
   if (!normalized) return null;
 
