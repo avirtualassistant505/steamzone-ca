@@ -120,6 +120,7 @@ function confidenceClasses(confidence: EstimateResult['confidence']): string {
 }
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ghlEstimateFormEmbedUrl = String(import.meta.env.VITE_GHL_ESTIMATE_FORM_EMBED_URL ?? '').trim();
 
 function validatePostalCode(postalCode: string): string | undefined {
   const value = postalCode.trim();
@@ -269,6 +270,21 @@ export default function GetEstimatePage() {
   const [lastEmailResult, setLastEmailResult] = useState<{ success: boolean; message: string; deliveryMode?: EstimateDeliveryMode; idempotent?: boolean; resent?: boolean } | null>(null);
   const [statusMessage, setStatusMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const legacyWizardMode = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('mode') === 'legacy';
+  }, []);
+  const sanitizedGhlEmbedUrl = useMemo(() => {
+    if (!ghlEstimateFormEmbedUrl) return '';
+    try {
+      const parsed = new URL(ghlEstimateFormEmbedUrl);
+      if (!/^https?:$/.test(parsed.protocol)) return '';
+      return parsed.toString();
+    } catch {
+      return '';
+    }
+  }, []);
+  const showGhlEmbed = Boolean(sanitizedGhlEmbedUrl) && !legacyWizardMode;
 
   const labels = useMemo(() => stepLabels[serviceType], [serviceType]);
   const totalSteps = labels.length;
@@ -527,6 +543,37 @@ export default function GetEstimatePage() {
     }
 
     setIsSubmitting(false);
+  }
+
+  if (showGhlEmbed) {
+    return (
+      <main className="bg-gradient-to-br from-slate-50 via-blue-50 to-white pb-20 pt-28">
+        <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8">
+          <div className="mb-8 text-center">
+            <h1 className="text-4xl font-bold text-gray-900 md:text-5xl">Steinbach Instant Estimate</h1>
+            <p className="mx-auto mt-4 max-w-3xl text-lg text-gray-600">
+              Complete the secure estimate form below. Steam Zone will calculate your quote with the live pricing engine and send the estimate by email.
+            </p>
+            <p className="mt-3 text-sm text-gray-500">
+              If the embedded form fails to load, open{' '}
+              <a className="text-blue-700 underline" href="?mode=legacy">
+                the legacy estimate wizard
+              </a>
+              .
+            </p>
+          </div>
+          <div className="overflow-hidden rounded-2xl border border-blue-100 bg-white shadow-sm">
+            <iframe
+              title="Steam Zone Estimate Form"
+              src={sanitizedGhlEmbedUrl}
+              className="h-[1750px] w-full"
+              loading="lazy"
+              referrerPolicy="no-referrer-when-downgrade"
+            />
+          </div>
+        </div>
+      </main>
+    );
   }
 
   return (

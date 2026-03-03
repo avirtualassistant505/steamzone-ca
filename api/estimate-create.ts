@@ -225,54 +225,260 @@ function coerceContact(input: unknown): LeadContact | null {
 
 type GhlWebhookContext = { isGhlWebhook: true; contactId?: string | null; conversationId?: string | null };
 
+function coerceKeyValuePairs(input: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!Array.isArray(input)) return out;
+
+  for (const item of input) {
+    const rec = asRecord(item);
+    if (!rec) continue;
+
+    const key =
+      safeString(rec.key, '').trim() ||
+      safeString(rec.name, '').trim() ||
+      safeString(rec.field, '').trim() ||
+      safeString(rec.id, '').trim();
+    if (!key) continue;
+
+    const value =
+      rec.value ??
+      rec.fieldValue ??
+      rec.field_value ??
+      rec.answer ??
+      rec.selected ??
+      rec.text ??
+      rec.content ??
+      null;
+    if (value === null || value === undefined || value === '') continue;
+    out[key] = value;
+  }
+
+  return out;
+}
+
+function parseJsonRecord(input: unknown): Record<string, unknown> | null {
+  const rec = asRecord(input);
+  if (rec) return rec;
+  if (typeof input !== 'string') return null;
+  const s = input.trim();
+  if (!s) return null;
+  try {
+    return asRecord(JSON.parse(s));
+  } catch {
+    return null;
+  }
+}
+
+function maybeTermsAccepted(value: unknown): boolean | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value !== 'string') return null;
+  const s = value.trim();
+  if (!s) return null;
+  const normalized = s.toLowerCase();
+  if (['0', 'false', 'no', 'n', 'off', 'decline', 'declined', 'disagree'].includes(normalized)) return false;
+  return true;
+}
+
+function findServiceValueCandidate(input: unknown, depth = 0): string | null {
+  if (depth > 3 || input === null || input === undefined) return null;
+  if (typeof input === 'string') {
+    return coerceServiceType(input) ? input : null;
+  }
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      const hit = findServiceValueCandidate(item, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  const rec = asRecord(input);
+  if (!rec) return null;
+  for (const value of Object.values(rec)) {
+    const hit = findServiceValueCandidate(value, depth + 1);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 function maybeExtractGhlWebhookPayload(body: unknown): { serviceType?: unknown; answers?: unknown; ghl?: GhlWebhookContext } | null {
   const root = asRecord(body);
   if (!root) return null;
 
-  const customData = asRecord(root.customData) ?? asRecord(root.custom_data) ?? null;
-  const contactBlock = asRecord(root.contact) ?? null;
+  const nested = asRecord(root.data) ?? asRecord(root.payload) ?? asRecord(root.eventData) ?? null;
+  const formDataRecord =
+    parseJsonRecord(root.formData) ??
+    parseJsonRecord(root.form_data) ??
+    parseJsonRecord(nested?.formData) ??
+    parseJsonRecord(nested?.form_data) ??
+    null;
+  const customDataBlock =
+    asRecord(root.customData) ??
+    asRecord(root.custom_data) ??
+    asRecord(nested?.customData) ??
+    asRecord(nested?.custom_data) ??
+    null;
+
+  const fieldsFromArrays = {
+    ...coerceKeyValuePairs(root.fields),
+    ...coerceKeyValuePairs(root.formData),
+    ...coerceKeyValuePairs(root.customFields),
+    ...coerceKeyValuePairs(root.custom_fields),
+    ...coerceKeyValuePairs(nested?.fields),
+    ...coerceKeyValuePairs(nested?.formData),
+    ...coerceKeyValuePairs(nested?.customFields),
+    ...coerceKeyValuePairs(nested?.custom_fields),
+  };
+
+  const customData: Record<string, unknown> = {
+    ...(customDataBlock ?? {}),
+    ...(formDataRecord ?? {}),
+    ...fieldsFromArrays,
+  };
+
+  const contactBlock = asRecord(root.contact) ?? asRecord(nested?.contact) ?? null;
 
   // If this doesn't look like a GHL webhook payload, bail.
-  if (!customData && !contactBlock) return null;
+  if (!customDataBlock && !formDataRecord && Object.keys(fieldsFromArrays).length === 0 && !contactBlock) return null;
 
   const contactId =
     safeString(contactBlock?.id, '').trim() ||
     safeString(customData?.contactId, safeString(customData?.contact_id, '')).trim() ||
+    safeString(root.contactId, safeString(root.contact_id, '')).trim() ||
+    safeString(nested?.contactId, safeString(nested?.contact_id, '')).trim() ||
     null;
 
   const conversationId =
-    safeString(customData?.conversationId, safeString(customData?.conversation_id, '')).trim() || null;
+    safeString(customData?.conversationId, safeString(customData?.conversation_id, '')).trim() ||
+    safeString(root.conversationId, safeString(root.conversation_id, '')).trim() ||
+    safeString(nested?.conversationId, safeString(nested?.conversation_id, '')).trim() ||
+    null;
 
   const serviceType =
     root.serviceType ??
     root.service_type ??
+    nested?.serviceType ??
+    nested?.service_type ??
     customData?.serviceType ??
     customData?.service_type ??
     customData?.service ??
     customData?.serviceKey ??
     customData?.service_key ??
+    customData?.estimateServiceType ??
+    customData?.estimate_service_type ??
+    customData?.estimateServiceCategory ??
+    customData?.estimate_service_category ??
+    findServiceValueCandidate(formDataRecord) ??
+    findServiceValueCandidate(customData) ??
+    findServiceValueCandidate(nested) ??
+    findServiceValueCandidate(root) ??
     null;
 
   const postalCode =
     safeString(root.postalCode, safeString(root.postal_code, '')).trim() ||
+    safeString(nested?.postalCode, safeString(nested?.postal_code, '')).trim() ||
     safeString(contactBlock?.postalCode, safeString(contactBlock?.postal_code, '')).trim() ||
     safeString(customData?.postalCode, safeString(customData?.postal_code, '')).trim();
 
-  const contact = coerceContact(customData?.contact) ?? coerceContact(contactBlock) ?? coerceContact(customData) ?? null;
+  const fallbackContact = coerceContact({
+    fullName:
+      root.fullName ??
+      root.full_name ??
+      nested?.fullName ??
+      nested?.full_name ??
+      customData?.fullName ??
+      customData?.full_name ??
+      customData?.name,
+    phone: root.phone ?? nested?.phone ?? customData?.phone,
+    email: root.email ?? nested?.email ?? customData?.email,
+    address: root.address ?? nested?.address ?? customData?.address,
+    consentToContact:
+      root.consentToContact ??
+      root.consent_to_contact ??
+      nested?.consentToContact ??
+      nested?.consent_to_contact ??
+      customData?.consentToContact ??
+      customData?.consent_to_contact ??
+      maybeTermsAccepted(
+        root.termsAndConditions ??
+          root.terms_and_conditions ??
+          nested?.termsAndConditions ??
+          nested?.terms_and_conditions ??
+          customData?.termsAndConditions ??
+          customData?.terms_and_conditions
+      ),
+    marketingOptIn:
+      root.marketingOptIn ??
+      root.marketing_opt_in ??
+      nested?.marketingOptIn ??
+      nested?.marketing_opt_in ??
+      customData?.marketingOptIn ??
+      customData?.marketing_opt_in ??
+      maybeTermsAccepted(
+        root.marketingTermsAndConditions ??
+          root.marketing_terms_and_conditions ??
+          root.terms_and_conditions_2 ??
+          nested?.marketingTermsAndConditions ??
+          nested?.marketing_terms_and_conditions ??
+          nested?.terms_and_conditions_2 ??
+          customData?.marketingTermsAndConditions ??
+          customData?.marketing_terms_and_conditions ??
+          customData?.terms_and_conditions_2
+      ),
+  });
+
+  const contact =
+    coerceContact(customData?.contact) ??
+    coerceContact(contactBlock) ??
+    coerceContact(customData) ??
+    fallbackContact ??
+    null;
 
   // Flatten customData into answers (works with GHL webhook key/value custom payload).
   const answers: Record<string, unknown> = {
-    ...(customData ? customData : {}),
+    ...customData,
     postalCode,
     contact: {
       ...(contact ?? {}),
       // Allow consent + marketing to be supplied as separate custom keys (common in workflows).
       consentToContact: asBool(
-        customData?.consentToContact ?? customData?.consent_to_contact ?? (contact as LeadContact | null)?.consentToContact,
+        root.consentToContact ??
+          root.consent_to_contact ??
+          nested?.consentToContact ??
+          nested?.consent_to_contact ??
+          customData?.consentToContact ??
+          customData?.consent_to_contact ??
+          maybeTermsAccepted(
+            root.termsAndConditions ??
+              root.terms_and_conditions ??
+              nested?.termsAndConditions ??
+              nested?.terms_and_conditions ??
+              customData?.termsAndConditions ??
+              customData?.terms_and_conditions
+          ) ??
+          (contact as LeadContact | null)?.consentToContact,
         false
       ),
       marketingOptIn: asBool(
-        customData?.marketingOptIn ?? customData?.marketing_opt_in ?? (contact as LeadContact | null)?.marketingOptIn,
+        root.marketingOptIn ??
+          root.marketing_opt_in ??
+          nested?.marketingOptIn ??
+          nested?.marketing_opt_in ??
+          customData?.marketingOptIn ??
+          customData?.marketing_opt_in ??
+          maybeTermsAccepted(
+            root.marketingTermsAndConditions ??
+              root.marketing_terms_and_conditions ??
+              root.terms_and_conditions_2 ??
+              nested?.marketingTermsAndConditions ??
+              nested?.marketing_terms_and_conditions ??
+              nested?.terms_and_conditions_2 ??
+              customData?.marketingTermsAndConditions ??
+              customData?.marketing_terms_and_conditions ??
+              customData?.terms_and_conditions_2
+          ) ??
+          (contact as LeadContact | null)?.marketingOptIn,
         false
       ),
     },
@@ -1339,6 +1545,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     let answers: unknown = extracted?.answers ?? body?.answers;
     if (!answers && body && typeof body === 'object') {
       answers = body;
+    }
+    if (!serviceType) {
+      const guessedService = findServiceValueCandidate(answers);
+      if (guessedService) {
+        serviceType = coerceServiceType(guessedService);
+      }
     }
 
     // If the call came from a GHL workflow, we may not receive structured answers/custom fields.
