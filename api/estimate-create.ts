@@ -1725,8 +1725,19 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     }
 
     const engine = await getEngine();
-    // Respect explicit strict=false from workflow/webhook callers. Website form submits strict=true.
-    const strictMode = asBool((asRecord(body)?.strict ?? true) as unknown, true);
+    // Respect explicit strict=false from workflow/webhook callers.
+    // GHL often nests customData under extracted answers instead of top-level root keys.
+    const extractedAnswersRecForStrict = asRecord(extracted?.answers) ?? {};
+    const strictRaw =
+      bodyRec.strict ??
+      bodyRec.strict_mode ??
+      extractedAnswersRecForStrict.strict ??
+      extractedAnswersRecForStrict.strictMode ??
+      extractedAnswersRecForStrict.strict_mode ??
+      asRecord(bodyRec.customData)?.strict ??
+      asRecord(bodyRec.custom_data)?.strict ??
+      true;
+    const strictMode = asBool(strictRaw, true);
     const detectedZone = engine.detectZoneFromPostalCode(postalCode);
     const zone = detectedZone;
 
