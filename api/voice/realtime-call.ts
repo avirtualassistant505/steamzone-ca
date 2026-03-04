@@ -10,15 +10,15 @@ type ApiResponse = {
   send?: (body: unknown) => void;
 };
 
-type TransportMode = 'form' | 'json';
 type RealtimeAttempt = {
   id: string;
-  transport: TransportMode;
   sdp: string;
   model: string;
   voice: string;
-  includeTranscription: boolean;
   language: 'en' | 'es';
+  includeQueryModel: boolean;
+  useLegacySessionShape: boolean;
+  includeTranscription: boolean;
 };
 
 const BASE_TOOLS = [
@@ -157,107 +157,93 @@ function normalizeRealtimeModels(raw: string): string[] {
   return ['gpt-realtime', 'gpt-4o-realtime-preview'];
 }
 
-function buildSessionConfig(
-  model: string,
-  voice: string,
-  includeTranscription: boolean,
-  language: 'en' | 'es'
-): Record<string, unknown> {
-  const sessionConfig: Record<string, unknown> = {
-    model,
-    instructions: buildRealtimeInstructions(language),
+function buildSessionConfig(attempt: RealtimeAttempt): Record<string, unknown> {
+  if (attempt.useLegacySessionShape) {
+    const sessionConfig: Record<string, unknown> = {
+      type: 'realtime',
+      model: attempt.model,
+      instructions: buildRealtimeInstructions(attempt.language),
+      modalities: ['text', 'audio'],
+      tools: BASE_TOOLS,
+      tool_choice: 'auto',
+      turn_detection: { type: 'server_vad' },
+      voice: attempt.voice,
+    };
+    if (attempt.includeTranscription) {
+      sessionConfig.input_audio_transcription = { model: 'whisper-1' };
+    }
+    return sessionConfig;
+  }
+
+  const audioInput: Record<string, unknown> = {
+    turn_detection: { type: 'server_vad' },
+  };
+  if (attempt.includeTranscription) {
+    // Preferred transcription shape for recent realtime sessions.
+    audioInput.transcription = { model: 'gpt-4o-mini-transcribe' };
+  }
+
+  return {
+    type: 'realtime',
+    model: attempt.model,
+    instructions: buildRealtimeInstructions(attempt.language),
     modalities: ['text', 'audio'],
     tools: BASE_TOOLS,
     tool_choice: 'auto',
-    input_audio_format: 'pcm16',
-    output_audio_format: 'pcm16',
-    turn_detection: { type: 'server_vad' },
-    voice,
+    audio: {
+      input: audioInput,
+      output: { voice: attempt.voice },
+    },
   };
-
-  if (includeTranscription) {
-    sessionConfig.input_audio_transcription = { model: 'whisper-1' };
-  }
-
-  return sessionConfig;
 }
 
 function buildRequestBody(attempt: RealtimeAttempt): BodyInit {
-  const config = buildSessionConfig(attempt.model, attempt.voice, attempt.includeTranscription, attempt.language);
-  const payload = {
-    sdp: attempt.sdp,
-    ...config,
-  };
-
-  if (attempt.transport === 'json') {
-    return JSON.stringify(payload);
-  }
-
   const form = new FormData();
-  for (const [name, value] of Object.entries(payload)) {
-    if (value === undefined) continue;
-    if (typeof value === 'string') {
-      form.set(name, value);
-      continue;
-    }
-    form.set(name, JSON.stringify(value));
-  }
-
+  form.set('sdp', attempt.sdp);
+  form.set('session', JSON.stringify(buildSessionConfig(attempt)));
   return form;
 }
 
 function buildAttempts(sdp: string, voice: string, rawModels: string[], language: 'en' | 'es'): RealtimeAttempt[] {
-  const transcriptionModes = [true, false];
+  const transcriptionModes = [false, true];
   const attempts: RealtimeAttempt[] = [];
 
   for (const model of rawModels) {
     for (const includeTranscription of transcriptionModes) {
       attempts.push({
-        id: `${model}-${includeTranscription ? 'withTranscription' : 'noTranscription'}-json`,
-        transport: 'json',
+        id: `${model}-${includeTranscription ? 'withTranscription' : 'noTranscription'}-modern-query`,
         sdp,
         model,
         voice,
         includeTranscription,
         language,
+        includeQueryModel: true,
+        useLegacySessionShape: false,
+      });
+      attempts.push({
+        id: `${model}-${includeTranscription ? 'withTranscription' : 'noTranscription'}-legacy-query`,
+        sdp,
+        model,
+        voice,
+        includeTranscription,
+        language,
+        includeQueryModel: true,
+        useLegacySessionShape: true,
+      });
+      attempts.push({
+        id: `${model}-${includeTranscription ? 'withTranscription' : 'noTranscription'}-modern-noquery`,
+        sdp,
+        model,
+        voice,
+        includeTranscription,
+        language,
+        includeQueryModel: false,
+        useLegacySessionShape: false,
       });
     }
   }
 
-  // Form-based fallback for compatibility; send top-level keys.
-  for (const model of rawModels) {
-    attempts.push({
-      id: `${model}-withTranscription-form`,
-      transport: 'form',
-      sdp,
-      model,
-      voice,
-      includeTranscription: true,
-      language,
-    });
-    attempts.push({
-      id: `${model}-noTranscription-form`,
-      transport: 'form',
-      sdp,
-      model,
-      voice,
-      includeTranscription: false,
-      language,
-    });
-  }
-
   return attempts;
-}
-
-function headersForTransport(transport: TransportMode): Record<string, string> {
-  const headers: Record<string, string> = {
-    Authorization: '',
-    'OpenAI-Beta': 'realtime=v1',
-  };
-  if (transport === 'json') {
-    headers['Content-Type'] = 'application/json';
-  }
-  return headers;
 }
 
 const DEFAULT_VOICE_FALLBACK = 'alloy';
@@ -299,11 +285,14 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
 
   try {
     for (const attempt of attempts) {
-      const response = await fetch('https://api.openai.com/v1/realtime/calls', {
+      const endpoint = attempt.includeQueryModel
+        ? `https://api.openai.com/v1/realtime/calls?model=${encodeURIComponent(attempt.model)}`
+        : 'https://api.openai.com/v1/realtime/calls';
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
-          ...headersForTransport(attempt.transport),
           Authorization: `Bearer ${apiKey}`,
+          'OpenAI-Beta': 'realtime=v1',
         },
         body: buildRequestBody(attempt),
       });
