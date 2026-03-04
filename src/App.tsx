@@ -12,6 +12,7 @@ import GetEstimatePage from './pages/GetEstimatePage';
 import AdminPricingPage from './pages/AdminPricingPage';
 import EstimateBotLabPage from './pages/EstimateBotLabPage';
 import EstimateVoiceLabPage from './pages/EstimateVoiceLabPage';
+import CallUsPage from './pages/CallUsPage';
 import {
   createDefaultPricingConfig,
   type PricingConfig,
@@ -19,7 +20,7 @@ import {
 import { parseJsonResponse } from './lib/responseParsing';
 import { langText, useSiteLanguage } from './i18n/siteLanguage';
 
-type AppRoute = '/' | '/estimate' | '/estimate-bot-lab' | '/estimate-voice-lab' | '/admin' | 'notFound';
+type AppRoute = '/' | '/estimate' | '/call-us' | '/estimate-bot-lab' | '/estimate-voice-lab' | '/admin' | 'notFound';
 
 interface PricingGetResponse {
   config?: PricingConfig;
@@ -35,6 +36,10 @@ function normalizeRoute(pathname: string): AppRoute {
 
   if (trimmed === '/estimate') {
     return '/estimate';
+  }
+
+  if (trimmed === '/call-us') {
+    return '/call-us';
   }
 
   if (trimmed === '/estimate-bot-lab') {
@@ -148,6 +153,8 @@ function App() {
     );
   } else if (route === '/estimate') {
     content = <GetEstimatePage />;
+  } else if (route === '/call-us') {
+    content = <CallUsPage />;
   } else if (route === '/estimate-bot-lab') {
     content = <EstimateBotLabPage />;
   } else if (route === '/estimate-voice-lab') {
@@ -166,7 +173,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-white">
-      <GhlWidgetLoader enabled={route !== '/estimate-bot-lab' && route !== '/estimate-voice-lab'} />
+      <GhlWidgetLoader enabled={route !== '/estimate-bot-lab' && route !== '/estimate-voice-lab' && route !== '/call-us'} />
       <nav className="bg-white shadow-md fixed w-full z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-24">
@@ -198,10 +205,10 @@ function App() {
                   ES
                 </button>
               </div>
-              <a href="tel:12365066570" className="flex items-center text-blue-600 font-semibold">
+              <button type="button" onClick={() => navigate('/call-us')} className="flex items-center text-blue-600 font-semibold">
                 <Phone className="h-4 w-4 mr-2" />
-                (236) 506-6570
-              </a>
+                {langText(language, { en: 'Call Us', es: 'Llámanos' })}
+              </button>
             </div>
           </div>
         </div>
@@ -212,6 +219,9 @@ function App() {
           <a href="/" className="rounded-md px-3 py-2 font-semibold text-gray-700">{langText(language, { en: 'Home', es: 'Inicio' })}</a>
           <button type="button" onClick={() => navigate('/estimate')} className="rounded-md px-3 py-2 font-semibold text-blue-700">
             {langText(language, { en: 'Estimate', es: 'Cotizar' })}
+          </button>
+          <button type="button" onClick={() => navigate('/call-us')} className="rounded-md px-3 py-2 font-semibold text-gray-700">
+            {langText(language, { en: 'Call Us', es: 'Llámanos' })}
           </button>
           <a href="/#contact" className="rounded-md px-3 py-2 font-semibold text-gray-700">{langText(language, { en: 'Contact', es: 'Contacto' })}</a>
           <button

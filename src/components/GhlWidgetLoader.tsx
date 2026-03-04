@@ -4,6 +4,7 @@ const GHL_SCRIPT_ID = 'ghl-chat-widget-loader';
 const GHL_SCRIPT_SRC = 'https://widgets.leadconnectorhq.com/loader.js';
 const GHL_RESOURCES_URL = 'https://widgets.leadconnectorhq.com/chat-widget/loader.js';
 const GHL_WIDGET_ID = '698926cae64c73005344d35c';
+const GHL_CHAT_INSTANCE_ID = 'steamzone-floating-chat';
 
 function removeGhlArtifacts(): void {
   const script = document.getElementById(GHL_SCRIPT_ID);
@@ -12,11 +13,9 @@ function removeGhlArtifacts(): void {
   }
 
   const selectors = [
-    'iframe[src*="leadconnectorhq.com"]',
-    'script[src*="leadconnectorhq.com/chat-widget"]',
-    '[id*="chat-widget"]',
-    '[class*="chat-widget"]',
-    '[data-widget-id="698926cae64c73005344d35c"]',
+    `script[data-loader-instance="${GHL_CHAT_INSTANCE_ID}"]`,
+    `chat-widget[data-loader-instance-id="${GHL_CHAT_INSTANCE_ID}"]`,
+    `[data-loader-instance-id="${GHL_CHAT_INSTANCE_ID}"]`,
   ];
 
   for (const selector of selectors) {
@@ -40,6 +39,7 @@ function ensureGhlScript(): void {
   script.async = true;
   script.setAttribute('data-resources-url', GHL_RESOURCES_URL);
   script.setAttribute('data-widget-id', GHL_WIDGET_ID);
+  script.setAttribute('data-loader-instance', GHL_CHAT_INSTANCE_ID);
   document.body.appendChild(script);
 }
 
