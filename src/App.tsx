@@ -12,6 +12,7 @@ import GetEstimatePage from './pages/GetEstimatePage';
 import AdminPricingPage from './pages/AdminPricingPage';
 import EstimateBotLabPage from './pages/EstimateBotLabPage';
 import EstimateVoiceLabPage from './pages/EstimateVoiceLabPage';
+import CallUsPage from './pages/CallUsPage';
 import {
   createDefaultPricingConfig,
   type PricingConfig,
@@ -153,7 +154,7 @@ function App() {
   } else if (route === '/estimate') {
     content = <GetEstimatePage />;
   } else if (route === '/call-us') {
-    content = <EstimateVoiceLabPage mode="callUs" />;
+    content = <CallUsPage />;
   } else if (route === '/estimate-bot-lab') {
     content = <EstimateBotLabPage />;
   } else if (route === '/estimate-voice-lab') {

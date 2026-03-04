@@ -12,13 +12,20 @@ function removeGhlArtifacts(): void {
     script.remove();
   }
 
-  const selectors = [
+  const scriptSelectors = [
     `script[data-loader-instance="${GHL_CHAT_INSTANCE_ID}"]`,
+    `script[src="${GHL_SCRIPT_SRC}"][data-widget-id="${GHL_WIDGET_ID}"]`,
+  ];
+  for (const selector of scriptSelectors) {
+    document.querySelectorAll(selector).forEach((node) => node.remove());
+  }
+
+  const widgetSelectors = [
     `chat-widget[data-loader-instance-id="${GHL_CHAT_INSTANCE_ID}"]`,
+    `chat-widget[widget-id="${GHL_WIDGET_ID}"]`,
     `[data-loader-instance-id="${GHL_CHAT_INSTANCE_ID}"]`,
   ];
-
-  for (const selector of selectors) {
+  for (const selector of widgetSelectors) {
     document.querySelectorAll(selector).forEach((node) => {
       const element = node as HTMLElement;
       if (element.id === 'root') return;
