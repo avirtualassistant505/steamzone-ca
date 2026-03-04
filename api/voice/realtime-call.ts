@@ -300,7 +300,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       const raw = await response.text();
       if (!response.ok) {
         const message = parseError(raw);
-        lastError = message || 'OpenAI realtime call failed.';
+        lastError = `${message || 'OpenAI realtime call failed.'} [attempt ${attempt.id}]`;
 
         const unknown = extractUnknownParameter(message);
         if (unknown) {
