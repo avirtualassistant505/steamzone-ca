@@ -275,7 +275,12 @@ function extractFunctionCall(event: Record<string, unknown>): { callId: string; 
   return null;
 }
 
-export default function EstimateVoiceLabPage() {
+interface EstimateVoiceLabPageProps {
+  mode?: 'lab' | 'callUs';
+}
+
+export default function EstimateVoiceLabPage({ mode = 'lab' }: EstimateVoiceLabPageProps) {
+  const isCallUsMode = mode === 'callUs';
   const { language } = useSiteLanguage();
   const [status, setStatus] = useState<RealtimeStatus>('idle');
   const [errorMessage, setErrorMessage] = useState('');
@@ -769,17 +774,26 @@ export default function EstimateVoiceLabPage() {
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-wide text-cyan-700">
-              {langText(language, { en: 'Sandbox Route', es: 'Ruta Sandbox' })}
-            </p>
+            {!isCallUsMode && (
+              <p className="text-sm font-semibold uppercase tracking-wide text-cyan-700">
+                {langText(language, { en: 'Sandbox Route', es: 'Ruta Sandbox' })}
+              </p>
+            )}
             <h1 className="text-3xl font-bold text-gray-900">
-              {langText(language, { en: 'Realtime Voice Agent Lab', es: 'Laboratorio de Agente de Voz en Tiempo Real' })}
+              {isCallUsMode
+                ? langText(language, { en: 'Call Us', es: 'Llámanos' })
+                : langText(language, { en: 'Realtime Voice Agent Lab', es: 'Laboratorio de Agente de Voz en Tiempo Real' })}
             </h1>
             <p className="mt-1 text-sm text-gray-600">
-              {langText(language, {
-                en: 'Dedicated OpenAI realtime voice agent, isolated from text chat session state.',
-                es: 'Agente de voz en tiempo real de OpenAI, aislado del estado de la sesión de chat de texto.',
-              })}
+              {isCallUsMode
+                ? langText(language, {
+                    en: 'Start a live voice call with our AI assistant for instant estimates and service questions.',
+                    es: 'Inicia una llamada de voz en vivo con nuestro asistente de IA para cotizaciones instantáneas y preguntas de servicio.',
+                  })
+                : langText(language, {
+                    en: 'Dedicated OpenAI realtime voice agent, isolated from text chat session state.',
+                    es: 'Agente de voz en tiempo real de OpenAI, aislado del estado de la sesión de chat de texto.',
+                  })}
             </p>
           </div>
 
@@ -794,12 +808,14 @@ export default function EstimateVoiceLabPage() {
               <RotateCcw className="mr-2 h-4 w-4" />
               {langText(language, { en: 'Start Over', es: 'Empezar de Nuevo' })}
             </button>
-            <a
-              href="/estimate-bot-lab"
-              className="inline-flex items-center rounded-lg border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 hover:bg-cyan-100"
-            >
-              {langText(language, { en: 'Back To Text Lab', es: 'Volver al Laboratorio de Texto' })}
-            </a>
+            {!isCallUsMode && (
+              <a
+                href="/estimate-bot-lab"
+                className="inline-flex items-center rounded-lg border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 hover:bg-cyan-100"
+              >
+                {langText(language, { en: 'Back To Text Lab', es: 'Volver al Laboratorio de Texto' })}
+              </a>
+            )}
           </div>
         </header>
 
@@ -808,10 +824,15 @@ export default function EstimateVoiceLabPage() {
             <div className="h-[56vh] overflow-y-auto rounded-xl border border-gray-100 bg-slate-50 p-3">
               {transcript.length === 0 && (
                 <p className="text-sm text-gray-500">
-                  {langText(language, {
-                    en: 'Voice mode is active-only. Call transcript bubbles are hidden to keep it separate from text chat.',
-                    es: 'El modo voz está activo únicamente. Las burbujas de transcripción de llamada están ocultas para mantenerlo separado del chat de texto.',
-                  })}
+                  {isCallUsMode
+                    ? langText(language, {
+                        en: 'Tap Start Voice Call to begin speaking with the assistant.',
+                        es: 'Pulsa Iniciar llamada de voz para empezar a hablar con el asistente.',
+                      })
+                    : langText(language, {
+                        en: 'Voice mode is active-only. Call transcript bubbles are hidden to keep it separate from text chat.',
+                        es: 'El modo voz está activo únicamente. Las burbujas de transcripción de llamada están ocultas para mantenerlo separado del chat de texto.',
+                      })}
                 </p>
               )}
 
@@ -884,7 +905,9 @@ export default function EstimateVoiceLabPage() {
                   <Phone className="mr-2 h-4 w-4" />
                   {status === 'connecting'
                     ? langText(language, { en: 'Connecting...', es: 'Conectando...' })
-                    : langText(language, { en: 'Start Realtime Voice Call', es: 'Iniciar Llamada de Voz en Tiempo Real' })}
+                    : isCallUsMode
+                      ? langText(language, { en: 'Start Voice Call', es: 'Iniciar llamada de voz' })
+                      : langText(language, { en: 'Start Realtime Voice Call', es: 'Iniciar Llamada de Voz en Tiempo Real' })}
                 </button>
 
                 <button
@@ -894,7 +917,9 @@ export default function EstimateVoiceLabPage() {
                   className="inline-flex w-full items-center justify-center rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-60"
                 >
                   <PhoneOff className="mr-2 h-4 w-4" />
-                  {langText(language, { en: 'Stop Voice Call', es: 'Detener Llamada de Voz' })}
+                  {isCallUsMode
+                    ? langText(language, { en: 'End Voice Call', es: 'Finalizar llamada de voz' })
+                    : langText(language, { en: 'Stop Voice Call', es: 'Detener Llamada de Voz' })}
                 </button>
               </div>
             </div>
