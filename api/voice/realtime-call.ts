@@ -13,12 +13,9 @@ type ApiResponse = {
 type RealtimeAttempt = {
   id: string;
   sdp: string;
-  model: string;
-  voice: string;
-  language: 'en' | 'es';
+  session: Record<string, unknown>;
+  modelForQuery: string;
   includeQueryModel: boolean;
-  useLegacySessionShape: boolean;
-  includeTranscription: boolean;
 };
 
 const BASE_TOOLS = [
@@ -157,88 +154,75 @@ function normalizeRealtimeModels(raw: string): string[] {
   return ['gpt-realtime', 'gpt-4o-realtime-preview'];
 }
 
-function buildSessionConfig(attempt: RealtimeAttempt): Record<string, unknown> {
-  if (attempt.useLegacySessionShape) {
-    const sessionConfig: Record<string, unknown> = {
-      type: 'realtime',
-      model: attempt.model,
-      instructions: buildRealtimeInstructions(attempt.language),
-      modalities: ['text', 'audio'],
-      tools: BASE_TOOLS,
-      tool_choice: 'auto',
-      turn_detection: { type: 'server_vad' },
-      voice: attempt.voice,
-    };
-    if (attempt.includeTranscription) {
-      sessionConfig.input_audio_transcription = { model: 'whisper-1' };
-    }
-    return sessionConfig;
-  }
-
-  const audioInput: Record<string, unknown> = {
-    turn_detection: { type: 'server_vad' },
-  };
-  if (attempt.includeTranscription) {
-    // Preferred transcription shape for recent realtime sessions.
-    audioInput.transcription = { model: 'gpt-4o-mini-transcribe' };
-  }
-
-  return {
-    type: 'realtime',
-    model: attempt.model,
-    instructions: buildRealtimeInstructions(attempt.language),
-    modalities: ['text', 'audio'],
-    tools: BASE_TOOLS,
-    tool_choice: 'auto',
-    audio: {
-      input: audioInput,
-      output: { voice: attempt.voice },
-    },
-  };
-}
-
 function buildRequestBody(attempt: RealtimeAttempt): BodyInit {
   const form = new FormData();
   form.set('sdp', attempt.sdp);
-  form.set('session', JSON.stringify(buildSessionConfig(attempt)));
+  form.set('session', JSON.stringify(attempt.session));
   return form;
 }
 
 function buildAttempts(sdp: string, voice: string, rawModels: string[], language: 'en' | 'es'): RealtimeAttempt[] {
-  const transcriptionModes = [false, true];
   const attempts: RealtimeAttempt[] = [];
 
   for (const model of rawModels) {
-    for (const includeTranscription of transcriptionModes) {
+    const baseSession = {
+      type: 'realtime',
+      model,
+      instructions: buildRealtimeInstructions(language),
+      modalities: ['text', 'audio'],
+      tools: BASE_TOOLS,
+      tool_choice: 'auto',
+      voice,
+    } as const;
+
+    const sessionFull = {
+      ...baseSession,
+      turn_detection: { type: 'server_vad' },
+      input_audio_transcription: { model: 'whisper-1' },
+    };
+
+    const sessionNoTranscription = {
+      ...baseSession,
+      turn_detection: { type: 'server_vad' },
+    };
+
+    const sessionNoVad = {
+      ...baseSession,
+    };
+
+    const sessionMinimal = {
+      type: 'realtime',
+      model,
+      voice,
+    };
+
+    const sessionBare = {
+      type: 'realtime',
+      model,
+    };
+
+    const variants: Array<{ id: string; session: Record<string, unknown> }> = [
+      { id: `${model}-legacy-full`, session: sessionFull },
+      { id: `${model}-legacy-no-transcription`, session: sessionNoTranscription },
+      { id: `${model}-legacy-no-vad`, session: sessionNoVad },
+      { id: `${model}-minimal-voice`, session: sessionMinimal },
+      { id: `${model}-minimal-bare`, session: sessionBare },
+    ];
+
+    for (const variant of variants) {
       attempts.push({
-        id: `${model}-${includeTranscription ? 'withTranscription' : 'noTranscription'}-modern-query`,
+        id: `${variant.id}-query`,
         sdp,
-        model,
-        voice,
-        includeTranscription,
-        language,
+        session: variant.session,
+        modelForQuery: model,
         includeQueryModel: true,
-        useLegacySessionShape: false,
       });
       attempts.push({
-        id: `${model}-${includeTranscription ? 'withTranscription' : 'noTranscription'}-legacy-query`,
+        id: `${variant.id}-noquery`,
         sdp,
-        model,
-        voice,
-        includeTranscription,
-        language,
-        includeQueryModel: true,
-        useLegacySessionShape: true,
-      });
-      attempts.push({
-        id: `${model}-${includeTranscription ? 'withTranscription' : 'noTranscription'}-modern-noquery`,
-        sdp,
-        model,
-        voice,
-        includeTranscription,
-        language,
+        session: variant.session,
+        modelForQuery: model,
         includeQueryModel: false,
-        useLegacySessionShape: false,
       });
     }
   }
@@ -286,7 +270,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   try {
     for (const attempt of attempts) {
       const endpoint = attempt.includeQueryModel
-        ? `https://api.openai.com/v1/realtime/calls?model=${encodeURIComponent(attempt.model)}`
+        ? `https://api.openai.com/v1/realtime/calls?model=${encodeURIComponent(attempt.modelForQuery)}`
         : 'https://api.openai.com/v1/realtime/calls';
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -322,7 +306,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       if (typeof res.setHeader === 'function') {
         res.setHeader('Content-Type', 'application/sdp');
         res.setHeader('Cache-Control', 'no-store');
-        res.setHeader('X-Realtime-Model', attempt.model);
+        res.setHeader('X-Realtime-Model', attempt.modelForQuery);
       }
 
       if (typeof res.send === 'function') {
