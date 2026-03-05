@@ -149,6 +149,60 @@ type SupabaseDiagnosticPayload = {
   };
 };
 
+type GhlHealthPayload = {
+  ok: boolean;
+  mode: 'none' | 'webhook' | 'api';
+  hasToken: boolean;
+  hasLocationId: boolean;
+  expectedLocationName: string | null;
+  actualLocationName: string | null;
+  expectedNameMatches: boolean | null;
+  locationId: string | null;
+  baseUrl: string;
+  version: string;
+  locationWebsite: string | null;
+  businessWebsite: string | null;
+  ghl: {
+    status?: number;
+    ok: boolean;
+    error?: string;
+  };
+  training: {
+    source: 'db' | 'fallback';
+    itemCount: number;
+    updatedAt?: string;
+    cacheLoadedAt: string | null;
+    fallbackFilePath?: string;
+  };
+  storage: {
+    sessions: 'database' | 'memory_fallback';
+    conversations: 'database' | 'memory_fallback';
+    recentConversationCount: number;
+  };
+  forms?: {
+    total: number;
+    genericNameCount: number;
+    legacyForm: {
+      id: string;
+      present: boolean;
+      name?: string;
+      recentSubmissionCount: number;
+    };
+    serviceFormIdsPresent: string[];
+    forms: Array<{ id: string; name: string }>;
+  };
+  chatAgent?: {
+    id: string;
+    knowledgeBaseIds: string[];
+    knowledgeBaseCount: number;
+    actionTypes: string[];
+  };
+  customFields?: {
+    total: number;
+    unexpectedFields: string[];
+  };
+};
+
 function parsePayloadError<T>(result: SafeJsonResult<T>): string {
   return result.textError ?? `Unable to parse response (HTTP ${result.status}).`;
 }
@@ -698,6 +752,9 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [supabaseDiagLoading, setSupabaseDiagLoading] = useState(false);
   const [supabaseDiagError, setSupabaseDiagError] = useState('');
   const [supabaseDiagResult, setSupabaseDiagResult] = useState<SupabaseDiagnosticPayload | null>(null);
+  const [ghlHealthLoading, setGhlHealthLoading] = useState(false);
+  const [ghlHealthError, setGhlHealthError] = useState('');
+  const [ghlHealthResult, setGhlHealthResult] = useState<GhlHealthPayload | null>(null);
   const [newQuestion, setNewQuestion] = useState('');
   const [newAnswer, setNewAnswer] = useState('');
   const [newTopic, setNewTopic] = useState('');
@@ -1069,6 +1126,24 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
       setSupabaseDiagError('Unable to run Supabase diagnostics. Ensure /api/supabase-diagnostics is deployed.');
     } finally {
       setSupabaseDiagLoading(false);
+    }
+  }
+
+  async function runGhlHealthCheck(): Promise<void> {
+    setGhlHealthLoading(true);
+    setGhlHealthError('');
+    try {
+      const response = await parseJsonResponse<GhlHealthPayload>(await fetch('/api/ghl-health'));
+      const payload = response.payload;
+      if (!response.ok || !payload) {
+        setGhlHealthError(parsePayloadError(response));
+        return;
+      }
+      setGhlHealthResult(payload);
+    } catch {
+      setGhlHealthError('Unable to run GHL health check. Ensure /api/ghl-health is deployed.');
+    } finally {
+      setGhlHealthLoading(false);
     }
   }
 
@@ -3525,8 +3600,87 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                   >
                     {supabaseDiagLoading ? 'Checking...' : 'Run Supabase Diagnostics'}
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => void runGhlHealthCheck()}
+                    disabled={ghlHealthLoading}
+                    className="inline-flex items-center rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {ghlHealthLoading ? 'Checking...' : 'Run GHL Health Check'}
+                  </button>
                 </div>
               </div>
+
+              {ghlHealthError && (
+                <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+                  {ghlHealthError}
+                </p>
+              )}
+              {ghlHealthResult && (
+                <div
+                  className={`mb-4 rounded-lg border px-4 py-3 text-sm ${
+                    ghlHealthResult.ghl.ok
+                      ? 'border-green-200 bg-green-50 text-green-800'
+                      : 'border-amber-200 bg-amber-50 text-amber-800'
+                  }`}
+                >
+                  <p className="font-semibold">{ghlHealthResult.ghl.ok ? 'GHL Health Passed' : 'GHL Health Warning'}</p>
+                  <p>
+                    <span className="font-semibold">Mode:</span> {ghlHealthResult.mode}
+                    {' · '}
+                    <span className="font-semibold">Location:</span> {ghlHealthResult.actualLocationName || 'Unknown'}
+                    {' · '}
+                    <span className="font-semibold">Website:</span> {ghlHealthResult.locationWebsite || 'Unknown'}
+                    {' · '}
+                    <span className="font-semibold">Training source:</span> {ghlHealthResult.training.source}
+                  </p>
+                  <p className="mt-1">
+                    <span className="font-semibold">Business website:</span> {ghlHealthResult.businessWebsite || 'Unknown'}
+                  </p>
+                  <p className="mt-1">
+                    <span className="font-semibold">Session storage:</span> {ghlHealthResult.storage.sessions}
+                    {' · '}
+                    <span className="font-semibold">Conversation storage:</span> {ghlHealthResult.storage.conversations}
+                    {' · '}
+                    <span className="font-semibold">Recent conversations:</span> {ghlHealthResult.storage.recentConversationCount}
+                  </p>
+                  {ghlHealthResult.forms && (
+                    <p className="mt-1">
+                      <span className="font-semibold">Forms:</span> {ghlHealthResult.forms.total}
+                      {' · '}
+                      <span className="font-semibold">Generic names:</span> {ghlHealthResult.forms.genericNameCount}
+                      {' · '}
+                      <span className="font-semibold">Legacy form submissions:</span> {ghlHealthResult.forms.legacyForm.recentSubmissionCount}
+                    </p>
+                  )}
+                  {ghlHealthResult.chatAgent && (
+                    <p className="mt-1">
+                      <span className="font-semibold">Chat KB count:</span> {ghlHealthResult.chatAgent.knowledgeBaseCount}
+                      {' · '}
+                      <span className="font-semibold">Chat actions:</span>{' '}
+                      {ghlHealthResult.chatAgent.actionTypes.length > 0
+                        ? ghlHealthResult.chatAgent.actionTypes.join(', ')
+                        : 'None'}
+                    </p>
+                  )}
+                  {ghlHealthResult.customFields && ghlHealthResult.customFields.unexpectedFields.length > 0 && (
+                    <p className="mt-1">
+                      <span className="font-semibold">Unexpected custom fields:</span>{' '}
+                      {ghlHealthResult.customFields.unexpectedFields.join(', ')}
+                    </p>
+                  )}
+                  {ghlHealthResult.training.source === 'fallback' && ghlHealthResult.training.fallbackFilePath && (
+                    <p className="mt-1">
+                      <span className="font-semibold">Fallback file:</span> {ghlHealthResult.training.fallbackFilePath}
+                    </p>
+                  )}
+                  {ghlHealthResult.ghl.error && (
+                    <p className="mt-1">
+                      <span className="font-semibold">Error:</span> {ghlHealthResult.ghl.error}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {supabaseDiagError && (
                 <p className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">

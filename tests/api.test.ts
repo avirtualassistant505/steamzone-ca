@@ -209,6 +209,127 @@ describe('API routes', () => {
     }
   });
 
+  it('POST /api/estimate-create rejects strict GHL form payloads that omit travel zone', async () => {
+    const prevGhlToken = process.env.GHL_PRIVATE_INTEGRATION_TOKEN;
+    const prevGhlAccess = process.env.GHL_ACCESS_TOKEN;
+    const prevGhlLocation = process.env.GHL_LOCATION_ID;
+    process.env.GHL_PRIVATE_INTEGRATION_TOKEN = '';
+    process.env.GHL_ACCESS_TOKEN = '';
+    process.env.GHL_LOCATION_ID = '';
+
+    const res = makeRes();
+    try {
+      await estimateCreateHandler(
+        {
+          method: 'POST',
+          body: {
+            send_email: false,
+            source: 'form',
+            strict: true,
+            customData: {
+              serviceType: 'window',
+              postalCode: 'R5G 2X3',
+              storey: 'two',
+              sizeBracket: '1500to2000',
+              scope: 'both',
+              screens: 'some',
+              tracks: 'detailed',
+              hardToReach: false,
+              hardWaterRemoval: false,
+              constructionDebris: false,
+              slidingRemoval: 'none',
+              slidingQuantity: 0,
+              patioDoors: 'none',
+              patioQuantity: 0,
+              skylights: 'none',
+              skylightQuantity: 0,
+              railingGlass: 'none',
+              frenchPanes: 'none',
+              sunroom: false,
+              walkoutBasement: false,
+              fullName: 'Zone Missing',
+              phone: '+12045550123',
+              email: 'zone.missing@example.com',
+              address: '15 Main Street',
+              consentToContact: true,
+              marketingOptIn: false,
+            },
+          },
+        },
+        res
+      );
+
+      expect(res.code).toBe(400);
+      const payload = res.payload as { message: string };
+      expect(payload.message).toMatch(/travel zone is required/i);
+    } finally {
+      process.env.GHL_PRIVATE_INTEGRATION_TOKEN = prevGhlToken;
+      process.env.GHL_ACCESS_TOKEN = prevGhlAccess;
+      process.env.GHL_LOCATION_ID = prevGhlLocation;
+    }
+  });
+
+  it('POST /api/estimate-create rejects strict GHL form payloads with missing required service fields', async () => {
+    const prevGhlToken = process.env.GHL_PRIVATE_INTEGRATION_TOKEN;
+    const prevGhlAccess = process.env.GHL_ACCESS_TOKEN;
+    const prevGhlLocation = process.env.GHL_LOCATION_ID;
+    process.env.GHL_PRIVATE_INTEGRATION_TOKEN = '';
+    process.env.GHL_ACCESS_TOKEN = '';
+    process.env.GHL_LOCATION_ID = '';
+
+    const res = makeRes();
+    try {
+      await estimateCreateHandler(
+        {
+          method: 'POST',
+          body: {
+            send_email: false,
+            source: 'form',
+            strict: true,
+            customData: {
+              serviceType: 'window',
+              postalCode: 'R5G 2X3',
+              zone: 'zoneA',
+              storey: 'two',
+              sizeBracket: '1500to2000',
+              screens: 'some',
+              tracks: 'detailed',
+              hardToReach: false,
+              hardWaterRemoval: false,
+              constructionDebris: false,
+              slidingRemoval: 'none',
+              slidingQuantity: 0,
+              patioDoors: 'none',
+              patioQuantity: 0,
+              skylights: 'none',
+              skylightQuantity: 0,
+              railingGlass: 'none',
+              frenchPanes: 'none',
+              sunroom: false,
+              walkoutBasement: false,
+              fullName: 'Scope Missing',
+              phone: '+12045550124',
+              email: 'scope.missing@example.com',
+              address: '25 Main Street',
+              consentToContact: true,
+              marketingOptIn: false,
+            },
+          },
+        },
+        res
+      );
+
+      expect(res.code).toBe(400);
+      const payload = res.payload as { message: string; errors: string[] };
+      expect(payload.message).toMatch(/validation failed/i);
+      expect(payload.errors.some((error) => /scope/i.test(error))).toBe(true);
+    } finally {
+      process.env.GHL_PRIVATE_INTEGRATION_TOKEN = prevGhlToken;
+      process.env.GHL_ACCESS_TOKEN = prevGhlAccess;
+      process.env.GHL_LOCATION_ID = prevGhlLocation;
+    }
+  });
+
   it('POST /api/estimate-agent/chat returns assistant message on basic happy path', async () => {
     process.env.OPENAI_API_KEY = 'test-key';
 

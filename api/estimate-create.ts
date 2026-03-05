@@ -2263,9 +2263,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       }
     }
 
-    // If the call came from a GHL workflow, we may not receive structured answers/custom fields.
-    // Try to infer missing pieces from the conversation transcript (contactId -> conversation -> messages).
-    if (isGhlWebhook) {
+    const allowGhlInference = isGhlWebhook && estimateSource !== 'form';
+
+    // Chat/voice workflow payloads can arrive partially flattened, so we backfill them from the
+    // linked conversation. Strict form submissions should not do this because silent inference can
+    // hide broken field mappings and create quote mismatches.
+    if (allowGhlInference) {
       const answersRec = asRecord(answers) ?? {};
       const existingContact = coerceContact(answersRec.contact) ?? coerceContact(answersRec) ?? null;
       if (!ghlContactId) {
@@ -2341,7 +2344,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
     // Prefer answers.contact, but accept flattened contact fields too.
     let contact = coerceContact(answersRec.contact) ?? coerceContact(answersRec);
-    if (isGhlWebhook) {
+    if (allowGhlInference) {
       if (ghlContactId) {
         const fallbackContact = await inferContactFromGhlContactRecord(String(ghlContactId));
         if (fallbackContact && Object.keys(fallbackContact).length > 0) {
@@ -2386,9 +2389,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         const discoveredConsent = findConsentValueCandidate(answers) ?? findConsentValueCandidate(body);
         if (discoveredConsent !== null) {
           contact = { ...contact, consentToContact: discoveredConsent };
-        } else if (estimateSource === 'form') {
-          // This workflow is triggered from a submitted form where terms are required.
-          contact = { ...contact, consentToContact: true };
         }
       }
     }
@@ -2397,7 +2397,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       return;
     }
 
-    const contactError = validateContact(contact, isGhlWebhook ? { requireName: false, requirePhone: false } : undefined);
+    const contactError = validateContact(contact, allowGhlInference ? { requireName: false, requirePhone: false } : undefined);
     if (contactError) {
       res.status(400).json({ message: contactError });
       return;
@@ -2425,7 +2425,17 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       coerceWindowZone(bodyRec.travelZone) ??
       coerceWindowZone(bodyRec.travel_zone);
     const detectedZone = engine.detectZoneFromPostalCode(postalCode);
-    const zone = explicitZone ?? detectedZone;
+    const requireExplicitZone = strictMode && estimateSource === 'form' && isGhlWebhook;
+    const zone = explicitZone ?? (requireExplicitZone ? null : detectedZone);
+
+    if (!zone) {
+      res.status(400).json({
+        message: requireExplicitZone
+          ? 'Travel zone is required for strict GHL form submissions.'
+          : 'Unable to determine travel zone.',
+      });
+      return;
+    }
 
     let answersForQuote = answersRec;
     if (strictMode) {

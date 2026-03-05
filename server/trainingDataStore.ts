@@ -18,12 +18,18 @@ export type TrainingItem = {
   status?: string;
 };
 
-type TrainingSource = 'db' | 'fallback';
+export type TrainingSource = 'db' | 'fallback';
 
-type LoadResult = {
+export type LoadResult = {
   items: TrainingItem[];
   source: TrainingSource;
   updatedAt?: string;
+};
+
+type FallbackLoadResult = {
+  items: TrainingItem[];
+  updatedAt?: string;
+  filePath?: string;
 };
 
 const CACHE_TTL_MS = 30_000;
@@ -39,6 +45,8 @@ const memory: {
   items: TrainingItem[];
   loadedAt: number;
   source: TrainingSource;
+  updatedAt?: string;
+  fallbackFilePath?: string;
 } = {
   items: [],
   loadedAt: 0,
@@ -57,21 +65,26 @@ function toStringValue(value: unknown): string {
   return String(value ?? '').trim();
 }
 
-async function loadFallbackFromDisk(): Promise<TrainingItem[]> {
+async function loadFallbackFromDisk(): Promise<FallbackLoadResult> {
   for (const candidate of DEFAULT_FALLBACK_FILE_CANDIDATES) {
     try {
       const raw = await fs.readFile(candidate, 'utf8');
       const parsed = JSON.parse(raw) as unknown;
       const parsedItems = normalizeIncomingTrainingItems(parsed);
       if (parsedItems.length > 0) {
-        return parsedItems;
+        const stats = await fs.stat(candidate).catch(() => null);
+        return {
+          items: parsedItems,
+          updatedAt: stats?.mtime ? stats.mtime.toISOString() : undefined,
+          filePath: candidate,
+        };
       }
     } catch {
       continue;
     }
   }
 
-  return [];
+  return { items: [] };
 }
 
 export function normalizeIncomingTrainingItems(raw: unknown): TrainingItem[] {
@@ -135,9 +148,11 @@ async function loadFromSupabase(): Promise<LoadResult | null> {
 
     const items = normalizeIncomingTrainingItems((data as { items?: unknown }).items);
     if (items.length === 0) {
+      const fallback = await loadFallbackFromDisk();
       return {
-        items: fallbackItems(),
+        items: fallback.items.length > 0 ? fallback.items : fallbackItems(),
         source: 'fallback',
+        updatedAt: fallback.updatedAt,
       };
     }
 
@@ -156,6 +171,7 @@ export async function loadActiveTrainingItems(): Promise<LoadResult> {
     return {
       items: memory.items,
       source: memory.source,
+      updatedAt: memory.updatedAt,
     };
   }
 
@@ -163,22 +179,29 @@ export async function loadActiveTrainingItems(): Promise<LoadResult> {
 
   if (!loaded) {
     if (!memory.loadedAt) {
-      memory.items = await loadFallbackFromDisk();
+      const fallback = await loadFallbackFromDisk();
+      memory.items = fallback.items;
       if (memory.items.length === 0) {
         memory.items = fallbackItems();
       }
       memory.source = 'fallback';
+      memory.updatedAt = fallback.updatedAt;
+      memory.fallbackFilePath = fallback.filePath;
+      memory.loadedAt = Date.now();
     }
 
     return {
       items: memory.items,
       source: memory.source,
+      updatedAt: memory.updatedAt,
     };
   }
 
   memory.items = loaded.items;
   memory.source = loaded.source;
   memory.loadedAt = Date.now();
+  memory.updatedAt = loaded.updatedAt;
+  memory.fallbackFilePath = loaded.source === 'fallback' ? memory.fallbackFilePath : undefined;
 
   return {
     items: memory.items,
@@ -193,13 +216,14 @@ export async function saveActiveTrainingItems(items: unknown): Promise<LoadResul
   memory.items = normalized;
   memory.source = 'fallback';
   memory.loadedAt = Date.now();
+  memory.updatedAt = new Date().toISOString();
 
   const supabase = await getSupabaseAdminClient();
   if (!supabase) {
     return {
       items: memory.items,
       source: 'fallback',
-      updatedAt: new Date().toISOString(),
+      updatedAt: memory.updatedAt,
     };
   }
 
@@ -243,4 +267,22 @@ export async function clearTrainingDataCache(): Promise<void> {
   memory.loadedAt = 0;
   memory.items = [];
   memory.source = 'fallback';
+  memory.updatedAt = undefined;
+  memory.fallbackFilePath = undefined;
+}
+
+export function getTrainingDataCacheState(): {
+  itemCount: number;
+  source: TrainingSource;
+  loadedAt: string | null;
+  updatedAt?: string;
+  fallbackFilePath?: string;
+} {
+  return {
+    itemCount: memory.items.length,
+    source: memory.source,
+    loadedAt: memory.loadedAt ? new Date(memory.loadedAt).toISOString() : null,
+    updatedAt: memory.updatedAt,
+    fallbackFilePath: memory.fallbackFilePath,
+  };
 }
