@@ -107,11 +107,6 @@ type PromptFieldKey = 'chat.goal' | 'chat.personality' | 'chat.instructions' | '
 const cardClass = 'rounded-2xl border border-gray-200 bg-white p-6 shadow-sm';
 const PROMPT_BACKUP_STORAGE_KEY = 'steamzone-ghl-agent-prompt-backup-v1';
 
-function previewPromptText(value: string, max = 180): string {
-  const normalized = value.replace(/\s+/g, ' ').trim();
-  if (!normalized) return 'No value loaded.';
-  return normalized.length <= max ? normalized : `${normalized.slice(0, max)}...`;
-}
 
 function parsePayloadError<T>(result: SafeJsonResult<T>): string {
   return result.textError ?? `Unable to parse response (HTTP ${result.status}).`;
@@ -246,7 +241,7 @@ export default function AdminGhlTrainingPage() {
   const [promptAssistantBusy, setPromptAssistantBusy] = useState(false);
   const [promptAssistantMessage, setPromptAssistantMessage] = useState('');
   const [promptAssistantDraft, setPromptAssistantDraft] = useState('');
-  const [manualPromptEditorField, setManualPromptEditorField] = useState<PromptFieldKey | null>(null);
+  const [promptAssistantManualMode, setPromptAssistantManualMode] = useState(false);
 
   const savedSnapshotRef = useRef('');
   const itemRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -703,9 +698,9 @@ export default function AdminGhlTrainingPage() {
         <section className={`${cardClass} space-y-6`}>
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <h2 className="text-xl font-semibold text-gray-900">Agent Prompts</h2>
+              <h2 className="text-xl font-semibold text-gray-900">Prompt Assistant</h2>
               <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-600">
-                Use this section for manual prompt editing. Use Prompt Assistant below when you want an AI rewrite before you apply the change.
+                Use this single area to rewrite or manually edit the live website chat and voice prompts before saving them back to GHL.
               </p>
             </div>
             {lastPromptBackup ? (
@@ -724,206 +719,114 @@ export default function AdminGhlTrainingPage() {
               Agent prompts have not loaded yet. Use Sync From GHL.
             </div>
           ) : (
-            <>
-              <div className="grid gap-6 xl:grid-cols-2">
-                <div className="rounded-2xl border border-gray-200 bg-slate-50 p-5">
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                    <span className="rounded-full bg-white px-2 py-1 font-semibold text-gray-700">Website Chat</span>
-                    <span className="rounded-full bg-white px-2 py-1">ID: {agentPrompts.chatAgent.agentId}</span>
-                    <span className="rounded-full bg-white px-2 py-1">KBs: {agentPrompts.chatAgent.knowledgeBaseIds.length}</span>
-                  </div>
-                  <h3 className="mt-3 text-lg font-semibold text-gray-900">{agentPrompts.chatAgent.name || 'Conversation AI Agent'}</h3>
-                  <p className="mt-1 text-sm text-gray-600">This is the live Conversation AI config used by the website chat widget.</p>
-                  <div className="mt-4 space-y-4">
-                    {([
-                      { key: 'chat.goal', label: 'Goal' },
-                      { key: 'chat.personality', label: 'Personality' },
-                      { key: 'chat.instructions', label: 'Instructions' },
-                    ] as Array<{ key: PromptFieldKey; label: string }>).map((field) => (
-                      <div key={field.key} className="rounded-xl border border-gray-200 bg-white p-4">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-semibold text-gray-900">{field.label}</p>
-                            <p className="mt-1 text-sm text-gray-600">{previewPromptText(getPromptFieldValue(agentPrompts, field.key), field.key === 'chat.instructions' ? 280 : 180)}</p>
-                          </div>
-                          <div className="flex gap-2">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setPromptAssistantTarget(field.key);
-                                setPromptAssistantDraft('');
-                                setPromptAssistantMessage('');
-                              }}
-                              className="inline-flex items-center rounded-lg border border-gray-300 px-3 py-2 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:text-gray-900"
-                            >
-                              Rewrite With Assistant
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setManualPromptEditorField((current) => (current === field.key ? null : field.key))}
-                              className="inline-flex items-center rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-100"
-                            >
-                              {manualPromptEditorField === field.key ? 'Hide Manual Editor' : 'Edit Manually'}
-                            </button>
-                          </div>
-                        </div>
-                        {manualPromptEditorField === field.key ? (
-                          <label className="mt-4 flex flex-col gap-2 text-sm font-medium text-gray-700">
-                            Manual edit
-                            <textarea
-                              value={getPromptFieldValue(agentPrompts, field.key)}
-                              onChange={(event) => updatePromptField(field.key, event.target.value)}
-                              rows={field.key === 'chat.instructions' ? 14 : 5}
-                              className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 font-mono text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                            />
-                          </label>
-                        ) : null}
-                      </div>
+            <div className="rounded-2xl border border-gray-200 bg-white p-5">
+              <div className="grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+                <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
+                  Target Field
+                  <select
+                    value={promptAssistantTarget}
+                    onChange={(event) => {
+                      setPromptAssistantTarget(event.target.value as PromptFieldKey);
+                      setPromptAssistantDraft('');
+                      setPromptAssistantMessage('');
+                      setPromptAssistantManualMode(false);
+                    }}
+                    className="rounded-xl border border-gray-300 px-4 py-3 text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                  >
+                    {promptFieldOptions.map((entry) => (
+                      <option key={entry.value} value={entry.value}>
+                        {entry.label}
+                      </option>
                     ))}
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-gray-200 bg-slate-50 p-5">
+                  </select>
+                </label>
+                <div className="rounded-xl border border-gray-200 bg-slate-50 px-4 py-3 text-sm text-gray-600">
                   <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                    <span className="rounded-full bg-white px-2 py-1 font-semibold text-gray-700">Voice AI</span>
-                    <span className="rounded-full bg-white px-2 py-1">ID: {agentPrompts.voiceAgent.agentId}</span>
-                    {agentPrompts.voiceAgent.timezone ? <span className="rounded-full bg-white px-2 py-1">TZ: {agentPrompts.voiceAgent.timezone}</span> : null}
+                    {promptAssistantTarget.startsWith('chat.') ? (
+                      <>
+                        <span className="rounded-full bg-white px-2 py-1 font-semibold text-gray-700">Website Chat</span>
+                        <span className="rounded-full bg-white px-2 py-1">ID: {agentPrompts.chatAgent.agentId}</span>
+                        <span className="rounded-full bg-white px-2 py-1">KBs: {agentPrompts.chatAgent.knowledgeBaseIds.length}</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="rounded-full bg-white px-2 py-1 font-semibold text-gray-700">Voice AI</span>
+                        <span className="rounded-full bg-white px-2 py-1">ID: {agentPrompts.voiceAgent.agentId}</span>
+                        {agentPrompts.voiceAgent.timezone ? <span className="rounded-full bg-white px-2 py-1">TZ: {agentPrompts.voiceAgent.timezone}</span> : null}
+                      </>
+                    )}
                   </div>
-                  <h3 className="mt-3 text-lg font-semibold text-gray-900">{agentPrompts.voiceAgent.agentName || 'Voice Agent'}</h3>
-                  <p className="mt-1 text-sm text-gray-600">Business: {agentPrompts.voiceAgent.businessName || 'Steam Zone'}</p>
-                  <div className="mt-4 space-y-4">
-                    {([
-                      { key: 'voice.welcomeMessage', label: 'Welcome Message' },
-                      { key: 'voice.agentPrompt', label: 'Agent Prompt' },
-                    ] as Array<{ key: PromptFieldKey; label: string }>).map((field) => (
-                      <div key={field.key} className="rounded-xl border border-gray-200 bg-white p-4">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-semibold text-gray-900">{field.label}</p>
-                            <p className="mt-1 text-sm text-gray-600">{previewPromptText(getPromptFieldValue(agentPrompts, field.key), field.key === 'voice.agentPrompt' ? 280 : 180)}</p>
-                          </div>
-                          <div className="flex gap-2">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setPromptAssistantTarget(field.key);
-                                setPromptAssistantDraft('');
-                                setPromptAssistantMessage('');
-                              }}
-                              className="inline-flex items-center rounded-lg border border-gray-300 px-3 py-2 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:text-gray-900"
-                            >
-                              Rewrite With Assistant
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setManualPromptEditorField((current) => (current === field.key ? null : field.key))}
-                              className="inline-flex items-center rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-100"
-                            >
-                              {manualPromptEditorField === field.key ? 'Hide Manual Editor' : 'Edit Manually'}
-                            </button>
-                          </div>
-                        </div>
-                        {manualPromptEditorField === field.key ? (
-                          <label className="mt-4 flex flex-col gap-2 text-sm font-medium text-gray-700">
-                            Manual edit
-                            <textarea
-                              value={getPromptFieldValue(agentPrompts, field.key)}
-                              onChange={(event) => updatePromptField(field.key, event.target.value)}
-                              rows={field.key === 'voice.agentPrompt' ? 18 : 4}
-                              className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 font-mono text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                            />
-                          </label>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
+                  <p className="mt-3 font-semibold text-gray-900">{getPromptFieldLabel(promptAssistantTarget)}</p>
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="flex items-center gap-2 text-lg font-semibold text-gray-900">
-                  <Bot className="h-5 w-5 text-blue-600" />
-                  Prompt Assistant
-                </div>
-                <p className="mt-2 text-sm leading-6 text-gray-600">
-                  Draft changes for any live prompt field, review the rewrite, then apply the draft back into the manual field before saving to GHL.
-                </p>
-                <div className="mt-4 grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
-                  <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
-                    Target Field
-                    <select
-                      value={promptAssistantTarget}
-                      onChange={(event) => {
-                        setPromptAssistantTarget(event.target.value as PromptFieldKey);
-                        setPromptAssistantDraft('');
-                        setPromptAssistantMessage('');
-                      }}
-                      className="rounded-xl border border-gray-300 px-4 py-3 text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                    >
-                      {promptFieldOptions.map((entry) => (
-                        <option key={entry.value} value={entry.value}>
-                          {entry.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
-                    Change Request
-                    <textarea
-                      value={promptAssistantInput}
-                      onChange={(event) => setPromptAssistantInput(event.target.value)}
-                      placeholder="Example: Make this shorter, keep the serviceType mapping exact, and make the tone more direct."
-                      rows={4}
-                      className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                    />
-                  </label>
-                </div>
-                <div className="mt-4 flex flex-wrap gap-3">
+              <label className="mt-4 flex flex-col gap-2 text-sm font-medium text-gray-700">
+                Change Request
+                <textarea
+                  value={promptAssistantInput}
+                  onChange={(event) => setPromptAssistantInput(event.target.value)}
+                  placeholder="Example: Make this shorter, keep the serviceType mapping exact, and make the tone more direct."
+                  rows={4}
+                  className="w-full rounded-xl border border-gray-300 px-4 py-3 text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                />
+              </label>
+
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={() => void runPromptAssistant()}
+                  disabled={promptAssistantBusy || !agentPrompts}
+                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+                >
+                  {promptAssistantBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
+                  Draft Rewrite
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPromptAssistantManualMode((current) => !current)}
+                  disabled={!agentPrompts}
+                  className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {promptAssistantManualMode ? 'Stop Manual Edit' : 'Edit Manually'}
+                </button>
+                {promptAssistantDraft ? (
                   <button
                     type="button"
-                    onClick={() => void runPromptAssistant()}
-                    disabled={promptAssistantBusy || !agentPrompts}
-                    className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+                    onClick={applyPromptAssistantDraft}
+                    className="inline-flex items-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 transition hover:bg-emerald-100"
                   >
-                    {promptAssistantBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
-                    Draft Rewrite
+                    Apply Draft
                   </button>
-                  {promptAssistantDraft ? (
-                    <button
-                      type="button"
-                      onClick={applyPromptAssistantDraft}
-                      className="inline-flex items-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-800 transition hover:bg-emerald-100"
-                    >
-                      Apply Draft
-                    </button>
-                  ) : null}
-                </div>
-                {promptAssistantMessage ? (
-                  <p className="mt-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">{promptAssistantMessage}</p>
                 ) : null}
-                <div className="mt-4 grid gap-4 lg:grid-cols-2">
-                  <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
-                    Current Value
-                    <textarea
-                      value={getPromptFieldValue(agentPrompts, promptAssistantTarget)}
-                      readOnly
-                      rows={10}
-                      className="w-full rounded-xl border border-gray-200 bg-slate-50 px-4 py-3 font-mono text-sm text-gray-700"
-                    />
-                  </label>
-                  <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
-                    Drafted Value
-                    <textarea
-                      value={promptAssistantDraft}
-                      onChange={(event) => setPromptAssistantDraft(event.target.value)}
-                      rows={10}
-                      placeholder="Assistant draft will appear here."
-                      className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 font-mono text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                    />
-                  </label>
-                </div>
               </div>
-            </>
+
+              {promptAssistantMessage ? (
+                <p className="mt-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">{promptAssistantMessage}</p>
+              ) : null}
+
+              <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
+                  Current Value
+                  <textarea
+                    value={getPromptFieldValue(agentPrompts, promptAssistantTarget)}
+                    readOnly={!promptAssistantManualMode}
+                    onChange={(event) => updatePromptField(promptAssistantTarget, event.target.value)}
+                    rows={12}
+                    className={`w-full rounded-xl px-4 py-3 font-mono text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200 ${promptAssistantManualMode ? 'border border-gray-300 bg-white text-gray-900' : 'border border-gray-200 bg-slate-50 text-gray-700'}`}
+                  />
+                </label>
+                <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
+                  Drafted Value
+                  <textarea
+                    value={promptAssistantDraft}
+                    onChange={(event) => setPromptAssistantDraft(event.target.value)}
+                    rows={12}
+                    placeholder="Assistant draft will appear here."
+                    className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 font-mono text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                  />
+                </label>
+              </div>
+            </div>
           )}
         </section>
 
