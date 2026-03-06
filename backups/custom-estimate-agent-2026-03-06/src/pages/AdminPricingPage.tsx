@@ -707,17 +707,17 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   const [isSaving, setIsSaving] = useState(false);
   const [agentModel, setAgentModel] = useState(AGENT_DEFAULT_MODEL);
   const [agentVoiceModel, setAgentVoiceModel] = useState(AGENT_DEFAULT_VOICE_MODEL);
-  const [agentModelOptions] = useState<AgentModelOption[]>(AGENT_MODEL_OPTIONS);
-  const [agentVoiceModelOptions] = useState<AgentModelOption[]>(AGENT_VOICE_MODEL_OPTIONS);
+  const [agentModelOptions, setAgentModelOptions] = useState<AgentModelOption[]>(AGENT_MODEL_OPTIONS);
+  const [agentVoiceModelOptions, setAgentVoiceModelOptions] = useState<AgentModelOption[]>(AGENT_VOICE_MODEL_OPTIONS);
   const [agentModelSource, setAgentModelSource] = useState<'db' | 'fallback'>('fallback');
   const [agentModelUpdatedAt, setAgentModelUpdatedAt] = useState('');
-  const [agentModelLoading] = useState(false);
+  const [agentModelLoading, setAgentModelLoading] = useState(false);
   const [agentModelSaving, setAgentModelSaving] = useState(false);
   const [agentModelMessage, setAgentModelMessage] = useState('');
   const [agentPrompt, setAgentPrompt] = useState('');
   const [agentPromptSource, setAgentPromptSource] = useState<'db' | 'fallback'>('fallback');
   const [agentPromptUpdatedAt, setAgentPromptUpdatedAt] = useState('');
-  const [agentPromptLoading] = useState(false);
+  const [agentPromptLoading, setAgentPromptLoading] = useState(false);
   const [agentPromptSaving, setAgentPromptSaving] = useState(false);
   const [agentPromptMessage, setAgentPromptMessage] = useState('');
   const [estimateRecords, setEstimateRecords] = useState<EstimateRecordWithSource[]>([]);
@@ -788,13 +788,68 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
 
   useEffect(() => {
     const tab = localStorage.getItem(STORAGE_KEY);
-    if (tab === 'pricing' || tab === 'estimates' || tab === 'download') {
+    if (tab === 'training' || tab === 'pricing' || tab === 'prompt' || tab === 'logs' || tab === 'estimates' || tab === 'download') {
       setActiveTab(tab);
     }
   }, []);
 
   useEffect(() => {
-    // Custom non-GHL prompt/model controls were removed from the live admin UI.
+    async function loadModelConfig(): Promise<void> {
+      setAgentModelLoading(true);
+      setAgentModelMessage('');
+      setAgentPromptLoading(true);
+      setAgentPromptMessage('');
+
+      try {
+        const [modelResponse, promptResponse] = await Promise.all([
+          parseJsonResponse<AgentModelResponse>(await fetch('/api/agent-model')),
+          parseJsonResponse<AgentPromptResponse>(await fetch('/api/agent-prompt')),
+        ]);
+
+        const modelPayload = modelResponse.payload;
+        const promptPayload = promptResponse.payload;
+
+        if (!modelResponse.ok || !modelPayload?.model) {
+          setAgentModelMessage(modelPayload?.message ?? parsePayloadError(modelResponse));
+          return;
+        }
+
+        setAgentModel(modelPayload.model);
+        setAgentVoiceModel(modelPayload.voice_model ?? AGENT_DEFAULT_VOICE_MODEL);
+        setAgentModelOptions(
+          Array.isArray(modelPayload.available_models) && modelPayload.available_models.length > 0 ? modelPayload.available_models : AGENT_MODEL_OPTIONS
+        );
+        setAgentVoiceModelOptions(
+          Array.isArray(modelPayload.available_voice_models) && modelPayload.available_voice_models.length > 0
+            ? modelPayload.available_voice_models
+            : AGENT_VOICE_MODEL_OPTIONS
+        );
+        setAgentModelSource(modelPayload.source ?? 'fallback');
+        setAgentModelUpdatedAt(modelPayload.updatedAt ?? '');
+        setAgentModelMessage(modelPayload.message ?? `Loaded model ${modelPayload.model}.`);
+
+        if (!promptResponse.ok || !promptPayload?.prompt) {
+          setAgentPrompt(PROMPT_FALLBACK);
+          setAgentPromptSource(promptPayload?.source ?? 'fallback');
+          setAgentPromptUpdatedAt(promptPayload?.updatedAt ?? '');
+          setAgentPromptMessage(promptPayload?.message ?? parsePayloadError(promptResponse));
+          return;
+        }
+
+        setAgentPrompt(promptPayload.prompt);
+        setAgentPromptSource(promptPayload.source ?? 'fallback');
+        setAgentPromptUpdatedAt(promptPayload.updatedAt ?? '');
+        setAgentPromptMessage(promptPayload.message ?? `Loaded prompt ${promptPayload.source === 'db' ? 'from DB' : 'from fallback'}.`);
+      } catch {
+        setAgentModelMessage('Unable to reach /api/agent-model. Ensure endpoint is deployed.');
+        setAgentPromptMessage('Unable to reach /api/agent-prompt. Ensure endpoint is deployed.');
+      } finally {
+        setAgentModelLoading(false);
+        setAgentPromptLoading(false);
+      }
+    }
+
+    void loadModelConfig();
   }, []);
 
   useEffect(() => {
@@ -1239,11 +1294,16 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
   }
 
   function setTab(nextTab: AdminTab): void {
-    const allowedTab = nextTab === 'pricing' || nextTab === 'estimates' || nextTab === 'download' ? nextTab : 'pricing';
-    setActiveTab(allowedTab);
-    localStorage.setItem(STORAGE_KEY, allowedTab);
+    setActiveTab(nextTab);
+    localStorage.setItem(STORAGE_KEY, nextTab);
 
-    if (allowedTab === 'estimates' && !estimateRecordsLoaded && !estimateRecordsLoading) {
+    if (nextTab === 'training' && !trainingLoaded && !trainingLoading) {
+      void loadTrainingData();
+    }
+    if (nextTab === 'logs' && !conversationLoaded && !conversationLoading) {
+      void loadConversationData();
+    }
+    if (nextTab === 'estimates' && !estimateRecordsLoaded && !estimateRecordsLoading) {
       void loadEstimateRecords();
     }
   }
@@ -1904,17 +1964,36 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
             <p className="mt-3 max-w-3xl text-gray-600">
               {activeTab === 'pricing'
                 ? 'Full pricing control for Steinbach routes: travel zones, per-service base rates, multipliers, add-ons, red flags, and estimate range behavior.'
-                : activeTab === 'estimates'
-                  ? 'Inspect every estimate calculation from website and CRM flows, including raw line items and math factors.'
-                  : 'Create and download a full site backup zip including local code and database snapshot data.'}
+                : activeTab === 'prompt'
+                  ? 'Adjust shared system prompt and agent model settings used by both web and voice estimate agents.'
+                : activeTab === 'training'
+                  ? 'Update shared training questions/answers used by both web and voice agents.'
+                  : activeTab === 'logs'
+                    ? 'Browse saved conversation sessions and full voice/text transcripts.'
+                    : activeTab === 'estimates'
+                      ? 'Inspect every estimate calculation from form and chat, including raw line items and math factors.'
+                    : 'Create and download a full site backup zip including local code and database snapshot data.'}
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
               <a
-                href="/admin-ghl-training"
+                href="/estimate-bot-lab"
                 className="inline-flex rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
               >
-                Open GHL Training
+                Open Text Test Page
               </a>
+              <a
+                href="/estimate-voice-lab"
+                className="inline-flex rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100"
+              >
+                Open Voice Test Page
+              </a>
+              <button
+                type="button"
+                onClick={() => setTab('logs')}
+                className="inline-flex rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
+              >
+                Go to Conversation Logs
+              </button>
               <button
                 type="button"
                 onClick={() => setTab('download')}
@@ -1928,6 +2007,13 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
                 className="inline-flex rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
               >
                 Go to Estimate Calculations
+              </button>
+              <button
+                type="button"
+                onClick={() => setTab('prompt')}
+                className="inline-flex rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
+              >
+                Open Prompt Editor
               </button>
             </div>
             <p className="mt-2 text-sm text-gray-500">Last updated: {new Date(draftConfig.updatedAt).toLocaleString()}</p>
@@ -2043,6 +2129,33 @@ export default function AdminPricingPage({ pricingConfig, onPricingConfigChange,
             }`}
             >
             Pricing Configuration
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('prompt')}
+            className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
+              activeTab === 'prompt' ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            Prompt &amp; Models
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('training')}
+            className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
+              activeTab === 'training' ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            Training Data
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('logs')}
+            className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
+              activeTab === 'logs' ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            Conversation Logs
           </button>
           <button
             type="button"
