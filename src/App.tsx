@@ -10,6 +10,7 @@ import BrandLogo from './components/BrandLogo';
 import GhlWidgetLoader from './components/GhlWidgetLoader';
 import GetEstimatePage from './pages/GetEstimatePage';
 import AdminPricingPage from './pages/AdminPricingPage';
+import AdminGhlTrainingPage from './pages/AdminGhlTrainingPage';
 import EstimateBotLabPage from './pages/EstimateBotLabPage';
 import EstimateVoiceLabPage from './pages/EstimateVoiceLabPage';
 import CallUsPage from './pages/CallUsPage';
@@ -20,7 +21,7 @@ import {
 import { parseJsonResponse } from './lib/responseParsing';
 import { langText, useSiteLanguage } from './i18n/siteLanguage';
 
-type AppRoute = '/' | '/estimate' | '/call-us' | '/estimate-bot-lab' | '/estimate-voice-lab' | '/admin' | 'notFound';
+type AppRoute = '/' | '/estimate' | '/call-us' | '/estimate-bot-lab' | '/estimate-voice-lab' | '/admin' | '/admin-ghl-training' | 'notFound';
 
 interface PricingGetResponse {
   config?: PricingConfig;
@@ -52,6 +53,10 @@ function normalizeRoute(pathname: string): AppRoute {
 
   if (trimmed === '/admin') {
     return '/admin';
+  }
+
+  if (trimmed === '/admin-ghl-training') {
+    return '/admin-ghl-training';
   }
 
   return 'notFound';
@@ -167,6 +172,8 @@ function App() {
         pricingStatus={pricingStatus}
       />
     );
+  } else if (route === '/admin-ghl-training') {
+    content = <AdminGhlTrainingPage />;
   } else {
     content = <NotFound />;
   }
@@ -188,6 +195,9 @@ function App() {
               </button>
               <button type="button" onClick={() => navigate('/admin')} className={navLinkClass(route === '/admin')}>
                 {langText(language, { en: 'Admin', es: 'Admin' })}
+              </button>
+              <button type="button" onClick={() => navigate('/admin-ghl-training')} className={navLinkClass(route === '/admin-ghl-training')}>
+                {langText(language, { en: 'GHL Training', es: 'Entrenamiento GHL' })}
               </button>
               <div className="inline-flex items-center rounded-lg border border-gray-300 p-1 text-xs font-semibold">
                 <button
@@ -233,6 +243,9 @@ function App() {
           </button>
           <button type="button" onClick={() => navigate('/admin')} className="rounded-md px-3 py-2 font-semibold text-gray-700">
             {langText(language, { en: 'Admin', es: 'Admin' })}
+          </button>
+          <button type="button" onClick={() => navigate('/admin-ghl-training')} className="rounded-md px-3 py-2 font-semibold text-gray-700">
+            {langText(language, { en: 'GHL', es: 'GHL' })}
           </button>
         </div>
       </div>
