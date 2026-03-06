@@ -9,6 +9,11 @@ vi.mock('../server/ghlKnowledgeBase.js', () => ({
   deleteKnowledgeFaq: vi.fn(),
 }));
 
+vi.mock('../server/ghlAgentPrompts.js', () => ({
+  getGhlAgentPrompts: vi.fn(),
+  updateGhlAgentPrompts: vi.fn(),
+}));
+
 import ghlTrainingGetHandler from '../api/ghl-training-get';
 import ghlTrainingSaveHandler from '../api/ghl-training-save';
 import {
@@ -19,6 +24,7 @@ import {
   updateKnowledgeFaq,
   deleteKnowledgeFaq,
 } from '../server/ghlKnowledgeBase.js';
+import { getGhlAgentPrompts, updateGhlAgentPrompts } from '../server/ghlAgentPrompts.js';
 
 interface MockRes {
   code: number;
@@ -41,12 +47,34 @@ function makeRes(): MockRes {
   };
 }
 
+const agentPrompts = {
+  locationId: 'loc-123',
+  chatAgent: {
+    agentId: 'chat-1',
+    name: 'Website Chat',
+    goal: 'Collect estimate info',
+    personality: 'Helpful',
+    instructions: 'Ask one question at a time.',
+    knowledgeBaseIds: ['kb-1'],
+    actionTypes: ['triggerWorkflow'],
+  },
+  voiceAgent: {
+    agentId: 'voice-1',
+    agentName: 'Voice Agent',
+    businessName: 'Steam Zone',
+    welcomeMessage: 'Hi there',
+    agentPrompt: 'Voice prompt body',
+    timezone: 'America/Winnipeg',
+  },
+};
+
 describe('GHL training API routes', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.mocked(getGhlAgentPrompts).mockResolvedValue(agentPrompts);
   });
 
-  it('GET /api/ghl-training-get returns knowledge bases and selected FAQ entries', async () => {
+  it('GET /api/ghl-training-get returns knowledge bases, selected FAQ entries, and agent prompts', async () => {
     vi.mocked(getGhlKnowledgeBaseContext).mockReturnValue({ locationId: 'loc-123' });
     vi.mocked(listKnowledgeBases).mockResolvedValue([
       { id: 'kb-1', name: 'KB One' },
@@ -61,6 +89,7 @@ describe('GHL training API routes', () => {
 
     expect(res.code).toBe(200);
     expect(listKnowledgeFaqs).toHaveBeenCalledWith('kb-2');
+    expect(getGhlAgentPrompts).toHaveBeenCalled();
     expect(res.payload).toEqual({
       locationId: 'loc-123',
       knowledgeBases: [
@@ -69,6 +98,7 @@ describe('GHL training API routes', () => {
       ],
       selectedKnowledgeBaseId: 'kb-2',
       items: [{ id: 'faq-1', knowledgeBaseId: 'kb-2', question: 'Q1', answer: 'A1' }],
+      agentPrompts,
       message: 'Loaded 1 GHL FAQ entries.',
     });
   });
@@ -82,6 +112,17 @@ describe('GHL training API routes', () => {
           knowledgeBaseId: 'kb-1',
           items: [{ question: 'Only a question', answer: '' }],
           deletedIds: [],
+          agentPrompts: {
+            chatAgent: {
+              goal: 'Collect estimate info',
+              personality: 'Helpful',
+              instructions: 'Ask one question at a time.',
+            },
+            voiceAgent: {
+              welcomeMessage: 'Hi there',
+              agentPrompt: 'Voice prompt body',
+            },
+          },
         },
       },
       res
@@ -93,7 +134,7 @@ describe('GHL training API routes', () => {
     });
   });
 
-  it('POST /api/ghl-training-save performs create, update, and delete operations before returning refreshed data', async () => {
+  it('POST /api/ghl-training-save performs create, update, delete, and prompt save operations before returning refreshed data', async () => {
     vi.mocked(listKnowledgeFaqs)
       .mockResolvedValueOnce([
         { id: 'faq-1', knowledgeBaseId: 'kb-1', question: 'Old question', answer: 'Old answer' },
@@ -105,6 +146,13 @@ describe('GHL training API routes', () => {
         { id: 'faq-2', knowledgeBaseId: 'kb-1', question: 'Keep', answer: 'Same' },
         { id: 'faq-4', knowledgeBaseId: 'kb-1', question: 'Fresh', answer: 'Brand new' },
       ]);
+
+    const updatedPrompts = {
+      ...agentPrompts,
+      chatAgent: { ...agentPrompts.chatAgent, instructions: 'Updated chat instructions' },
+      voiceAgent: { ...agentPrompts.voiceAgent, agentPrompt: 'Updated voice prompt' },
+    };
+    vi.mocked(updateGhlAgentPrompts).mockResolvedValue(updatedPrompts);
 
     const res = makeRes();
     await ghlTrainingSaveHandler(
@@ -118,6 +166,17 @@ describe('GHL training API routes', () => {
             { question: 'Fresh', answer: 'Brand new' },
           ],
           deletedIds: ['faq-3'],
+          agentPrompts: {
+            chatAgent: {
+              goal: 'Collect estimate info',
+              personality: 'Helpful',
+              instructions: 'Updated chat instructions',
+            },
+            voiceAgent: {
+              welcomeMessage: 'Hi there',
+              agentPrompt: 'Updated voice prompt',
+            },
+          },
         },
       },
       res
@@ -126,6 +185,17 @@ describe('GHL training API routes', () => {
     expect(updateKnowledgeFaq).toHaveBeenCalledWith('faq-1', 'kb-1', 'New question', 'New answer');
     expect(createKnowledgeFaq).toHaveBeenCalledWith('kb-1', 'Fresh', 'Brand new');
     expect(deleteKnowledgeFaq).toHaveBeenCalledWith('faq-3');
+    expect(updateGhlAgentPrompts).toHaveBeenCalledWith({
+      chatAgent: {
+        goal: 'Collect estimate info',
+        personality: 'Helpful',
+        instructions: 'Updated chat instructions',
+      },
+      voiceAgent: {
+        welcomeMessage: 'Hi there',
+        agentPrompt: 'Updated voice prompt',
+      },
+    });
     expect(res.code).toBe(200);
     expect(res.payload).toEqual({
       items: [
@@ -139,7 +209,9 @@ describe('GHL training API routes', () => {
         updated: 1,
         deleted: 1,
       },
-      message: 'Saved GHL knowledge base changes (1 created, 1 updated, 1 deleted).',
+      agentPrompts: updatedPrompts,
+      previousPrompts: agentPrompts,
+      message: 'Saved GHL knowledge base changes (1 created, 1 updated, 1 deleted). Saved live GHL chat and voice prompts.',
     });
   });
 });
