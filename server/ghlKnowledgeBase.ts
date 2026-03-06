@@ -144,6 +144,7 @@ export async function listKnowledgeBases(): Promise<GhlKnowledgeBase[]> {
   return knowledgeBases
     .map((item) => normalizeKnowledgeBase(item))
     .filter((item): item is GhlKnowledgeBase => item !== null)
+    .filter((item) => !/^archived\b/i.test(item.name))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 

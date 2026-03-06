@@ -107,6 +107,12 @@ type PromptFieldKey = 'chat.goal' | 'chat.personality' | 'chat.instructions' | '
 const cardClass = 'rounded-2xl border border-gray-200 bg-white p-6 shadow-sm';
 const PROMPT_BACKUP_STORAGE_KEY = 'steamzone-ghl-agent-prompt-backup-v1';
 
+function previewPromptText(value: string, max = 180): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (!normalized) return 'No value loaded.';
+  return normalized.length <= max ? normalized : `${normalized.slice(0, max)}...`;
+}
+
 function parsePayloadError<T>(result: SafeJsonResult<T>): string {
   return result.textError ?? `Unable to parse response (HTTP ${result.status}).`;
 }
@@ -240,6 +246,7 @@ export default function AdminGhlTrainingPage() {
   const [promptAssistantBusy, setPromptAssistantBusy] = useState(false);
   const [promptAssistantMessage, setPromptAssistantMessage] = useState('');
   const [promptAssistantDraft, setPromptAssistantDraft] = useState('');
+  const [manualPromptEditorField, setManualPromptEditorField] = useState<PromptFieldKey | null>(null);
 
   const savedSnapshotRef = useRef('');
   const itemRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -698,7 +705,7 @@ export default function AdminGhlTrainingPage() {
             <div>
               <h2 className="text-xl font-semibold text-gray-900">Agent Prompts</h2>
               <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-600">
-                These fields are the live GoHighLevel prompt controls for the website chat agent and the voice AI agent. Edit them directly here instead of in the GHL UI.
+                Use this section for manual prompt editing. Use Prompt Assistant below when you want an AI rewrite before you apply the change.
               </p>
             </div>
             {lastPromptBackup ? (
@@ -727,34 +734,52 @@ export default function AdminGhlTrainingPage() {
                   </div>
                   <h3 className="mt-3 text-lg font-semibold text-gray-900">{agentPrompts.chatAgent.name || 'Conversation AI Agent'}</h3>
                   <p className="mt-1 text-sm text-gray-600">This is the live Conversation AI config used by the website chat widget.</p>
-                  <div className="mt-4 grid gap-4">
-                    <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
-                      Goal
-                      <textarea
-                        value={agentPrompts.chatAgent.goal}
-                        onChange={(event) => updatePromptField('chat.goal', event.target.value)}
-                        rows={4}
-                        className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
-                      Personality
-                      <textarea
-                        value={agentPrompts.chatAgent.personality}
-                        onChange={(event) => updatePromptField('chat.personality', event.target.value)}
-                        rows={4}
-                        className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
-                      Instructions
-                      <textarea
-                        value={agentPrompts.chatAgent.instructions}
-                        onChange={(event) => updatePromptField('chat.instructions', event.target.value)}
-                        rows={14}
-                        className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 font-mono text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                      />
-                    </label>
+                  <div className="mt-4 space-y-4">
+                    {([
+                      { key: 'chat.goal', label: 'Goal' },
+                      { key: 'chat.personality', label: 'Personality' },
+                      { key: 'chat.instructions', label: 'Instructions' },
+                    ] as Array<{ key: PromptFieldKey; label: string }>).map((field) => (
+                      <div key={field.key} className="rounded-xl border border-gray-200 bg-white p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-gray-900">{field.label}</p>
+                            <p className="mt-1 text-sm text-gray-600">{previewPromptText(getPromptFieldValue(agentPrompts, field.key), field.key === 'chat.instructions' ? 280 : 180)}</p>
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPromptAssistantTarget(field.key);
+                                setPromptAssistantDraft('');
+                                setPromptAssistantMessage('');
+                              }}
+                              className="inline-flex items-center rounded-lg border border-gray-300 px-3 py-2 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:text-gray-900"
+                            >
+                              Rewrite With Assistant
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setManualPromptEditorField((current) => (current === field.key ? null : field.key))}
+                              className="inline-flex items-center rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-100"
+                            >
+                              {manualPromptEditorField === field.key ? 'Hide Manual Editor' : 'Edit Manually'}
+                            </button>
+                          </div>
+                        </div>
+                        {manualPromptEditorField === field.key ? (
+                          <label className="mt-4 flex flex-col gap-2 text-sm font-medium text-gray-700">
+                            Manual edit
+                            <textarea
+                              value={getPromptFieldValue(agentPrompts, field.key)}
+                              onChange={(event) => updatePromptField(field.key, event.target.value)}
+                              rows={field.key === 'chat.instructions' ? 14 : 5}
+                              className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 font-mono text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                            />
+                          </label>
+                        ) : null}
+                      </div>
+                    ))}
                   </div>
                 </div>
 
@@ -766,25 +791,51 @@ export default function AdminGhlTrainingPage() {
                   </div>
                   <h3 className="mt-3 text-lg font-semibold text-gray-900">{agentPrompts.voiceAgent.agentName || 'Voice Agent'}</h3>
                   <p className="mt-1 text-sm text-gray-600">Business: {agentPrompts.voiceAgent.businessName || 'Steam Zone'}</p>
-                  <div className="mt-4 grid gap-4">
-                    <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
-                      Welcome Message
-                      <textarea
-                        value={agentPrompts.voiceAgent.welcomeMessage}
-                        onChange={(event) => updatePromptField('voice.welcomeMessage', event.target.value)}
-                        rows={4}
-                        className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
-                      Agent Prompt
-                      <textarea
-                        value={agentPrompts.voiceAgent.agentPrompt}
-                        onChange={(event) => updatePromptField('voice.agentPrompt', event.target.value)}
-                        rows={18}
-                        className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 font-mono text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                      />
-                    </label>
+                  <div className="mt-4 space-y-4">
+                    {([
+                      { key: 'voice.welcomeMessage', label: 'Welcome Message' },
+                      { key: 'voice.agentPrompt', label: 'Agent Prompt' },
+                    ] as Array<{ key: PromptFieldKey; label: string }>).map((field) => (
+                      <div key={field.key} className="rounded-xl border border-gray-200 bg-white p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-gray-900">{field.label}</p>
+                            <p className="mt-1 text-sm text-gray-600">{previewPromptText(getPromptFieldValue(agentPrompts, field.key), field.key === 'voice.agentPrompt' ? 280 : 180)}</p>
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPromptAssistantTarget(field.key);
+                                setPromptAssistantDraft('');
+                                setPromptAssistantMessage('');
+                              }}
+                              className="inline-flex items-center rounded-lg border border-gray-300 px-3 py-2 text-xs font-semibold text-gray-700 transition hover:border-gray-400 hover:text-gray-900"
+                            >
+                              Rewrite With Assistant
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setManualPromptEditorField((current) => (current === field.key ? null : field.key))}
+                              className="inline-flex items-center rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-100"
+                            >
+                              {manualPromptEditorField === field.key ? 'Hide Manual Editor' : 'Edit Manually'}
+                            </button>
+                          </div>
+                        </div>
+                        {manualPromptEditorField === field.key ? (
+                          <label className="mt-4 flex flex-col gap-2 text-sm font-medium text-gray-700">
+                            Manual edit
+                            <textarea
+                              value={getPromptFieldValue(agentPrompts, field.key)}
+                              onChange={(event) => updatePromptField(field.key, event.target.value)}
+                              rows={field.key === 'voice.agentPrompt' ? 18 : 4}
+                              className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 font-mono text-sm text-gray-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                            />
+                          </label>
+                        ) : null}
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>
@@ -795,7 +846,7 @@ export default function AdminGhlTrainingPage() {
                   Prompt Assistant
                 </div>
                 <p className="mt-2 text-sm leading-6 text-gray-600">
-                  Draft changes for any live prompt field, review the rewrite, then apply it locally before saving to GHL.
+                  Draft changes for any live prompt field, review the rewrite, then apply the draft back into the manual field before saving to GHL.
                 </p>
                 <div className="mt-4 grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
                   <label className="flex flex-col gap-2 text-sm font-medium text-gray-700">
