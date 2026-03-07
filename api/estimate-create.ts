@@ -205,16 +205,18 @@ function validatePostalCode(postalCode: string): string | null {
 
 function validateContact(
   contact: LeadContact,
-  opts: { requireName?: boolean; requirePhone?: boolean } = {}
+  opts: { requireName?: boolean; requirePhone?: boolean; requireAddress?: boolean } = {}
 ): string | null {
   const requireName = opts.requireName ?? true;
   const requirePhone = opts.requirePhone ?? true;
+  const requireAddress = opts.requireAddress ?? false;
 
   if (requireName && (!contact.fullName?.trim() || contact.fullName.trim().length < 2)) return 'Full name is required.';
   if (requirePhone && (!contact.phone?.replace(/\D/g, '') || contact.phone.replace(/\D/g, '').length < 7)) {
     return 'Phone number is required.';
   }
   if (!contact.email?.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email.trim())) return 'Valid email is required.';
+  if (requireAddress && !contact.address?.trim()) return 'Service address is required.';
   if (!contact.consentToContact) return 'Consent is required.';
   return null;
 }
@@ -2397,7 +2399,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       return;
     }
 
-    const contactError = validateContact(contact, allowGhlInference ? { requireName: false, requirePhone: false } : undefined);
+    const contactValidationOptions = allowGhlInference
+      ? { requireName: false, requirePhone: false, requireAddress: estimateSource === 'voice' }
+      : { requireAddress: estimateSource === 'voice' };
+    const contactError = validateContact(contact, contactValidationOptions);
     if (contactError) {
       res.status(400).json({ message: contactError });
       return;

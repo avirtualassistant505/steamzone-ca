@@ -330,6 +330,57 @@ describe('API routes', () => {
     }
   });
 
+  it('POST /api/estimate-create rejects voice estimate payloads that omit service address', async () => {
+    const prevGhlToken = process.env.GHL_PRIVATE_INTEGRATION_TOKEN;
+    const prevGhlAccess = process.env.GHL_ACCESS_TOKEN;
+    const prevGhlLocation = process.env.GHL_LOCATION_ID;
+    process.env.GHL_PRIVATE_INTEGRATION_TOKEN = '';
+    process.env.GHL_ACCESS_TOKEN = '';
+    process.env.GHL_LOCATION_ID = '';
+
+    const res = makeRes();
+    try {
+      await estimateCreateHandler(
+        {
+          method: 'POST',
+          body: {
+            send_email: false,
+            source: 'voice',
+            strict: true,
+            serviceType: 'carpet',
+            postalCode: 'R5G 2X3',
+            estimateMode: 'rooms',
+            rooms: 4,
+            condition: 'moderate',
+            stairsSteps: 10,
+            hallways: 1,
+            furnitureMoving: 'light',
+            advancedStainRemoval: true,
+            odorElimination: false,
+            petTreatment: false,
+            stainProtector: true,
+            unusualCondition: false,
+            schedule: 'asap',
+            fullName: 'Alex Martin',
+            phone: '+12045550126',
+            email: 'alex.voice@example.com',
+            consentToContact: true,
+            marketingOptIn: false,
+          },
+        },
+        res
+      );
+
+      expect(res.code).toBe(400);
+      const payload = res.payload as { message: string };
+      expect(payload.message).toMatch(/service address is required/i);
+    } finally {
+      process.env.GHL_PRIVATE_INTEGRATION_TOKEN = prevGhlToken;
+      process.env.GHL_ACCESS_TOKEN = prevGhlAccess;
+      process.env.GHL_LOCATION_ID = prevGhlLocation;
+    }
+  });
+
   it('POST /api/estimate-agent/chat returns assistant message on basic happy path', async () => {
     process.env.OPENAI_API_KEY = 'test-key';
 
