@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import quoteHandler from '../api/quote';
 import estimateCreateHandler from '../api/estimate-create';
+import voiceEstimateValidateHandler from '../api/voice-estimate-validate';
 import estimateAgentChatHandler from '../api/estimate-agent/chat';
 import transcriptsCleanupHandler from '../api/transcripts-cleanup';
 import transcriptsGetHandler from '../api/transcripts-get';
@@ -267,6 +268,128 @@ describe('API routes', () => {
       process.env.GHL_ACCESS_TOKEN = prevGhlAccess;
       process.env.GHL_LOCATION_ID = prevGhlLocation;
     }
+  });
+
+  it('POST /api/voice-estimate-validate returns the next missing carpet field in strict order', async () => {
+    const res = makeRes();
+    await voiceEstimateValidateHandler(
+      {
+        method: 'POST',
+        body: {
+          serviceType: 'carpet',
+          postalCode: 'R5G 2X3',
+          estimateMode: 'rooms',
+          rooms: 4,
+          condition: 'moderate',
+          stairsSteps: 10,
+          hallways: 1,
+          furnitureMoving: 'light',
+          advancedStainRemoval: true,
+          odorElimination: false,
+          petTreatment: false,
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as {
+      ok: boolean;
+      nextFieldKey: string | null;
+      nextQuestion: string | null;
+      missingFields: string[];
+    };
+    expect(payload.ok).toBe(false);
+    expect(payload.nextFieldKey).toBe('stainProtector');
+    expect(payload.nextQuestion).toMatch(/stain protector/i);
+    expect(payload.missingFields[0]).toBe('stainProtector');
+  });
+
+  it('POST /api/voice-estimate-validate falls through to address after carpet service answers are complete', async () => {
+    const res = makeRes();
+    await voiceEstimateValidateHandler(
+      {
+        method: 'POST',
+        body: {
+          serviceType: 'carpet',
+          postalCode: 'R5G 2X3',
+          estimateMode: 'rooms',
+          rooms: 4,
+          condition: 'moderate',
+          stairsSteps: 10,
+          hallways: 1,
+          furnitureMoving: 'light',
+          advancedStainRemoval: true,
+          odorElimination: false,
+          petTreatment: false,
+          stainProtector: true,
+          unusualCondition: false,
+          schedule: 'asap',
+          fullName: 'Alex Martin',
+          phone: '+12045011264',
+          email: 'alex@example.com',
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as {
+      ok: boolean;
+      nextFieldKey: string | null;
+      nextQuestion: string | null;
+      missingFields: string[];
+    };
+    expect(payload.ok).toBe(false);
+    expect(payload.nextFieldKey).toBe('contact.address');
+    expect(payload.nextQuestion).toMatch(/service address/i);
+    expect(payload.missingFields[0]).toBe('contact.address');
+  });
+
+  it('POST /api/voice-estimate-validate reports success for a complete carpet snapshot', async () => {
+    const res = makeRes();
+    await voiceEstimateValidateHandler(
+      {
+        method: 'POST',
+        body: {
+          serviceType: 'carpet',
+          postalCode: 'R5G 2X3',
+          estimateMode: 'rooms',
+          rooms: 4,
+          condition: 'moderate',
+          stairsSteps: 10,
+          hallways: 1,
+          furnitureMoving: 'light',
+          advancedStainRemoval: true,
+          odorElimination: false,
+          petTreatment: false,
+          stainProtector: true,
+          unusualCondition: false,
+          schedule: 'asap',
+          fullName: 'Alex Martin',
+          phone: '+12045011264',
+          email: 'alex@example.com',
+          address: '101 Test Avenue, Steinbach',
+          consentToContact: true,
+          marketingOptIn: false,
+        },
+      },
+      res
+    );
+
+    expect(res.code).toBe(200);
+    const payload = res.payload as {
+      ok: boolean;
+      nextFieldKey: string | null;
+      missingFields: string[];
+      invalidFields: Array<{ key: string; error: string }>;
+      zone: string | null;
+    };
+    expect(payload.ok).toBe(true);
+    expect(payload.nextFieldKey).toBeNull();
+    expect(payload.missingFields).toEqual([]);
+    expect(payload.invalidFields).toEqual([]);
+    expect(payload.zone).toBe('zoneA');
   });
 
   it('POST /api/estimate-create rejects strict GHL form payloads with missing required service fields', async () => {
