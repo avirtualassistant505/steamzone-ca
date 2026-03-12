@@ -1,5 +1,5 @@
 import { chromium } from '@playwright/test';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -20,6 +20,12 @@ const HEADLESS = String(process.env.VOICE_TEST_HEADLESS || '').trim().toLowerCas
 const SYSTEM_ANSWER_DELAY_MS = Number(process.env.VOICE_TEST_SYSTEM_ANSWER_DELAY_MS || 1200);
 const RECORDED_SOURCE_WAV = process.env.VOICE_TEST_RECORDED_SOURCE?.trim() || path.join(ROOT, 'tmp', 'voice_test_input_v8.wav');
 const RECORDED_SEGMENT_DIR = path.join(ROOT, 'tmp', 'voice-adaptive-recorded');
+const LOCAL_CHUNK_SECONDS = Number(process.env.VOICE_TEST_LOCAL_CHUNK_SECONDS || 6);
+const LOCAL_AUDIO_DIR = path.join(ROOT, 'tmp', 'voice-adaptive-local');
+const LOCAL_PROMPT = 'Steam Zone voice estimate assistant prompt.';
+const LOCAL_SUPPRESS_MS = Number(process.env.VOICE_TEST_LOCAL_SUPPRESS_MS || 7000);
+const FASTER_WHISPER_VENV = path.join(ROOT, 'tmp', 'venv-faster-whisper');
+const FASTER_WHISPER_HELPER = path.join(ROOT, 'scripts', 'voice_faster_whisper_helper.py');
 
 const recordedSegments = {
   initial: [5.10, 7.80],
@@ -264,6 +270,46 @@ async function installSyntheticMic(page) {
   });
 }
 
+async function installPreferredInputDevice(page, deviceLabel) {
+  await page.addInitScript((preferredLabel) => {
+    const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      if (!constraints || typeof constraints !== 'object' || !constraints.audio) {
+        return originalGetUserMedia(constraints);
+      }
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const match = devices.find(
+        (device) => device.kind === 'audioinput' && String(device.label || '').includes(preferredLabel),
+      );
+      if (!match?.deviceId) {
+        return originalGetUserMedia(constraints);
+      }
+      const nextConstraints =
+        typeof constraints.audio === 'object'
+          ? {
+              ...constraints,
+              audio: {
+                ...constraints.audio,
+                deviceId: { exact: match.deviceId },
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
+              },
+            }
+          : {
+              ...constraints,
+              audio: {
+                deviceId: { exact: match.deviceId },
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
+              },
+            };
+      return originalGetUserMedia(nextConstraints);
+    };
+  }, deviceLabel);
+}
+
 function getCurrentAudioDevice(type) {
   return execFileSync('SwitchAudioSource', ['-c', '-t', type], {
     cwd: ROOT,
@@ -295,6 +341,10 @@ function playAnswerSystem(answer) {
     cwd: ROOT,
     stdio: ['ignore', 'ignore', 'pipe'],
   });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function ensureRecordedSegment(fieldKey) {
@@ -339,6 +389,86 @@ function playSystemField(fieldKey, answer) {
   return { mode: 'tts', path: ensureClip(answer) };
 }
 
+function startLocalAudioRecorder(runDir) {
+  fs.mkdirSync(runDir, { recursive: true });
+  return spawn(
+    'ffmpeg',
+    [
+      '-y',
+      '-f',
+      'avfoundation',
+      '-i',
+      ':0',
+      '-ac',
+      '1',
+      '-ar',
+      '16000',
+      '-f',
+      'segment',
+      '-segment_time',
+      String(LOCAL_CHUNK_SECONDS),
+      '-reset_timestamps',
+      '1',
+      path.join(runDir, 'chunk_%03d.wav'),
+    ],
+    {
+      cwd: ROOT,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    },
+  );
+}
+
+function startWhisperHelper() {
+  return spawn(
+    'bash',
+    [
+      '-lc',
+      `source ${JSON.stringify(path.join(FASTER_WHISPER_VENV, 'bin', 'activate'))} && python ${JSON.stringify(FASTER_WHISPER_HELPER)}`,
+    ],
+    {
+      cwd: ROOT,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    },
+  );
+}
+
+function listCompletedSegments(runDir) {
+  if (!fs.existsSync(runDir)) return [];
+  const files = fs
+    .readdirSync(runDir)
+    .filter((name) => /^chunk_\d+\.wav$/.test(name))
+    .sort();
+  if (files.length <= 1) return [];
+  return files.slice(0, -1).map((name) => path.join(runDir, name));
+}
+
+function createWhisperClient(proc) {
+  let buffer = '';
+  const pending = [];
+  proc.stdout.on('data', (chunk) => {
+    buffer += chunk.toString();
+    while (buffer.includes('\n')) {
+      const idx = buffer.indexOf('\n');
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!line) continue;
+      const next = pending.shift();
+      if (next) next(JSON.parse(line));
+    }
+  });
+  return (audioPath) =>
+    new Promise((resolve, reject) => {
+      pending.push(resolve);
+      proc.stdin.write(
+        JSON.stringify({
+          audio: audioPath,
+          language: 'en',
+          initial_prompt: LOCAL_PROMPT,
+        }) + '\n',
+      );
+    });
+}
+
 async function main() {
   const state = {
     startedAtMs: Date.now(),
@@ -364,6 +494,8 @@ async function main() {
       : null;
 
   let browser;
+  let recorder;
+  let whisperProc;
   try {
     if (AUDIO_MODE === 'system') {
       if (!hasAudioDevice(AUDIO_DEVICE, 'input') || !hasAudioDevice(AUDIO_DEVICE, 'output')) {
@@ -374,9 +506,24 @@ async function main() {
       console.log('audio-switched', JSON.stringify({ input: getCurrentAudioDevice('input'), output: getCurrentAudioDevice('output') }));
     }
 
+    const localRunDir = path.join(LOCAL_AUDIO_DIR, String(Date.now()));
+    const processedSegments = new Set();
+    let transcribeChunk = null;
+    if (AUDIO_MODE === 'system' && fs.existsSync(FASTER_WHISPER_HELPER) && fs.existsSync(FASTER_WHISPER_VENV)) {
+      recorder = startLocalAudioRecorder(localRunDir);
+      whisperProc = startWhisperHelper();
+      transcribeChunk = createWhisperClient(whisperProc);
+      state.localRunDir = localRunDir;
+      state.localPrompts = [];
+      state.suppressUntil = 0;
+    }
+
     browser = await chromium.launch({ headless: HEADLESS, args: ['--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required'] });
     const context = await browser.newContext({ permissions: ['microphone'], viewport: { width: 1400, height: 1200 } });
     const page = await context.newPage();
+    if (AUDIO_MODE === 'system') {
+      await installPreferredInputDevice(page, AUDIO_DEVICE);
+    }
 
     await page.goto(DEFAULT_URL, { waitUntil: 'domcontentloaded' });
     if (AUDIO_MODE === 'js') {
@@ -421,6 +568,30 @@ async function main() {
         break;
       }
 
+      if (transcribeChunk) {
+        const segments = listCompletedSegments(localRunDir);
+        for (const segmentPath of segments) {
+          if (processedSegments.has(segmentPath)) continue;
+          processedSegments.add(segmentPath);
+          const local = await transcribeChunk(segmentPath);
+          if (!local?.ok) continue;
+          const localText = normalizeText(local.text);
+          if (localText) {
+            state.localPrompts.push({ audio: segmentPath, text: localText, at: new Date().toISOString() });
+            console.log('local-transcript', JSON.stringify({ audio: path.basename(segmentPath), text: localText }));
+          }
+          if (!localText) continue;
+          if (Date.now() < (state.suppressUntil || 0)) continue;
+          const response = chooseAnswer(localText, state);
+          if (!response) continue;
+          await sleep(500);
+          const playback = playSystemField(response.key, response.answer);
+          state.suppressUntil = Date.now() + LOCAL_SUPPRESS_MS;
+          state.audioSent.push({ prompt: localText, field: response.key, answer: response.answer, playback, at: new Date().toISOString(), source: 'local-audio' });
+          console.log('answered-local', JSON.stringify({ prompt: localText, field: response.key, answer: response.answer }));
+        }
+      }
+
       if (transcriptLength <= state.lastTranscriptLength && botLine === state.lastBotLine && humanLine === state.lastHumanLine) {
         state.idlePolls += 1;
         if (state.idlePolls >= MAX_IDLE_POLLS) {
@@ -443,6 +614,10 @@ async function main() {
       } else {
         state.promptRepeatCount[botLine] = (state.promptRepeatCount[botLine] || 0) + 1;
         if (state.promptRepeatCount[botLine] > MAX_PROMPT_REPEATS) continue;
+      }
+
+      if (transcribeChunk) {
+        continue;
       }
 
       const response = chooseAnswer(botLine, state);
@@ -472,6 +647,8 @@ async function main() {
       lastExecutedActions: state.lastExecutedActions,
       matched: state.matched,
       audioSent: state.audioSent,
+      localRunDir: state.localRunDir,
+      localPrompts: state.localPrompts,
     };
     const outPath = path.join(ROOT, 'tmp', `voice_adaptive_regression_${Date.now()}.json`);
     fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
@@ -479,6 +656,12 @@ async function main() {
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
+    }
+    if (recorder) {
+      recorder.kill('SIGTERM');
+    }
+    if (whisperProc) {
+      whisperProc.kill('SIGTERM');
     }
     if (previousAudio && AUDIO_MODE === 'system') {
       try {
