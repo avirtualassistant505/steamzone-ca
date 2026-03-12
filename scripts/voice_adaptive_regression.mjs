@@ -20,12 +20,13 @@ const HEADLESS = String(process.env.VOICE_TEST_HEADLESS || '').trim().toLowerCas
 const SYSTEM_ANSWER_DELAY_MS = Number(process.env.VOICE_TEST_SYSTEM_ANSWER_DELAY_MS || 1200);
 const RECORDED_SOURCE_WAV = process.env.VOICE_TEST_RECORDED_SOURCE?.trim() || path.join(ROOT, 'tmp', 'voice_test_input_v8.wav');
 const RECORDED_SEGMENT_DIR = path.join(ROOT, 'tmp', 'voice-adaptive-recorded');
-const LOCAL_CHUNK_SECONDS = Number(process.env.VOICE_TEST_LOCAL_CHUNK_SECONDS || 6);
+const LOCAL_CHUNK_SECONDS = Number(process.env.VOICE_TEST_LOCAL_CHUNK_SECONDS || 2);
 const LOCAL_AUDIO_DIR = path.join(ROOT, 'tmp', 'voice-adaptive-local');
 const LOCAL_PROMPT = 'Steam Zone voice estimate assistant prompt.';
 const LOCAL_SUPPRESS_MS = Number(process.env.VOICE_TEST_LOCAL_SUPPRESS_MS || 7000);
 const FASTER_WHISPER_VENV = path.join(ROOT, 'tmp', 'venv-faster-whisper');
 const FASTER_WHISPER_HELPER = path.join(ROOT, 'scripts', 'voice_faster_whisper_helper.py');
+const SYNTHETIC_MIC_GAIN = Number(process.env.VOICE_TEST_SYNTHETIC_MIC_GAIN || 4);
 
 const recordedSegments = {
   initial: [5.10, 7.80],
@@ -191,12 +192,12 @@ function wavToBase64(filePath) {
 }
 
 async function installSyntheticMic(page) {
-  await page.evaluate(() => {
+  await page.addInitScript((gainValue) => {
     const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     const ctx = new AudioContext({ sampleRate: 48000 });
     const dest = ctx.createMediaStreamDestination();
     const mixer = ctx.createGain();
-    mixer.gain.value = 1;
+    mixer.gain.value = gainValue;
     mixer.connect(dest);
     const silenceBuffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
     const silenceSource = ctx.createBufferSource();
@@ -267,7 +268,7 @@ async function installSyntheticMic(page) {
       }
       return originalGetUserMedia(constraints);
     };
-  });
+  }, SYNTHETIC_MIC_GAIN);
 }
 
 async function installPreferredInputDevice(page, deviceLabel) {
@@ -486,7 +487,7 @@ async function main() {
     restoredAudio: false,
   };
   const previousAudio =
-    AUDIO_MODE === 'system'
+    AUDIO_MODE === 'system' || AUDIO_MODE === 'hybrid'
       ? {
           input: getCurrentAudioDevice('input'),
           output: getCurrentAudioDevice('output'),
@@ -504,17 +505,24 @@ async function main() {
       setAudioDevice('input', AUDIO_DEVICE);
       setAudioDevice('output', AUDIO_DEVICE);
       console.log('audio-switched', JSON.stringify({ input: getCurrentAudioDevice('input'), output: getCurrentAudioDevice('output') }));
+    } else if (AUDIO_MODE === 'hybrid') {
+      if (!hasAudioDevice(AUDIO_DEVICE, 'output')) {
+        throw new Error(`Audio device not available: ${AUDIO_DEVICE}`);
+      }
+      setAudioDevice('output', AUDIO_DEVICE);
+      console.log('audio-switched', JSON.stringify({ input: getCurrentAudioDevice('input'), output: getCurrentAudioDevice('output') }));
     }
 
     const localRunDir = path.join(LOCAL_AUDIO_DIR, String(Date.now()));
     const processedSegments = new Set();
     let transcribeChunk = null;
-    if (AUDIO_MODE === 'system' && fs.existsSync(FASTER_WHISPER_HELPER) && fs.existsSync(FASTER_WHISPER_VENV)) {
+    if ((AUDIO_MODE === 'system' || AUDIO_MODE === 'hybrid') && fs.existsSync(FASTER_WHISPER_HELPER) && fs.existsSync(FASTER_WHISPER_VENV)) {
       recorder = startLocalAudioRecorder(localRunDir);
       whisperProc = startWhisperHelper();
       transcribeChunk = createWhisperClient(whisperProc);
       state.localRunDir = localRunDir;
       state.localPrompts = [];
+      state.localRecentTexts = [];
       state.suppressUntil = 0;
     }
 
@@ -523,12 +531,11 @@ async function main() {
     const page = await context.newPage();
     if (AUDIO_MODE === 'system') {
       await installPreferredInputDevice(page, AUDIO_DEVICE);
+    } else if (AUDIO_MODE === 'js' || AUDIO_MODE === 'hybrid') {
+      await installSyntheticMic(page);
     }
 
     await page.goto(DEFAULT_URL, { waitUntil: 'domcontentloaded' });
-    if (AUDIO_MODE === 'js') {
-      await installSyntheticMic(page);
-    }
     await page.waitForTimeout(STARTUP_WAIT_MS);
     await page.locator('chat-widget').evaluate(async (el) => {
       const deep = el.shadowRoot?.querySelector('.lc_text-widget--voice-talk-button')?.shadowRoot?.querySelector('button');
@@ -578,17 +585,27 @@ async function main() {
           const localText = normalizeText(local.text);
           if (localText) {
             state.localPrompts.push({ audio: segmentPath, text: localText, at: new Date().toISOString() });
+            state.localRecentTexts.push(localText);
+            if (state.localRecentTexts.length > 4) state.localRecentTexts.shift();
             console.log('local-transcript', JSON.stringify({ audio: path.basename(segmentPath), text: localText }));
           }
           if (!localText) continue;
           if (Date.now() < (state.suppressUntil || 0)) continue;
-          const response = chooseAnswer(localText, state);
+          const combinedText = state.localRecentTexts.join(' ');
+          const response = chooseAnswer(combinedText, state) || chooseAnswer(localText, state);
           if (!response) continue;
           await sleep(500);
-          const playback = playSystemField(response.key, response.answer);
+          let playback;
+          if (AUDIO_MODE === 'hybrid') {
+            const clip = ensureRecordedSegment(response.key) || ensureClip(response.answer);
+            await page.evaluate(async (base64) => window.__voiceHarness.enqueue(base64), wavToBase64(clip));
+            playback = { mode: 'js-hybrid', path: clip };
+          } else {
+            playback = playSystemField(response.key, response.answer);
+          }
           state.suppressUntil = Date.now() + LOCAL_SUPPRESS_MS;
-          state.audioSent.push({ prompt: localText, field: response.key, answer: response.answer, playback, at: new Date().toISOString(), source: 'local-audio' });
-          console.log('answered-local', JSON.stringify({ prompt: localText, field: response.key, answer: response.answer }));
+          state.audioSent.push({ prompt: combinedText, field: response.key, answer: response.answer, playback, at: new Date().toISOString(), source: 'local-audio' });
+          console.log('answered-local', JSON.stringify({ prompt: combinedText, field: response.key, answer: response.answer }));
         }
       }
 
